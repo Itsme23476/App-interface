@@ -78,6 +78,8 @@ class FileIndex:
                     to_add.append("ALTER TABLE files ADD COLUMN ai_source TEXT")
                 if 'user_tags' not in cols:
                     to_add.append("ALTER TABLE files ADD COLUMN user_tags TEXT")
+                if 'original_date' not in cols:
+                    to_add.append("ALTER TABLE files ADD COLUMN original_date TEXT")
                 for stmt in to_add:
                     cursor.execute(stmt)
             except Exception as e:
@@ -198,6 +200,17 @@ class FileIndex:
                 except:
                     created_date = modified_date = datetime.now().isoformat()
                 
+                # Try to get original date from file metadata (EXIF, Office docs, PDFs, etc.)
+                original_date = None
+                try:
+                    from app.core.metadata_utils import get_file_original_date
+                    orig_dt = get_file_original_date(file_path)
+                    if orig_dt:
+                        original_date = orig_dt.isoformat()
+                        logger.debug(f"Original date for {file_name}: {original_date}")
+                except Exception as e:
+                    logger.debug(f"Could not get original date for {file_name}: {e}")
+                
                 indexed_date = datetime.now().isoformat()
                 
                 # Store additional metadata as JSON
@@ -221,8 +234,8 @@ class FileIndex:
                         indexed_date, has_ocr, ocr_text,
                         label, tags, caption, vision_confidence,
                         content_hash, last_indexed_at, ai_source, user_tags,
-                        metadata
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        metadata, original_date
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     file_path, file_name, file_extension, file_size,
                     mime_type, category, created_date, modified_date,
@@ -235,7 +248,8 @@ class FileIndex:
                     file_data.get('last_indexed_at', None),
                     file_data.get('ai_source', None),
                     json.dumps(file_data.get('user_tags', [])) if isinstance(file_data.get('user_tags'), list) else (file_data.get('user_tags') if isinstance(file_data.get('user_tags'), str) else None),
-                    json.dumps(metadata)
+                    json.dumps(metadata),
+                    original_date
                 ))
                 
                 # Get the rowid for FTS update
@@ -320,6 +334,7 @@ class FileIndex:
                         'created_date': row['created_date'],
                         'modified_date': row['modified_date'],
                         'indexed_date': row['indexed_date'],
+                        'original_date': row['original_date'] if 'original_date' in row.keys() else None,
                         'has_ocr': bool(row['has_ocr']),
                         'ocr_text': row['ocr_text'],
                         'label': row['label'] if 'label' in row.keys() else None,
@@ -441,6 +456,7 @@ class FileIndex:
                             'created_date': row['created_date'],
                             'modified_date': row['modified_date'],
                             'indexed_date': row['indexed_date'],
+                            'original_date': row['original_date'] if 'original_date' in row.keys() else None,
                             'has_ocr': bool(row['has_ocr']),
                             'ocr_text': row['ocr_text'],
                             'label': row['label'] if 'label' in row.keys() else None,
@@ -488,6 +504,7 @@ class FileIndex:
                         'created_date': row['created_date'],
                         'modified_date': row['modified_date'],
                         'indexed_date': row['indexed_date'],
+                        'original_date': row['original_date'] if 'original_date' in row.keys() else None,
                         'has_ocr': bool(row['has_ocr']),
                         'ocr_text': row['ocr_text'],
                         'label': row['label'] if 'label' in row.keys() else None,
@@ -566,6 +583,7 @@ class FileIndex:
                         'created_date': row['created_date'],
                         'modified_date': row['modified_date'],
                         'indexed_date': row['indexed_date'],
+                        'original_date': row['original_date'] if 'original_date' in row.keys() else None,
                         'has_ocr': bool(row['has_ocr']),
                         'ocr_text': row['ocr_text'],
                         'label': row['label'],
@@ -676,6 +694,82 @@ class FileIndex:
                 logger.info("File index cleared")
         except Exception as e:
             logger.error(f"Error clearing index: {e}")
+    
+    def resync_file_dates(self, progress_callback=None) -> Dict[str, int]:
+        """
+        Re-read file creation/modification dates from Windows filesystem
+        and extract EXIF dates for images.
+        
+        Args:
+            progress_callback: Optional callback(current, total) for progress updates
+            
+        Returns:
+            Dict with 'updated', 'not_found', 'errors', 'exif_found' counts
+        """
+        stats = {'updated': 0, 'not_found': 0, 'errors': 0, 'exif_found': 0}
+        
+        try:
+            from app.core.metadata_utils import get_file_original_date
+        except ImportError:
+            get_file_original_date = None
+            logger.warning("Metadata utils not available, skipping metadata extraction")
+        
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                
+                # Get all file paths
+                cursor.execute("SELECT id, file_path FROM files")
+                files = cursor.fetchall()
+                total = len(files)
+                
+                logger.info(f"Resyncing dates for {total} files (including EXIF extraction)...")
+                
+                for i, (file_id, file_path) in enumerate(files):
+                    try:
+                        path_obj = Path(file_path)
+                        if path_obj.exists():
+                            stat = path_obj.stat()
+                            created_date = datetime.fromtimestamp(stat.st_ctime).isoformat()
+                            modified_date = datetime.fromtimestamp(stat.st_mtime).isoformat()
+                            
+                            # Try to extract original date from file metadata
+                            original_date = None
+                            if get_file_original_date:
+                                try:
+                                    orig_dt = get_file_original_date(file_path)
+                                    if orig_dt:
+                                        original_date = orig_dt.isoformat()
+                                        stats['exif_found'] += 1  # Keep stat name for compatibility
+                                        logger.debug(f"Metadata date for {path_obj.name}: {original_date}")
+                                except Exception as e:
+                                    logger.debug(f"Metadata extraction failed for {file_path}: {e}")
+                            
+                            cursor.execute("""
+                                UPDATE files 
+                                SET created_date = ?, modified_date = ?, original_date = ?
+                                WHERE id = ?
+                            """, (created_date, modified_date, original_date, file_id))
+                            
+                            stats['updated'] += 1
+                        else:
+                            stats['not_found'] += 1
+                            logger.debug(f"File not found: {file_path}")
+                    except Exception as e:
+                        stats['errors'] += 1
+                        logger.warning(f"Error updating dates for {file_path}: {e}")
+                    
+                    if progress_callback and (i % 10 == 0 or i == total - 1):
+                        progress_callback(i + 1, total)
+                
+                conn.commit()
+                logger.info(f"Resync complete: {stats['updated']} updated, {stats['exif_found']} with metadata dates, {stats['not_found']} not found, {stats['errors']} errors")
+                
+        except Exception as e:
+            logger.error(f"Error resyncing file dates: {e}")
+            stats['errors'] += 1
+        
+        return stats
 
 
 # Global file index instance

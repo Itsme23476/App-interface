@@ -265,3 +265,233 @@ QToolTip {
     border: 1px solid #00E5FF; /* Wispr-like highlight box */
 }
 
+/* ==================== Auth Dialog Styles ==================== */
+
+/* Main dialog container */
+#authDialog {
+    background-color: #121212;
+}
+
+#authContainer {
+    background-color: #121212;
+    border: none;
+}
+
+#authPage {
+    background-color: transparent;
+}
+
+#authStack {
+    background-color: transparent;
+}
+
+/* Logo */
+#authLogo {
+    font-size: 48px;
+    background: transparent;
+    padding: 0;
+    margin: 0;
+}
+
+/* Title and subtitle */
+#authTitle {
+    color: #FFFFFF;
+    font-size: 24px;
+    font-weight: 700;
+    background: transparent;
+    letter-spacing: -0.5px;
+}
+
+#authSubtitle {
+    color: #808080;
+    font-size: 14px;
+    background: transparent;
+    margin-top: 4px;
+}
+
+#authWelcome {
+    color: #FFFFFF;
+    font-size: 20px;
+    font-weight: 600;
+    background: transparent;
+}
+
+/* Input labels */
+#authLabel {
+    color: #B0B0B0;
+    font-size: 13px;
+    font-weight: 500;
+    background: transparent;
+}
+
+/* Input fields */
+#authInput {
+    background-color: #1A1A1A;
+    border: 2px solid #2A2A2A;
+    border-radius: 10px;
+    padding: 12px 16px;
+    color: #FFFFFF;
+    font-size: 14px;
+}
+
+#authInput:hover {
+    border-color: #3A3A3A;
+}
+
+#authInput:focus {
+    border-color: #00E5FF;
+    background-color: #1E1E1E;
+}
+
+#authInput::placeholder {
+    color: #606060;
+}
+
+/* Divider line */
+#authDivider {
+    background-color: #2A2A2A;
+    border: none;
+}
+
+/* Switch label */
+#authSwitchLabel {
+    color: #707070;
+    font-size: 13px;
+    background: transparent;
+}
+
+/* Link button */
+#linkButton {
+    background: transparent;
+    border: none;
+    color: #00E5FF;
+    font-size: 13px;
+    font-weight: 600;
+    padding: 4px 8px;
+}
+
+#linkButton:hover {
+    color: #33EBFF;
+}
+
+#linkButton:pressed {
+    color: #00B8D4;
+}
+
+/* Error and status labels */
+#errorLabel {
+    color: #FF6B6B;
+    font-size: 13px;
+    background: transparent;
+}
+
+#statusLabel {
+    color: #A0A0A0;
+    font-size: 13px;
+    background: transparent;
+}
+
+/* Subscription card */
+#subscriptionCard {
+    background: qlineargradient(
+        x1: 0, y1: 0, x2: 1, y2: 1,
+        stop: 0 #1A2A35,
+        stop: 1 #152025
+    );
+    border: 1px solid #2A3A45;
+    border-radius: 16px;
+}
+
+#featuresContainer {
+    background: transparent;
+}
+
+/* Plan badge */
+#planBadge {
+    color: #00E5FF;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 2px;
+    background: rgba(0, 229, 255, 0.15);
+    border-radius: 20px;
+    padding: 6px 16px;
+}
+
+/* Price styling */
+#priceAmount {
+    color: #FFFFFF;
+    font-size: 42px;
+    font-weight: 700;
+    background: transparent;
+}
+
+#pricePeriod {
+    color: #808080;
+    font-size: 16px;
+    background: transparent;
+    padding-top: 12px;
+}
+
+/* Feature labels */
+#featureLabel {
+    color: #C0C0C0;
+    font-size: 13px;
+    background: transparent;
+    padding: 2px 0;
+}
+
+/* Primary button with gradient */
+QPushButton#primaryButton {
+    background: qlineargradient(
+        x1: 0, y1: 0, x2: 1, y2: 0,
+        stop: 0 #00B8D4,
+        stop: 1 #00E5FF
+    );
+    border: none;
+    border-radius: 10px;
+    color: #000000;
+    font-size: 15px;
+    font-weight: 600;
+}
+
+QPushButton#primaryButton:hover {
+    background: qlineargradient(
+        x1: 0, y1: 0, x2: 1, y2: 0,
+        stop: 0 #00C8E4,
+        stop: 1 #33EBFF
+    );
+}
+
+QPushButton#primaryButton:pressed {
+    background: qlineargradient(
+        x1: 0, y1: 0, x2: 1, y2: 0,
+        stop: 0 #0097A7,
+        stop: 1 #00B8D4
+    );
+}
+
+QPushButton#primaryButton:disabled {
+    background: #2A2A2A;
+    color: #606060;
+}
+
+/* Secondary button */
+QPushButton#secondaryButton {
+    background-color: transparent;
+    border: 2px solid #3A3A3A;
+    border-radius: 10px;
+    color: #B0B0B0;
+    font-size: 14px;
+    font-weight: 500;
+}
+
+QPushButton#secondaryButton:hover {
+    border-color: #00E5FF;
+    color: #00E5FF;
+    background-color: rgba(0, 229, 255, 0.08);
+}
+
+QPushButton#secondaryButton:pressed {
+    background-color: rgba(0, 229, 255, 0.15);
+}
+

@@ -182,62 +182,82 @@ class SearchService:
             logger.error(f"Error indexing directory {directory_path}: {e}")
             return {'error': str(e)}
     
-    def search_files(self, query: str, limit: int = 50) -> List[Dict[str, Any]]:
+    def search_files(self, query: str, limit: int = 50, type_filter: str = None, 
+                     date_start=None, date_end=None, extensions: list = None) -> List[Dict[str, Any]]:
         """
         Search for files using natural language queries.
         
         Args:
             query: Search query (can be natural language)
             limit: Maximum number of results
+            type_filter: Filter by file type (e.g., 'images', 'documents')
+            date_start: Filter by date - start of range (datetime)
+            date_end: Filter by date - end of range (datetime)
+            extensions: List of file extensions to filter by
             
         Returns:
             List of matching files with relevance scores
         """
         try:
+            logger.info(f"[SEARCH_FILES] query='{query}', type_filter={type_filter}, date_start={date_start}, date_end={date_end}")
+            
+            # Check if this is a date-only search (no text query)
+            is_date_only = not query.strip() and (date_start or date_end)
+            
             # Parse and prepare query
-            fts_terms, filters, debug_info = self._prepare_query(query)
+            if query.strip():
+                fts_terms, filters, debug_info = self._prepare_query(query)
+            else:
+                fts_terms, filters, debug_info = [], {}, "Date/filter-only search"
             self.last_debug_info = debug_info
 
-            # Perform keyword search (FTS + LIKE fallback)
-            results = self.index.search_files_advanced(fts_terms, filters, limit)
+            # Perform keyword search (FTS + LIKE fallback) - fetch more to allow for filtering
+            # For date-only searches, fetch more to ensure we get all files
+            if is_date_only:
+                fetch_limit = 500  # Fetch many files for date-only filtering
+                logger.info(f"[SEARCH_FILES] Date-only search, fetching up to {fetch_limit} files")
+            else:
+                fetch_limit = limit * 3 if (type_filter or date_start or extensions) else limit
+            results = self.index.search_files_advanced(fts_terms, filters, fetch_limit)
 
-            # Semantic search (local) or GPT rerank
+            # Semantic search (local) or GPT rerank - skip for date-only searches
             sem_results: List[Dict[str, Any]] = []
-            try:
-                if settings.use_openai_search_rerank and settings.openai_api_key:
-                    sem_results = self._gpt_rerank_results(query, results[: min(20, len(results))])
-                else:
-                    # Build a semantic query that includes name/label/tags/caption terms
-                    qtext = query
-                    if filters.get('label'):
-                        qtext += f" {filters['label']}"
-                    if filters.get('tags'):
-                        qtext += " " + " ".join(filters['tags'])
-                    qvec = embed_text(qtext)
-                    if qvec:
-                        # simple in-Python cosine over all embeddings
-                        import math
-                        embs = self.index.get_all_embeddings()
-                        scored: List[tuple[float, int]] = []
-                        qnorm = math.sqrt(sum(x*x for x in qvec)) or 1.0
-                        for e in embs:
-                            vec = e.get('vector') or []
-                            if not vec or len(vec) != len(qvec):
-                                continue
-                            dot = sum(a*b for a,b in zip(qvec, vec))
-                            vnorm = math.sqrt(sum(x*x for x in vec)) or 1.0
-                            cos = dot/(qnorm*vnorm)
-                            scored.append((cos, e['file_id']))
-                        scored.sort(reverse=True)
-                        top_ids = [fid for _, fid in scored[:limit]]
-                        sem_results = self.index.get_files_by_ids(top_ids)
-                        # attach semantic score as rank
-                        for (cos, fid) in scored[:limit]:
-                            for r in sem_results:
-                                if r['id'] == fid:
-                                    r['rank'] = cos*10
-            except Exception:
-                pass
+            if not is_date_only:
+                try:
+                    if settings.use_openai_search_rerank and settings.openai_api_key:
+                        sem_results = self._gpt_rerank_results(query, results[: min(20, len(results))])
+                    else:
+                        # Build a semantic query that includes name/label/tags/caption terms
+                        qtext = query
+                        if filters.get('label'):
+                            qtext += f" {filters['label']}"
+                        if filters.get('tags'):
+                            qtext += " " + " ".join(filters['tags'])
+                        qvec = embed_text(qtext)
+                        if qvec:
+                            # simple in-Python cosine over all embeddings
+                            import math
+                            embs = self.index.get_all_embeddings()
+                            scored: List[tuple[float, int]] = []
+                            qnorm = math.sqrt(sum(x*x for x in qvec)) or 1.0
+                            for e in embs:
+                                vec = e.get('vector') or []
+                                if not vec or len(vec) != len(qvec):
+                                    continue
+                                dot = sum(a*b for a,b in zip(qvec, vec))
+                                vnorm = math.sqrt(sum(x*x for x in vec)) or 1.0
+                                cos = dot/(qnorm*vnorm)
+                                scored.append((cos, e['file_id']))
+                            scored.sort(reverse=True)
+                            top_ids = [fid for _, fid in scored[:limit]]
+                            sem_results = self.index.get_files_by_ids(top_ids)
+                            # attach semantic score as rank
+                            for (cos, fid) in scored[:limit]:
+                                for r in sem_results:
+                                    if r['id'] == fid:
+                                        r['rank'] = cos*10
+                except Exception:
+                    pass
 
             # Merge keyword and semantic (simple union with max rank)
             by_id: Dict[int, Dict[str, Any]] = {}
@@ -249,6 +269,55 @@ class SearchService:
                     by_id[rid]['rank'] = max(by_id[rid].get('rank',0), r.get('rank',0))
             merged = list(by_id.values())
             merged.sort(key=lambda x: x.get('rank',0), reverse=True)
+            
+            # Apply type filter (by file extension)
+            if extensions:
+                filtered = []
+                for r in merged:
+                    file_path = r.get('file_path', '') or r.get('name', '')
+                    file_ext = Path(file_path).suffix.lower() if file_path else ''
+                    if file_ext in extensions:
+                        filtered.append(r)
+                merged = filtered
+            
+            # Apply date filter - prioritize original_date (EXIF), then modified_date, then created_date
+            if date_start or date_end:
+                from datetime import datetime
+                logger.info(f"Date filter active: start={date_start}, end={date_end}")
+                filtered = []
+                for r in merged:
+                    # Priority: original_date (EXIF) > modified_date > created_date
+                    # original_date is the actual creation date from EXIF metadata (for images)
+                    # modified_date is more reliable than created_date on Windows (preserved on copy)
+                    file_date_str = r.get('original_date') or r.get('modified_date') or r.get('created_date')
+                    logger.debug(f"File: {r.get('file_name')}, original_date={r.get('original_date')}, modified={r.get('modified_date')}")
+                    if file_date_str:
+                        try:
+                            # Parse ISO format date
+                            file_date = datetime.fromisoformat(file_date_str.replace('Z', '+00:00'))
+                            file_date = file_date.replace(tzinfo=None)
+                            
+                            # Check if within range
+                            in_range = True
+                            if date_start and file_date < date_start:
+                                logger.debug(f"  Excluded: {file_date} < {date_start}")
+                                in_range = False
+                            if date_end and file_date > date_end:
+                                logger.debug(f"  Excluded: {file_date} > {date_end}")
+                                in_range = False
+                            if in_range:
+                                filtered.append(r)
+                        except Exception as e:
+                            logger.warning(f"Date parsing failed for {r.get('file_name')}: {e}")
+                            # If date parsing fails, include the result
+                            filtered.append(r)
+                    else:
+                        logger.debug(f"  No date info for {r.get('file_name')}, including by default")
+                        # No date info, include by default
+                        filtered.append(r)
+                logger.info(f"Date filter: {len(merged)} -> {len(filtered)} results")
+                merged = filtered
+            
             merged = merged[:limit]
             
             # Enhance results with additional information

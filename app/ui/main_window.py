@@ -5,6 +5,7 @@ Main application window using PySide6.
 import logging
 from pathlib import Path
 from typing import List, Dict, Any
+from datetime import datetime
 
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
@@ -27,6 +28,11 @@ from app.core.apply import apply_moves, validate_destination_space
 from app.core.settings import settings
 from app.core.search import search_service
 from app.core.database import file_index
+from app.core.supabase_client import supabase_auth
+from app.core.query_parser import (
+    parse_query, get_date_range, TYPE_EXTENSIONS,
+    UI_DATE_MAPPING, UI_TYPE_MAPPING, FILTER_TO_UI_DATE, FILTER_TO_UI_TYPE
+)
 from app.ui.quick_search_overlay import QuickSearchOverlay
 from app.ui.win_hotkey import register_global_hotkey, unregister_global_hotkey, get_foreground_hwnd, set_foreground_hwnd, set_foreground_hwnd_robust, get_window_rect
 from app.ui.theme_manager import theme_manager
@@ -388,6 +394,35 @@ class MainWindow(QMainWindow):
         self.search_debug_label.setObjectName("secondaryLabel")
         search_group_layout.addWidget(self.search_debug_label)
         
+        # Filter row
+        filter_layout = QHBoxLayout()
+        filter_layout.addWidget(QLabel("Filters:"))
+        
+        # File type dropdown
+        self.type_filter = QComboBox()
+        self.type_filter.addItems(["All Types", "Images", "Documents", "PDFs", "Videos", "Audio", "Code"])
+        self.type_filter.setMinimumWidth(100)
+        filter_layout.addWidget(self.type_filter)
+        
+        # Date range dropdown
+        self.date_filter = QComboBox()
+        self.date_filter.addItems(["Any Time", "Today", "Yesterday", "This Week", "This Month", "This Year"])
+        self.date_filter.setMinimumWidth(100)
+        filter_layout.addWidget(self.date_filter)
+        
+        # Clear filters button
+        self.clear_filters_btn = QPushButton("Clear Filters")
+        self.clear_filters_btn.setToolTip("Reset all filters")
+        filter_layout.addWidget(self.clear_filters_btn)
+        
+        # Filter status label
+        self.filter_status_label = QLabel("")
+        self.filter_status_label.setObjectName("secondaryLabel")
+        filter_layout.addWidget(self.filter_status_label)
+        
+        filter_layout.addStretch()
+        search_group_layout.addLayout(filter_layout)
+        
         # Search results
         self.search_results_table = QTableWidget()
         self.search_results_table.setShowGrid(False)
@@ -441,6 +476,7 @@ class MainWindow(QMainWindow):
         self.debug_table.setShowGrid(False)
         self.debug_table.setAlternatingRowColors(True)
         self.debug_table.setColumnCount(15)
+        self.debug_table.verticalHeader().setDefaultSectionSize(32)  # Default row height
         self.debug_table.setHorizontalHeaderLabels([
             "File Name", "Category", "Size", "Has OCR", "Label", "Tags", "Caption", "OCR Text Preview", "AI Source", "Vision Score", "Purpose", "Suggested Filename", "Detected Text", "File Path", "Actions"
         ])
@@ -465,7 +501,7 @@ class MainWindow(QMainWindow):
         debug_header.setSectionResizeMode(13, QHeaderView.Interactive)  # File Path
         self.debug_table.setColumnWidth(13, 300)
         debug_header.setSectionResizeMode(14, QHeaderView.Interactive)  # Actions
-        self.debug_table.setColumnWidth(14, 130)  # Action buttons
+        self.debug_table.setColumnWidth(14, 140)  # Action buttons
         debug_layout.addWidget(self.debug_table)
         
         # Debug info
@@ -586,6 +622,71 @@ class MainWindow(QMainWindow):
         qs_layout.addLayout(qs_row2)
 
         layout.addWidget(qs_group)
+        
+        # Database Maintenance section
+        db_group = QGroupBox("Database Maintenance")
+        db_layout = QVBoxLayout(db_group)
+        
+        # Resync file dates button
+        resync_row = QHBoxLayout()
+        self.resync_dates_btn = QPushButton("🔄 Extract File Dates from Metadata")
+        self.resync_dates_btn.setToolTip(
+            "Extract original dates from file metadata:\n"
+            "• EXIF dates from photos (JPEG, etc.)\n"
+            "• Creation dates from Office docs (Word, Excel, PowerPoint)\n"
+            "• Creation dates from PDFs\n"
+            "• Dates from filenames (screenshots)\n"
+            "• Modified dates as fallback"
+        )
+        self.resync_dates_btn.clicked.connect(self._resync_file_dates)
+        resync_row.addWidget(self.resync_dates_btn)
+        self.resync_status_label = QLabel("")
+        self.resync_status_label.setObjectName("secondaryLabel")
+        resync_row.addWidget(self.resync_status_label)
+        resync_row.addStretch()
+        db_layout.addLayout(resync_row)
+        
+        layout.addWidget(db_group)
+        
+        # Account Management section
+        account_group = QGroupBox("Account")
+        account_layout = QVBoxLayout(account_group)
+        
+        # Email display
+        email_row = QHBoxLayout()
+        email_row.addWidget(QLabel("Email:"))
+        self.account_email_label = QLabel("Not logged in")
+        self.account_email_label.setObjectName("secondaryLabel")
+        email_row.addWidget(self.account_email_label)
+        email_row.addStretch()
+        account_layout.addLayout(email_row)
+        
+        # Subscription status
+        sub_row = QHBoxLayout()
+        sub_row.addWidget(QLabel("Subscription:"))
+        self.account_sub_label = QLabel("No subscription")
+        self.account_sub_label.setObjectName("secondaryLabel")
+        sub_row.addWidget(self.account_sub_label)
+        sub_row.addStretch()
+        account_layout.addLayout(sub_row)
+        
+        # Buttons row
+        button_row = QHBoxLayout()
+        self.refresh_account_btn = QPushButton("Refresh Account Info")
+        self.refresh_account_btn.clicked.connect(self._refresh_account_info)
+        button_row.addWidget(self.refresh_account_btn)
+        
+        self.signout_btn = QPushButton("Sign Out")
+        self.signout_btn.clicked.connect(self._sign_out)
+        button_row.addWidget(self.signout_btn)
+        button_row.addStretch()
+        account_layout.addLayout(button_row)
+        
+        layout.addWidget(account_group)
+        
+        # Load account info on startup
+        self._refresh_account_info()
+        
         layout.addStretch()
 
         self.tab_widget.addTab(settings_widget, "Settings")
@@ -606,6 +707,128 @@ class MainWindow(QMainWindow):
         self._update_theme_button()
         self.status_bar.showMessage(f"Switched to {new_theme} mode", 3000)
     
+    def _refresh_account_info(self):
+        """Refresh and display account information."""
+        if supabase_auth.is_authenticated:
+            # Display email
+            email = supabase_auth.user_email or "Unknown"
+            self.account_email_label.setText(email)
+            
+            # Check subscription status
+            result = supabase_auth.check_subscription()
+            if result.get('has_subscription'):
+                status = result.get('status', 'active')
+                expires_at = result.get('expires_at', 'N/A')
+                if expires_at and expires_at != 'N/A':
+                    try:
+                        # Format the date nicely
+                        dt = datetime.fromisoformat(expires_at.replace('Z', '+00:00'))
+                        expires_str = dt.strftime('%Y-%m-%d')
+                        self.account_sub_label.setText(f"✓ Active (until {expires_str})")
+                    except Exception:
+                        self.account_sub_label.setText(f"✓ Active ({status})")
+                else:
+                    self.account_sub_label.setText(f"✓ Active ({status})")
+                self.account_sub_label.setStyleSheet("color: #00E5FF;")
+            else:
+                status = result.get('status')
+                if status:
+                    self.account_sub_label.setText(f"⚠ {status}")
+                else:
+                    self.account_sub_label.setText("No subscription")
+                self.account_sub_label.setStyleSheet("color: #FF6B6B;")
+        else:
+            self.account_email_label.setText("Not logged in")
+            self.account_sub_label.setText("No subscription")
+            self.account_sub_label.setStyleSheet("")
+    
+    def _sign_out(self):
+        """Sign out the current user and show login dialog."""
+        reply = QMessageBox.question(
+            self,
+            "Sign Out",
+            "Are you sure you want to sign out?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        
+        if reply == QMessageBox.Yes:
+            # Sign out from Supabase
+            supabase_auth.sign_out()
+            settings.clear_auth_tokens()
+            
+            # Hide main window
+            self.hide()
+            
+            # Show auth dialog again
+            from app.ui.auth_dialog import AuthDialog
+            auth_dialog = AuthDialog()
+            
+            if auth_dialog.exec():
+                # User logged in successfully, refresh account info and show window
+                self._refresh_account_info()
+                self.show()
+                self.status_bar.showMessage("Welcome back!", 3000)
+            else:
+                # User cancelled login, close app
+                QApplication.quit()
+    
+    def _resync_file_dates(self):
+        """Resync file dates from Windows filesystem."""
+        reply = QMessageBox.question(
+            self,
+            "Resync File Dates",
+            "This will re-read file creation and modification dates from Windows\n"
+            "for all indexed files. This may take a moment.\n\n"
+            "Continue?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes
+        )
+        
+        if reply != QMessageBox.Yes:
+            return
+        
+        self.resync_dates_btn.setEnabled(False)
+        self.resync_status_label.setText("Resyncing...")
+        QApplication.processEvents()
+        
+        try:
+            # Perform the resync
+            from app.core.database import file_index
+            
+            def progress_callback(current, total):
+                self.resync_status_label.setText(f"Processing {current}/{total}...")
+                QApplication.processEvents()
+            
+            stats = file_index.resync_file_dates(progress_callback)
+            
+            # Show result
+            self.resync_status_label.setText(
+                f"Done: {stats['updated']} updated, {stats['not_found']} not found"
+            )
+            
+            metadata_count = stats.get('exif_found', 0)
+            QMessageBox.information(
+                self,
+                "Resync Complete",
+                f"File dates resynced:\n\n"
+                f"• Updated: {stats['updated']} files\n"
+                f"• Metadata dates extracted: {metadata_count} files\n"
+                f"  (from EXIF, Office docs, PDFs, filenames)\n"
+                f"• Not found: {stats['not_found']} files\n"
+                f"• Errors: {stats['errors']} files\n\n"
+                "Date filters now use the best available date\n"
+                "for each file type."
+            )
+            
+        except Exception as e:
+            logger.error(f"Error resyncing file dates: {e}")
+            self.resync_status_label.setText("Error!")
+            QMessageBox.warning(self, "Error", f"Failed to resync file dates:\n{e}")
+        
+        finally:
+            self.resync_dates_btn.setEnabled(True)
+    
     def setup_connections(self):
         """Setup signal connections."""
         # Organize tab connections - Hidden for MVP (search-only mode)
@@ -619,6 +842,11 @@ class MainWindow(QMainWindow):
         self.index_button_action.clicked.connect(self.index_directory)
         self.search_button.clicked.connect(self.search_files)
         self.search_input.returnPressed.connect(self.search_files)
+        
+        # Filter connections
+        self.type_filter.currentIndexChanged.connect(self._on_filter_changed)
+        self.date_filter.currentIndexChanged.connect(self._on_filter_changed)
+        self.clear_filters_btn.clicked.connect(self._clear_filters)
         
         # Quick index options
         self.index_pc_button.clicked.connect(self.on_index_entire_pc)
@@ -2512,16 +2740,113 @@ Move Plan Summary:
         self.search_button.setEnabled(has_index and has_query)
     
     def search_files(self):
-        """Search for files."""
+        """Search for files with NLP parsing and filters."""
         query = self.search_input.text().strip()
-        if not query:
+        
+        # Check if we have UI filters even without a query
+        ui_type = self.type_filter.currentText()
+        ui_date = self.date_filter.currentText()
+        has_ui_filters = ui_type != "All Types" or ui_date != "Any Time"
+        
+        if not query and not has_ui_filters:
             return
         
-        self.status_bar.showMessage(f"Searching for: {query}")
+        self.status_bar.showMessage(f"Searching for: {query}" if query else "Browsing files...")
         
-        # Perform search
-        results = search_service.search_files(query, limit=100)
+        # Parse query for natural language filters
+        parsed = parse_query(query) if query else {'clean_query': '', 'date_filter': None, 'type_filter': None, 'date_range': (None, None), 'extensions': None}
+        clean_query = parsed['clean_query']
+        
+        # UI filters already retrieved above
+        
+        # Determine type filter (NLP detected takes priority over UI)
+        type_filter = parsed['type_filter']
+        extensions = parsed['extensions']
+        
+        if type_filter:
+            # NLP detected a type filter - it takes priority
+            # Update UI dropdown to reflect the detected filter
+            ui_name = FILTER_TO_UI_TYPE.get(type_filter)
+            if ui_name:
+                idx = self.type_filter.findText(ui_name)
+                if idx >= 0:
+                    self.type_filter.blockSignals(True)
+                    self.type_filter.setCurrentIndex(idx)
+                    self.type_filter.blockSignals(False)
+            extensions = TYPE_EXTENSIONS.get(type_filter, [])
+        elif ui_type != "All Types":
+            # No NLP type filter - use UI dropdown selection
+            type_filter = UI_TYPE_MAPPING.get(ui_type)
+            extensions = TYPE_EXTENSIONS.get(type_filter, [])
+        
+        # Determine date filter (NLP detected takes priority over UI)
+        date_filter = parsed['date_filter']
+        date_start, date_end = parsed['date_range']
+        specific_date = parsed.get('specific_date')  # For display purposes
+        logger.info(f"[SEARCH] ui_date='{ui_date}', NLP date_filter='{date_filter}', specific_date='{specific_date}'")
+        
+        if date_filter:
+            # NLP detected a date filter - it takes priority
+            # Check if it's a specific date (parsed by dateparser)
+            if date_filter.startswith('specific_date:'):
+                # Specific date - date_start and date_end already set by parser
+                # Reset UI dropdown since this is a custom date
+                self.date_filter.blockSignals(True)
+                self.date_filter.setCurrentIndex(0)  # "Any Time"
+                self.date_filter.blockSignals(False)
+                logger.info(f"[SEARCH] Specific date: {specific_date}, range={date_start} to {date_end}")
+            else:
+                # Standard date filter (today, yesterday, etc.)
+                # Update UI dropdown to reflect the detected filter
+                ui_name = FILTER_TO_UI_DATE.get(date_filter)
+                if ui_name:
+                    idx = self.date_filter.findText(ui_name)
+                    if idx >= 0:
+                        self.date_filter.blockSignals(True)
+                        self.date_filter.setCurrentIndex(idx)
+                        self.date_filter.blockSignals(False)
+                # Use the NLP-detected date range (recalculate for standard filters)
+                date_start, date_end = get_date_range(date_filter)
+                logger.info(f"[SEARCH] NLP standard: date_filter='{date_filter}', date_start={date_start}, date_end={date_end}")
+        elif ui_date != "Any Time":
+            # No NLP date filter - use UI dropdown selection
+            date_filter = UI_DATE_MAPPING.get(ui_date)
+            date_start, date_end = get_date_range(date_filter) if date_filter else (None, None)
+            logger.info(f"[SEARCH] UI filter: date_filter='{date_filter}', date_start={date_start}, date_end={date_end}")
+        
+        # Update filter status label
+        filter_parts = []
+        if type_filter:
+            filter_parts.append(f"Type: {type_filter}")
+        if date_filter:
+            # Show user-friendly date label
+            if specific_date:
+                filter_parts.append(f"Date: {specific_date}")
+            else:
+                filter_parts.append(f"Date: {date_filter}")
+        if filter_parts:
+            self.filter_status_label.setText(f"Active: {', '.join(filter_parts)}")
+        else:
+            self.filter_status_label.setText("")
+        
+        # Determine search query - use empty string for date-only searches
+        # Note: clean_query can be empty string "" for date-only searches, which is valid
+        search_query = clean_query  # Use clean_query directly (can be empty string)
+        is_date_only_search = (search_query == "") and (date_start or date_end)
+        
+        logger.info(f"[SEARCH] search_query='{search_query}', is_date_only={is_date_only_search}")
+        
+        # Perform search with filters
+        results = search_service.search_files(
+            search_query,  # Pass empty string for date-only searches
+            limit=100,
+            type_filter=type_filter,
+            date_start=date_start,
+            date_end=date_end,
+            extensions=extensions
+        )
         self._last_search_results = results  # cache for editing
+        
         # Show parsed query debug info if available
         dbg = getattr(search_service, 'last_debug_info', '')
         if dbg:
@@ -2532,7 +2857,31 @@ Move Plan Summary:
         # Display results
         self.display_search_results(results)
         
-        self.status_bar.showMessage(f"Found {len(results)} results for '{query}'")
+        # Update status message
+        if is_date_only_search:
+            date_label = specific_date if specific_date else date_filter
+            self.status_bar.showMessage(f"Found {len(results)} files from {date_label}")
+        else:
+            self.status_bar.showMessage(f"Found {len(results)} results for '{query}'")
+    
+    def _on_filter_changed(self):
+        """Re-run search when filter dropdowns change."""
+        if self.search_input.text().strip():
+            self.search_files()
+    
+    def _clear_filters(self):
+        """Clear all search filters and reset dropdowns."""
+        self.type_filter.blockSignals(True)
+        self.date_filter.blockSignals(True)
+        self.type_filter.setCurrentIndex(0)  # "All Types"
+        self.date_filter.setCurrentIndex(0)  # "Any Time"
+        self.type_filter.blockSignals(False)
+        self.date_filter.blockSignals(False)
+        self.filter_status_label.setText("")
+        
+        # Re-run search if there's a query
+        if self.search_input.text().strip():
+            self.search_files()
     
     def display_search_results(self, results: List[Dict[str, Any]]):
         """Display search results in the table."""
@@ -2866,8 +3215,9 @@ Move Plan Summary:
                 # Actions (Copy, Open)
                 actions_widget = QWidget()
                 actions_layout = QHBoxLayout(actions_widget)
-                actions_layout.setContentsMargins(2, 2, 2, 2)
-                actions_layout.setSpacing(4)
+                actions_layout.setContentsMargins(4, 2, 4, 2)
+                actions_layout.setSpacing(6)
+                actions_layout.setAlignment(Qt.AlignVCenter)
                 
                 btn_style = """
                     QPushButton {
@@ -2876,9 +3226,10 @@ Move Plan Summary:
                         font-size: 11px;
                         font-weight: bold;
                         border: none;
-                        border-radius: 3px;
-                        padding: 0px;
-                        margin: 0px;
+                        border-radius: 4px;
+                        padding: 2px 6px;
+                        min-height: 26px;
+                        max-height: 26px;
                     }
                     QPushButton:hover {
                         background-color: #00ACC1;
@@ -2887,8 +3238,10 @@ Move Plan Summary:
                 
                 btn_copy = QPushButton("Copy")
                 btn_open = QPushButton("Open")
-                btn_copy.setFixedSize(42, 18)
-                btn_open.setFixedSize(42, 18)
+                btn_copy.setFixedHeight(26)
+                btn_open.setFixedHeight(26)
+                btn_copy.setMinimumWidth(48)
+                btn_open.setMinimumWidth(48)
                 btn_copy.setStyleSheet(btn_style)
                 btn_open.setStyleSheet(btn_style)
                 btn_copy.setToolTip("Copy file path to clipboard")
@@ -2896,6 +3249,9 @@ Move Plan Summary:
                 actions_layout.addWidget(btn_copy)
                 actions_layout.addWidget(btn_open)
                 self.debug_table.setCellWidget(row_idx, 14, actions_widget)
+                
+                # Set row height to fit buttons properly
+                self.debug_table.setRowHeight(row_idx, 32)
                 
                 # Connect actions
                 btn_copy.clicked.connect(lambda _, p=file_path_val: self.copy_path_to_clipboard(p))

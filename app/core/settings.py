@@ -32,6 +32,10 @@ class Settings:
         self.theme: str = 'dark'
         # Auto-index downloads folder
         self.auto_index_downloads: bool = False
+        # Auth tokens (stored securely)
+        self.auth_access_token: str = ''
+        self.auth_refresh_token: str = ''
+        self.auth_user_email: str = ''
         # Load persisted config if available
         try:
             self._load_config()
@@ -162,6 +166,10 @@ class Settings:
             self.theme = theme
         # Auto-index downloads
         self.auto_index_downloads = bool(data.get('auto_index_downloads', False))
+        # Auth tokens
+        self.auth_access_token = data.get('auth_access_token', '')
+        self.auth_refresh_token = data.get('auth_refresh_token', '')
+        self.auth_user_email = data.get('auth_user_email', '')
 
     def _save_config(self) -> None:
         cfg = {
@@ -177,6 +185,9 @@ class Settings:
             'quick_search_geometry': self.quick_search_geometry,
             'theme': self.theme,
             'auto_index_downloads': self.auto_index_downloads,
+            'auth_access_token': self.auth_access_token,
+            'auth_refresh_token': self.auth_refresh_token,
+            'auth_user_email': self.auth_user_email,
         }
         try:
             with open(self._config_file(), 'w', encoding='utf-8') as f:
@@ -213,6 +224,24 @@ class Settings:
         """Enable or disable auto-indexing of Downloads folder."""
         self.auto_index_downloads = bool(enabled)
         self._save_config()
+
+    def set_auth_tokens(self, access_token: str, refresh_token: str, email: str = '') -> None:
+        """Store authentication tokens securely."""
+        self.auth_access_token = access_token or ''
+        self.auth_refresh_token = refresh_token or ''
+        self.auth_user_email = email or ''
+        self._save_config()
+
+    def clear_auth_tokens(self) -> None:
+        """Clear stored authentication tokens (logout)."""
+        self.auth_access_token = ''
+        self.auth_refresh_token = ''
+        self.auth_user_email = ''
+        self._save_config()
+
+    def has_stored_session(self) -> bool:
+        """Check if we have stored auth tokens."""
+        return bool(self.auth_access_token and self.auth_refresh_token)
 
 
 # Global settings instance
