@@ -212,16 +212,32 @@ QLabel#headingLabel {
 
 /* Progress Bar */
 QProgressBar {
-    border: none;
-    background-color: #E0E0E0;
-    border-radius: 2px;
-    height: 4px;
+    border: 1px solid #999;
+    background-color: #D0D0D0;
+    border-radius: 8px;
+    min-height: 24px;
+    max-height: 30px;
     text-align: center;
+    font-weight: bold;
+    font-size: 12px;
+    color: #000000;
+    padding: 2px;
 }
 
 QProgressBar::chunk {
-    background-color: #00B8D4;
-    border-radius: 2px;
+    background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #00B8D4, stop:1 #00E5FF);
+    border-radius: 6px;
+    margin: 1px;
+}
+
+/* Paused Progress Bar */
+QProgressBar[paused="true"] {
+    border: 2px solid #FFA500;
+    background-color: #FFE0B0;
+}
+
+QProgressBar[paused="true"]::chunk {
+    background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #FF8C00, stop:1 #FFA500);
 }
 
 /* Tooltips */
@@ -525,3 +541,64 @@ QPushButton#secondaryButton:pressed {
     background-color: rgba(0, 184, 212, 0.1);
 }
 
+/* ==================== Quick Actions Bar ==================== */
+
+#quickActionsBar {
+    background: qlineargradient(
+        x1: 0, y1: 0, x2: 0, y2: 1,
+        stop: 0 #E8F4F8,
+        stop: 1 #E0EEF2
+    );
+    border: 1px solid #C8DDE5;
+    border-radius: 8px;
+    margin: 4px 0;
+}
+
+#selectionLabel {
+    color: #00838F;
+    font-size: 13px;
+    font-weight: 600;
+    background: transparent;
+    padding: 4px 8px;
+}
+
+#quickActionBtn {
+    background-color: #FFFFFF;
+    border: 1px solid #C8DDE5;
+    border-radius: 6px;
+    padding: 6px 12px;
+    color: #444444;
+    font-size: 12px;
+    font-weight: 500;
+}
+
+#quickActionBtn:hover {
+    background-color: #00B8D4;
+    color: #FFFFFF;
+    border-color: #00B8D4;
+}
+
+#quickActionBtn:pressed {
+    background-color: #00ACC1;
+    border-color: #00ACC1;
+}
+
+#quickActionBtnSecondary {
+    background-color: transparent;
+    border: 1px solid #C8DDE5;
+    border-radius: 6px;
+    padding: 6px 12px;
+    color: #666666;
+    font-size: 12px;
+    font-weight: 500;
+}
+
+#quickActionBtnSecondary:hover {
+    border-color: #00B8D4;
+    color: #00838F;
+    background-color: rgba(0, 184, 212, 0.08);
+}
+
+#quickActionBtnSecondary:pressed {
+    background-color: rgba(0, 184, 212, 0.15);
+}

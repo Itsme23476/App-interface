@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (
     QFileDialog, QMessageBox, QProgressBar, QStatusBar,
     QHeaderView, QGroupBox, QTextEdit, QSplitter, QTabWidget,
     QLineEdit, QCompleter, QListWidget, QListWidgetItem, QComboBox,
-    QApplication
+    QApplication, QCheckBox, QProgressDialog, QInputDialog, QFrame
 )
 from PySide6.QtCore import Qt, QThread, Signal, QTimer, QUrl
 from PySide6.QtGui import QFont, QIcon, QDesktopServices, QShortcut, QKeySequence
@@ -75,15 +75,47 @@ class ScanWorker(QThread):
 
 
 class IndexWorker(QThread):
-    """Worker thread for directory indexing."""
+    """Worker thread for directory indexing with pause/resume support."""
     
     index_completed = Signal(dict)
     index_error = Signal(str)
     progress_updated = Signal(str)
+    progress_percent = Signal(int, int, int)  # current, total, percent
+    progress_data = Signal(int, int, str)  # done, total, message - for UI updates
     
     def __init__(self, directory_path: Path):
         super().__init__()
         self.directory_path = directory_path
+        self._paused = False
+        self._cancelled = False
+        self._pause_condition = None
+    
+    def pause(self):
+        """Pause the indexing process."""
+        self._paused = True
+    
+    def resume(self):
+        """Resume the indexing process."""
+        self._paused = False
+    
+    def cancel(self):
+        """Cancel the indexing process."""
+        self._cancelled = True
+        self._paused = False  # Unpause so it can exit
+    
+    def is_paused(self) -> bool:
+        """Check if indexing is paused."""
+        return self._paused
+    
+    def is_cancelled(self) -> bool:
+        """Check if indexing was cancelled."""
+        return self._cancelled
+    
+    def wait_if_paused(self):
+        """Block while paused (called from indexing loop)."""
+        while self._paused and not self._cancelled:
+            import time
+            time.sleep(0.1)  # Check every 100ms
     
     def run(self):
         try:
@@ -92,6 +124,50 @@ class IndexWorker(QThread):
             self.index_completed.emit(result)
         except Exception as e:
             self.index_error.emit(str(e))
+
+
+class BatchOperationWorker(QThread):
+    """Worker thread for batch file operations to prevent UI freezing."""
+    
+    operation_completed = Signal(dict)  # Result stats
+    operation_error = Signal(str)
+    progress_updated = Signal(int, int, str)  # current, total, message
+    
+    def __init__(self, operation: str, file_ids: list = None, file_paths: list = None, extra_data: dict = None):
+        super().__init__()
+        self.operation = operation
+        self.file_ids = file_ids or []
+        self.file_paths = file_paths or []
+        self.extra_data = extra_data or {}
+        self._cancelled = False
+    
+    def cancel(self):
+        """Request cancellation of the operation."""
+        self._cancelled = True
+    
+    def run(self):
+        """Execute the batch operation."""
+        try:
+            from app.core.file_operations import get_file_operations
+            file_ops = get_file_operations()
+            
+            if self.operation == 'remove':
+                result = file_ops.remove_from_index(self.file_ids)
+            elif self.operation == 'reindex':
+                def progress_cb(current, total):
+                    if not self._cancelled:
+                        self.progress_updated.emit(current, total, f"Re-indexing file {current}/{total}...")
+                result = file_ops.reindex_files(self.file_paths, progress_callback=progress_cb)
+            elif self.operation == 'add_tags':
+                tags = self.extra_data.get('tags', [])
+                result = file_ops.batch_add_tags(self.file_ids, tags)
+            else:
+                result = {'error': f'Unknown operation: {self.operation}'}
+            
+            self.operation_completed.emit(result)
+            
+        except Exception as e:
+            self.operation_error.emit(str(e))
 
 
 class AutoIndexWorker(QThread):
@@ -194,9 +270,16 @@ class MainWindow(QMainWindow):
         self.scanned_files = []
         self.move_plan = []
         
+        # Indexing queue system
+        self.index_queue = []  # List of Path objects to index
+        self.is_indexing = False  # Whether indexing is in progress
+        
         self.setup_ui()
         self.setup_connections()
         self.setup_quick_search()
+        
+        # Enable drag and drop
+        self.setAcceptDrops(True)
         
         # Initialize auto-index if enabled
         if settings.auto_index_downloads:
@@ -311,8 +394,27 @@ class MainWindow(QMainWindow):
         search_layout = QVBoxLayout(search_widget)
         
         # Indexing group
-        index_group = QGroupBox("Index Directory for Search")
-        index_layout = QVBoxLayout(index_group)
+        self.index_group = QGroupBox("Index Directory for Search")
+        index_layout = QVBoxLayout(self.index_group)
+        
+        # Drop zone for drag and drop
+        self.drop_zone = QLabel("📁 Drag & drop files or folders here to index them")
+        self.drop_zone.setAlignment(Qt.AlignCenter)
+        self.drop_zone.setFixedHeight(70)  # Fixed height to prevent expansion
+        self.drop_zone.setStyleSheet("""
+            QLabel {
+                border: 2px dashed #00B8D4;
+                border-radius: 8px;
+                background-color: rgba(0, 184, 212, 0.05);
+                color: #00B8D4;
+                font-size: 13px;
+                padding: 10px;
+            }
+        """)
+        index_layout.addWidget(self.drop_zone)
+        
+        # Add spacing after drop zone
+        index_layout.addSpacing(15)
         
         # Index folder selection
         index_folder_layout = QHBoxLayout()
@@ -329,12 +431,93 @@ class MainWindow(QMainWindow):
         self.index_button_action.setEnabled(False)
         index_layout.addWidget(self.index_button_action)
         
-        # Progress bar for indexing
+        # Pause and Cancel buttons side by side (hidden until indexing starts)
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(10)
+        
+        self.index_pause_btn = QPushButton("⏸ Pause")
+        self.index_pause_btn.setObjectName("secondaryButton")
+        self.index_pause_btn.setVisible(False)
+        self.index_pause_btn.setMinimumWidth(120)
+        btn_row.addWidget(self.index_pause_btn)
+        
+        self.index_cancel_btn = QPushButton("✕ Cancel")
+        self.index_cancel_btn.setVisible(False)
+        self.index_cancel_btn.setMinimumWidth(120)
+        btn_row.addWidget(self.index_cancel_btn)
+        
+        index_layout.addLayout(btn_row)
+        
+        # Progress bar for indexing with percentage
         self.progress_bar = QProgressBar()
         self.progress_bar.setVisible(False)
+        self.progress_bar.setTextVisible(True)
+        self.progress_bar.setFormat("%p% complete (%v / %m files)")
+        self.progress_bar.setMinimumWidth(300)
+        self.progress_bar.setMinimumHeight(25)
+        self.progress_bar.setProperty("paused", False)
         index_layout.addWidget(self.progress_bar)
         
-        search_layout.addWidget(index_group)
+        # Prominent percentage label
+        self.index_percent_label = QLabel("0%")
+        self.index_percent_label.setStyleSheet("font-size: 18px; font-weight: bold; color: #00B8D4;")
+        self.index_percent_label.setAlignment(Qt.AlignCenter)
+        self.index_percent_label.setVisible(False)
+        index_layout.addWidget(self.index_percent_label)
+        
+        # Progress label for current file
+        self.index_progress_label = QLabel("")
+        self.index_progress_label.setObjectName("secondaryLabel")
+        self.index_progress_label.setVisible(False)
+        index_layout.addWidget(self.index_progress_label)
+        
+        # Spacer before queue row (expands when queue is visible)
+        self.queue_top_spacer = QWidget()
+        self.queue_top_spacer.setFixedHeight(0)
+        self.queue_top_spacer.setVisible(False)
+        index_layout.addWidget(self.queue_top_spacer)
+        
+        # Queue indicator row with proper spacing
+        self.queue_row = QFrame()  # Use QFrame for proper border styling
+        self.queue_row.setObjectName("queueRow")
+        self.queue_row.setVisible(False)
+        self.queue_row.setMinimumHeight(45)
+        self.queue_row.setStyleSheet("""
+            QFrame#queueRow {
+                background-color: rgba(0, 184, 212, 0.15);
+                border: 1px solid rgba(0, 184, 212, 0.3);
+                border-radius: 6px;
+            }
+        """)
+        queue_row_layout = QHBoxLayout(self.queue_row)
+        queue_row_layout.setContentsMargins(12, 10, 12, 10)
+        queue_row_layout.setSpacing(12)
+        
+        self.queue_label = QLabel("📋 Queue: 0 pending")
+        self.queue_label.setStyleSheet("color: #00B8D4; font-weight: bold; font-size: 13px; background: transparent;")
+        queue_row_layout.addWidget(self.queue_label)
+        
+        self.queue_items_label = QLabel("")
+        self.queue_items_label.setStyleSheet("color: #888888; font-size: 12px; background: transparent;")
+        queue_row_layout.addWidget(self.queue_items_label)
+        
+        queue_row_layout.addStretch()
+        
+        self.clear_queue_btn = QPushButton("Clear")
+        self.clear_queue_btn.setMaximumWidth(60)
+        self.clear_queue_btn.setMaximumHeight(24)
+        self.clear_queue_btn.clicked.connect(self._clear_index_queue)
+        queue_row_layout.addWidget(self.clear_queue_btn)
+        
+        index_layout.addWidget(self.queue_row)
+        
+        # Add a spacer that will expand when queue is visible
+        self.queue_spacer = QWidget()
+        self.queue_spacer.setFixedHeight(0)  # Initially no extra space
+        self.queue_spacer.setVisible(False)
+        index_layout.addWidget(self.queue_spacer)
+        
+        search_layout.addWidget(self.index_group)
         
         # Quick Index Options group
         quick_index_group = QGroupBox("Quick Index Options")
@@ -423,29 +606,92 @@ class MainWindow(QMainWindow):
         filter_layout.addStretch()
         search_group_layout.addLayout(filter_layout)
         
+        # Quick Actions bar (hidden by default, shown when files selected)
+        self.quick_actions_widget = QWidget()
+        self.quick_actions_widget.setObjectName("quickActionsBar")
+        quick_actions_layout = QHBoxLayout(self.quick_actions_widget)
+        quick_actions_layout.setContentsMargins(8, 6, 8, 6)
+        quick_actions_layout.setSpacing(8)
+        
+        # Selection counter
+        self.selection_count_label = QLabel("0 files selected")
+        self.selection_count_label.setObjectName("selectionLabel")
+        quick_actions_layout.addWidget(self.selection_count_label)
+        
+        quick_actions_layout.addWidget(self._create_separator())
+        
+        # Action buttons
+        self.action_remove_btn = QPushButton("🗑️ Remove from Index")
+        self.action_remove_btn.setToolTip("Remove selected files from the index (files stay on PC)")
+        self.action_remove_btn.setObjectName("quickActionBtn")
+        quick_actions_layout.addWidget(self.action_remove_btn)
+        
+        self.action_reindex_btn = QPushButton("🔄 Re-index")
+        self.action_reindex_btn.setToolTip("Re-scan selected files to update metadata")
+        self.action_reindex_btn.setObjectName("quickActionBtn")
+        quick_actions_layout.addWidget(self.action_reindex_btn)
+        
+        self.action_add_tags_btn = QPushButton("🏷️ Add Tags")
+        self.action_add_tags_btn.setToolTip("Add tags to selected files")
+        self.action_add_tags_btn.setObjectName("quickActionBtn")
+        quick_actions_layout.addWidget(self.action_add_tags_btn)
+        
+        self.action_copy_paths_btn = QPushButton("📋 Copy Paths")
+        self.action_copy_paths_btn.setToolTip("Copy file paths to clipboard")
+        self.action_copy_paths_btn.setObjectName("quickActionBtn")
+        quick_actions_layout.addWidget(self.action_copy_paths_btn)
+        
+        self.action_open_folders_btn = QPushButton("📂 Open Folders")
+        self.action_open_folders_btn.setToolTip("Open containing folders in Explorer")
+        self.action_open_folders_btn.setObjectName("quickActionBtn")
+        quick_actions_layout.addWidget(self.action_open_folders_btn)
+        
+        self.action_export_btn = QPushButton("📤 Export List")
+        self.action_export_btn.setToolTip("Export selected files to CSV or TXT")
+        self.action_export_btn.setObjectName("quickActionBtn")
+        quick_actions_layout.addWidget(self.action_export_btn)
+        
+        quick_actions_layout.addStretch()
+        
+        # Select All / Clear Selection buttons
+        self.action_select_all_btn = QPushButton("Select All")
+        self.action_select_all_btn.setObjectName("quickActionBtnSecondary")
+        quick_actions_layout.addWidget(self.action_select_all_btn)
+        
+        self.action_clear_selection_btn = QPushButton("Clear Selection")
+        self.action_clear_selection_btn.setObjectName("quickActionBtnSecondary")
+        quick_actions_layout.addWidget(self.action_clear_selection_btn)
+        
+        self.quick_actions_widget.setVisible(False)  # Hidden until files selected
+        search_group_layout.addWidget(self.quick_actions_widget)
+        
         # Search results
         self.search_results_table = QTableWidget()
         self.search_results_table.setShowGrid(False)
         self.search_results_table.setAlternatingRowColors(True)
-        self.search_results_table.setColumnCount(14)
+        self.search_results_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.search_results_table.setSelectionMode(QTableWidget.ExtendedSelection)
+        self.search_results_table.setColumnCount(15)  # Added checkbox column
         self.search_results_table.setHorizontalHeaderLabels([
-            "File Name", "Category", "Size", "Relevance", "Label", "Tags", "Caption", "OCR Preview", "AI Source", "Vision Score", "Purpose", "Suggested Filename", "Path", "Actions"
+            "✓", "File Name", "Category", "Size", "Relevance", "Label", "Tags", "Caption", "OCR Preview", "AI Source", "Vision Score", "Purpose", "Suggested Filename", "Path", "Actions"
         ])
         search_header = self.search_results_table.horizontalHeader()
-        search_header.setSectionResizeMode(0, QHeaderView.Stretch)
-        search_header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        search_header.setSectionResizeMode(0, QHeaderView.Fixed)  # Checkbox
+        self.search_results_table.setColumnWidth(0, 40)
+        search_header.setSectionResizeMode(1, QHeaderView.Stretch)
         search_header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
         search_header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
         search_header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
         search_header.setSectionResizeMode(5, QHeaderView.ResizeToContents)
-        search_header.setSectionResizeMode(6, QHeaderView.Stretch)
+        search_header.setSectionResizeMode(6, QHeaderView.ResizeToContents)
         search_header.setSectionResizeMode(7, QHeaderView.Stretch)
-        search_header.setSectionResizeMode(8, QHeaderView.ResizeToContents)
+        search_header.setSectionResizeMode(8, QHeaderView.Stretch)
         search_header.setSectionResizeMode(9, QHeaderView.ResizeToContents)
         search_header.setSectionResizeMode(10, QHeaderView.ResizeToContents)
         search_header.setSectionResizeMode(11, QHeaderView.ResizeToContents)
-        search_header.setSectionResizeMode(12, QHeaderView.Stretch)
-        search_header.setSectionResizeMode(13, QHeaderView.ResizeToContents)
+        search_header.setSectionResizeMode(12, QHeaderView.ResizeToContents)
+        search_header.setSectionResizeMode(13, QHeaderView.Stretch)
+        search_header.setSectionResizeMode(14, QHeaderView.ResizeToContents)
         search_group_layout.addWidget(self.search_results_table)
         
         # Search statistics
@@ -471,37 +717,100 @@ class MainWindow(QMainWindow):
         debug_controls.addStretch()
         debug_layout.addLayout(debug_controls)
         
-        # Debug table
+        # Quick Actions bar for Indexed Files tab (same style as Search tab)
+        self.debug_quick_actions_widget = QWidget()
+        self.debug_quick_actions_widget.setObjectName("quickActionsBar")
+        debug_qa_layout = QHBoxLayout(self.debug_quick_actions_widget)
+        debug_qa_layout.setContentsMargins(8, 6, 8, 6)
+        debug_qa_layout.setSpacing(8)
+        
+        # Selection counter
+        self.debug_selection_count_label = QLabel("0 files selected")
+        self.debug_selection_count_label.setObjectName("selectionLabel")
+        debug_qa_layout.addWidget(self.debug_selection_count_label)
+        
+        debug_qa_layout.addWidget(self._create_separator())
+        
+        # Action buttons
+        self.debug_action_remove_btn = QPushButton("🗑️ Remove from Index")
+        self.debug_action_remove_btn.setToolTip("Remove selected files from the index (files stay on PC)")
+        self.debug_action_remove_btn.setObjectName("quickActionBtn")
+        debug_qa_layout.addWidget(self.debug_action_remove_btn)
+        
+        self.debug_action_reindex_btn = QPushButton("🔄 Re-index")
+        self.debug_action_reindex_btn.setToolTip("Re-scan selected files to update metadata")
+        self.debug_action_reindex_btn.setObjectName("quickActionBtn")
+        debug_qa_layout.addWidget(self.debug_action_reindex_btn)
+        
+        self.debug_action_add_tags_btn = QPushButton("🏷️ Add Tags")
+        self.debug_action_add_tags_btn.setToolTip("Add tags to selected files")
+        self.debug_action_add_tags_btn.setObjectName("quickActionBtn")
+        debug_qa_layout.addWidget(self.debug_action_add_tags_btn)
+        
+        self.debug_action_copy_paths_btn = QPushButton("📋 Copy Paths")
+        self.debug_action_copy_paths_btn.setToolTip("Copy file paths to clipboard")
+        self.debug_action_copy_paths_btn.setObjectName("quickActionBtn")
+        debug_qa_layout.addWidget(self.debug_action_copy_paths_btn)
+        
+        self.debug_action_open_folders_btn = QPushButton("📂 Open Folders")
+        self.debug_action_open_folders_btn.setToolTip("Open containing folders in Explorer")
+        self.debug_action_open_folders_btn.setObjectName("quickActionBtn")
+        debug_qa_layout.addWidget(self.debug_action_open_folders_btn)
+        
+        self.debug_action_export_btn = QPushButton("📤 Export List")
+        self.debug_action_export_btn.setToolTip("Export selected files to CSV or TXT")
+        self.debug_action_export_btn.setObjectName("quickActionBtn")
+        debug_qa_layout.addWidget(self.debug_action_export_btn)
+        
+        debug_qa_layout.addStretch()
+        
+        # Select All / Clear Selection buttons
+        self.debug_action_select_all_btn = QPushButton("Select All")
+        self.debug_action_select_all_btn.setObjectName("quickActionBtnSecondary")
+        debug_qa_layout.addWidget(self.debug_action_select_all_btn)
+        
+        self.debug_action_clear_selection_btn = QPushButton("Clear Selection")
+        self.debug_action_clear_selection_btn.setObjectName("quickActionBtnSecondary")
+        debug_qa_layout.addWidget(self.debug_action_clear_selection_btn)
+        
+        self.debug_quick_actions_widget.setVisible(False)  # Hidden until files selected
+        debug_layout.addWidget(self.debug_quick_actions_widget)
+        
+        # Debug table with checkbox column
         self.debug_table = QTableWidget()
         self.debug_table.setShowGrid(False)
         self.debug_table.setAlternatingRowColors(True)
-        self.debug_table.setColumnCount(15)
-        self.debug_table.verticalHeader().setDefaultSectionSize(32)  # Default row height
+        self.debug_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.debug_table.setSelectionMode(QTableWidget.ExtendedSelection)
+        self.debug_table.setColumnCount(16)  # Added checkbox column
+        self.debug_table.verticalHeader().setDefaultSectionSize(48)  # Increased row height for buttons
         self.debug_table.setHorizontalHeaderLabels([
-            "File Name", "Category", "Size", "Has OCR", "Label", "Tags", "Caption", "OCR Text Preview", "AI Source", "Vision Score", "Purpose", "Suggested Filename", "Detected Text", "File Path", "Actions"
+            "✓", "File Name", "Category", "Size", "Has OCR", "Label", "Tags", "Caption", "OCR Text Preview", "AI Source", "Vision Score", "Purpose", "Suggested Filename", "Detected Text", "File Path", "Actions"
         ])
         debug_header = self.debug_table.horizontalHeader()
-        debug_header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        debug_header.setSectionResizeMode(0, QHeaderView.Fixed)  # Checkbox
+        self.debug_table.setColumnWidth(0, 40)
         debug_header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
         debug_header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
         debug_header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
         debug_header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
         debug_header.setSectionResizeMode(5, QHeaderView.ResizeToContents)
-        debug_header.setSectionResizeMode(6, QHeaderView.Interactive)  # Caption
-        self.debug_table.setColumnWidth(6, 200)
-        debug_header.setSectionResizeMode(7, QHeaderView.Interactive)  # OCR Text Preview
+        debug_header.setSectionResizeMode(6, QHeaderView.ResizeToContents)
+        debug_header.setSectionResizeMode(7, QHeaderView.Interactive)  # Caption
         self.debug_table.setColumnWidth(7, 200)
-        debug_header.setSectionResizeMode(8, QHeaderView.ResizeToContents)
+        debug_header.setSectionResizeMode(8, QHeaderView.Interactive)  # OCR Text Preview
+        self.debug_table.setColumnWidth(8, 200)
         debug_header.setSectionResizeMode(9, QHeaderView.ResizeToContents)
         debug_header.setSectionResizeMode(10, QHeaderView.ResizeToContents)
-        debug_header.setSectionResizeMode(11, QHeaderView.Interactive)  # Suggested Filename
-        self.debug_table.setColumnWidth(11, 200)
-        debug_header.setSectionResizeMode(12, QHeaderView.Interactive)  # Detected Text
-        self.debug_table.setColumnWidth(12, 150)
-        debug_header.setSectionResizeMode(13, QHeaderView.Interactive)  # File Path
-        self.debug_table.setColumnWidth(13, 300)
-        debug_header.setSectionResizeMode(14, QHeaderView.Interactive)  # Actions
-        self.debug_table.setColumnWidth(14, 140)  # Action buttons
+        debug_header.setSectionResizeMode(11, QHeaderView.ResizeToContents)
+        debug_header.setSectionResizeMode(12, QHeaderView.Interactive)  # Suggested Filename
+        self.debug_table.setColumnWidth(12, 200)
+        debug_header.setSectionResizeMode(13, QHeaderView.Interactive)  # Detected Text
+        self.debug_table.setColumnWidth(13, 150)
+        debug_header.setSectionResizeMode(14, QHeaderView.Interactive)  # File Path
+        self.debug_table.setColumnWidth(14, 300)
+        debug_header.setSectionResizeMode(15, QHeaderView.Interactive)  # Actions
+        self.debug_table.setColumnWidth(15, 140)  # Action buttons
         debug_layout.addWidget(self.debug_table)
         
         # Debug info
@@ -840,6 +1149,8 @@ class MainWindow(QMainWindow):
         # Search tab connections
         self.index_button.clicked.connect(self.select_index_folder)
         self.index_button_action.clicked.connect(self.index_directory)
+        self.index_pause_btn.clicked.connect(self._toggle_index_pause)
+        self.index_cancel_btn.clicked.connect(self._cancel_indexing)
         self.search_button.clicked.connect(self.search_files)
         self.search_input.returnPressed.connect(self.search_files)
         
@@ -847,6 +1158,28 @@ class MainWindow(QMainWindow):
         self.type_filter.currentIndexChanged.connect(self._on_filter_changed)
         self.date_filter.currentIndexChanged.connect(self._on_filter_changed)
         self.clear_filters_btn.clicked.connect(self._clear_filters)
+        
+        # Quick Actions connections (itemChanged fires when checkbox is clicked)
+        self.search_results_table.itemChanged.connect(self._on_selection_changed)
+        self.action_remove_btn.clicked.connect(self._action_remove_from_index)
+        self.action_reindex_btn.clicked.connect(self._action_reindex_selected)
+        self.action_add_tags_btn.clicked.connect(self._action_add_tags)
+        self.action_copy_paths_btn.clicked.connect(self._action_copy_paths)
+        self.action_open_folders_btn.clicked.connect(self._action_open_folders)
+        self.action_export_btn.clicked.connect(self._action_export_list)
+        self.action_select_all_btn.clicked.connect(self._action_select_all)
+        self.action_clear_selection_btn.clicked.connect(self._action_clear_selection)
+        
+        # Debug tab Quick Actions connections (itemChanged fires when checkbox is clicked)
+        self.debug_table.itemChanged.connect(self._on_debug_selection_changed)
+        self.debug_action_remove_btn.clicked.connect(lambda: self._action_remove_from_index(source='debug'))
+        self.debug_action_reindex_btn.clicked.connect(lambda: self._action_reindex_selected(source='debug'))
+        self.debug_action_add_tags_btn.clicked.connect(lambda: self._action_add_tags(source='debug'))
+        self.debug_action_copy_paths_btn.clicked.connect(lambda: self._action_copy_paths(source='debug'))
+        self.debug_action_open_folders_btn.clicked.connect(lambda: self._action_open_folders(source='debug'))
+        self.debug_action_export_btn.clicked.connect(lambda: self._action_export_list(source='debug'))
+        self.debug_action_select_all_btn.clicked.connect(lambda: self._action_select_all(source='debug'))
+        self.debug_action_clear_selection_btn.clicked.connect(lambda: self._action_clear_selection(source='debug'))
         
         # Quick index options
         self.index_pc_button.clicked.connect(self.on_index_entire_pc)
@@ -2393,39 +2726,114 @@ Move Plan Summary:
         if not hasattr(self, 'index_path') or not self.index_path:
             return
         
-        # Show progress
+        # If already indexing, add to queue instead of replacing
+        if self.is_indexing:
+            self._add_to_index_queue(self.index_path)
+            return
+        
+        # Start indexing
+        self._start_indexing_path(self.index_path)
+    
+    def _add_to_index_queue(self, path: Path):
+        """Add a path to the indexing queue."""
+        logger.info(f"_add_to_index_queue called with path: {path}")
+        if path not in self.index_queue:
+            self.index_queue.append(path)
+            logger.info(f"Queue now has {len(self.index_queue)} items: {[p.name for p in self.index_queue]}")
+            self._update_queue_ui()
+            self.status_bar.showMessage(f"Added to queue: {path.name} ({len(self.index_queue)} pending)")
+    
+    def _update_queue_ui(self):
+        """Update the compact queue indicator and expand section when queue is visible."""
+        logger.info(f"_update_queue_ui called. Queue has {len(self.index_queue)} items")
+        if self.index_queue:
+            logger.info("Queue not empty, showing queue_row")
+            # Add spacing above the queue row
+            self.queue_top_spacer.setVisible(True)
+            self.queue_top_spacer.setFixedHeight(25)  # Space above queue
+            
+            self.queue_row.setVisible(True)
+            self.queue_row.show()  # Force show
+            self.queue_spacer.setVisible(True)
+            self.queue_spacer.setFixedHeight(15)  # Space below queue
+            logger.info(f"queue_row.isVisible() = {self.queue_row.isVisible()}")
+            
+            count = len(self.index_queue)
+            self.queue_label.setText(f"📋 Queue: {count} pending")
+            # Show first 2 item names inline
+            names = [p.name for p in self.index_queue[:2]]
+            if count > 2:
+                names.append(f"+{count - 2} more")
+            self.queue_items_label.setText(" • ".join(names))
+            # Expand the index group to accommodate queue
+            self.index_group.setMinimumHeight(self.index_group.sizeHint().height() + 80)
+        else:
+            self.queue_top_spacer.setVisible(False)
+            self.queue_top_spacer.setFixedHeight(0)
+            self.queue_row.setVisible(False)
+            self.queue_spacer.setVisible(False)
+            self.queue_spacer.setFixedHeight(0)
+            # Reset minimum height
+            self.index_group.setMinimumHeight(0)
+    
+    def _clear_index_queue(self):
+        """Clear the indexing queue."""
+        self.index_queue.clear()
+        self._update_queue_ui()
+        self.status_bar.showMessage("Queue cleared")
+    
+    def _start_indexing_path(self, path: Path):
+        """Start indexing a specific path."""
+        self.is_indexing = True
+        self.index_path = path
+        self.index_label.setText(f"Indexing: {path.name}")
+        self.index_button_action.setText("➕ Add to Queue")
+        self.index_button_action.setEnabled(True)  # Allow adding more
+        
+        # Show progress controls with explicit text settings
         self.progress_bar.setVisible(True)
-        self.progress_bar.setRange(0, 0)  # Indeterminate progress
-        self.index_button_action.setEnabled(False)
+        self.progress_bar.setTextVisible(True)
+        self.progress_bar.setFormat("%p% (%v / %m files)")
+        self.progress_bar.setRange(0, 0)  # Start indeterminate
+        self.progress_bar.setProperty("paused", False)
+        self.progress_bar.style().unpolish(self.progress_bar)
+        self.progress_bar.style().polish(self.progress_bar)
+        self.drop_zone.setVisible(False)  # Hide drop zone during indexing
+        self.index_percent_label.setVisible(True)
+        self.index_percent_label.setText("0%")
+        self.index_pause_btn.setVisible(True)
+        self.index_pause_btn.setText("⏸ Pause")
+        self.index_cancel_btn.setVisible(True)
+        self.index_progress_label.setVisible(True)
+        # Keep button enabled so user can add more files to queue
+        # self.index_button_action.setEnabled(False)  # Removed - allow adding to queue
         self.status_bar.showMessage("Indexing directory...")
         
-        # Start index worker with progress callback wired to UI
-        # NOTE: This callback is called from a background thread, so we must
-        # use QTimer.singleShot to schedule UI updates on the main thread
-        def progress_cb(done: int, total: int, message: str):
-            def update_ui():
-                try:
-                    self.progress_bar.setVisible(True)
-                    if total > 0:
-                        self.progress_bar.setRange(0, total)
-                        self.progress_bar.setValue(done)
-                    else:
-                        self.progress_bar.setRange(0, 0)
-                    self.status_bar.showMessage(message)
-                except Exception:
-                    pass  # UI might be closed
-            # Schedule on main thread
-            QTimer.singleShot(0, update_ui)
-
-        # Run indexing in a worker-like pattern using Qt thread already defined
-        # but pass callback through the service call
+        # Create the worker
         self.index_worker = IndexWorker(self.index_path)
         self.index_worker.index_completed.connect(self.on_index_completed)
         self.index_worker.index_error.connect(self.on_index_error)
         self.index_worker.progress_updated.connect(self.status_bar.showMessage)
+        # Connect progress_data signal to slot for thread-safe UI updates
+        self.index_worker.progress_data.connect(self._on_index_progress)
+        
+        # Progress callback that emits signal instead of using QTimer
+        def progress_cb(done: int, total: int, message: str):
+            # Check for cancel first
+            if hasattr(self, 'index_worker') and self.index_worker:
+                if self.index_worker.is_cancelled():
+                    raise InterruptedError("Indexing cancelled by user")
+            
+            # Emit signal - this will be received on the main thread
+            self.index_worker.progress_data.emit(done, total, message)
+            
+            # Now wait if paused
+            if hasattr(self, 'index_worker') and self.index_worker:
+                self.index_worker.wait_if_paused()
+                if self.index_worker.is_cancelled():
+                    raise InterruptedError("Indexing cancelled by user")
 
         # Monkey-patch run to inject callback without refactor
-        orig_run = self.index_worker.run
         def run_with_progress():
             try:
                 result = search_service.index_directory(self.index_path, progress_cb=progress_cb)
@@ -2435,14 +2843,128 @@ Move Plan Summary:
         self.index_worker.run = run_with_progress  # type: ignore
         self.index_worker.start()
     
+    def _toggle_index_pause(self):
+        """Toggle pause/resume for indexing - IMMEDIATE UI response."""
+        if not hasattr(self, 'index_worker') or not self.index_worker:
+            return
+        
+        if self.index_worker.is_paused():
+            # Resume - restart progress bar animation
+            self.index_worker.resume()
+            self.index_pause_btn.setText("⏸ Pause")
+            self.status_bar.showMessage("Indexing resumed...")
+            self.index_progress_label.setStyleSheet("")  # Normal color
+            self.index_percent_label.setStyleSheet("font-size: 18px; font-weight: bold; color: #00B8D4;")
+            # Reset progress bar to normal color using property
+            self.progress_bar.setProperty("paused", False)
+            self.progress_bar.style().unpolish(self.progress_bar)
+            self.progress_bar.style().polish(self.progress_bar)
+        else:
+            # Pause - IMMEDIATELY freeze the UI
+            self.index_worker.pause()
+            self.index_pause_btn.setText("▶ Resume")
+            self.status_bar.showMessage("⏸ PAUSED - Click Resume to continue")
+            self.index_progress_label.setText("⏸ PAUSED")
+            self.index_progress_label.setStyleSheet("color: #FFA500; font-weight: bold;")  # Orange
+            self.index_percent_label.setStyleSheet("font-size: 18px; font-weight: bold; color: #FFA500;")
+            # Change progress bar to orange when paused using property
+            self.progress_bar.setProperty("paused", True)
+            self.progress_bar.style().unpolish(self.progress_bar)
+            self.progress_bar.style().polish(self.progress_bar)
+    
+    def _cancel_indexing(self):
+        """Cancel the current indexing operation - IMMEDIATE UI response."""
+        if not hasattr(self, 'index_worker') or not self.index_worker:
+            return
+        
+        reply = QMessageBox.question(
+            self,
+            "Cancel Indexing",
+            "Are you sure you want to cancel indexing?\n\nFiles already indexed will be kept.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        
+        if reply == QMessageBox.Yes:
+            # IMMEDIATELY update UI before background thread stops
+            self.index_worker.cancel()
+            self._hide_index_controls()
+            self.status_bar.showMessage("Indexing cancelled. Files already indexed have been saved.")
+            
+            # Refresh views with what was indexed
+            stats = search_service.get_index_statistics()
+            self.update_search_statistics(stats)
+            self.search_button.setEnabled(True)
+            self.refresh_debug_view()
+    
+    def _on_index_progress(self, done: int, total: int, message: str):
+        """Slot to handle progress updates from the worker thread (runs on main thread)."""
+        try:
+            # Don't update UI if paused (keep showing PAUSED message)
+            if hasattr(self, 'index_worker') and self.index_worker and self.index_worker.is_paused():
+                return
+            
+            # Don't update if cancelled
+            if hasattr(self, 'index_worker') and self.index_worker and self.index_worker.is_cancelled():
+                return
+            
+            self.progress_bar.setVisible(True)
+            if total > 0:
+                self.progress_bar.setRange(0, total)
+                self.progress_bar.setValue(done)
+                percent = int((done / total) * 100)
+                # Update the prominent percentage label
+                self.index_percent_label.setText(f"{percent}%")
+                self.index_percent_label.setStyleSheet("font-size: 18px; font-weight: bold; color: #00B8D4;")
+                self.index_progress_label.setText(f"Processing file {done} of {total}")
+                self.index_progress_label.setStyleSheet("")  # Reset style
+            else:
+                self.progress_bar.setRange(0, 0)
+                self.index_percent_label.setText("...")
+                self.index_progress_label.setText("Scanning files...")
+            self.status_bar.showMessage(message)
+        except Exception:
+            pass  # UI might be closed
+    
+    def _hide_index_controls(self):
+        """Hide indexing controls after completion."""
+        self.progress_bar.setVisible(False)
+        self.index_pause_btn.setVisible(False)
+        self.index_cancel_btn.setVisible(False)
+        self.index_progress_label.setVisible(False)
+        self.index_percent_label.setVisible(False)
+        self.drop_zone.setVisible(True)  # Show drop zone again
+        self.index_button_action.setEnabled(True)
+    
     def on_index_completed(self, result: Dict[str, Any]):
         """Handle index completion."""
-        self.progress_bar.setVisible(False)
-        self.index_button_action.setEnabled(True)
+        # Check if there are more items in the queue
+        if self.index_queue:
+            next_path = self.index_queue.pop(0)
+            self._update_queue_ui()
+            self.status_bar.showMessage(f"Starting next: {next_path.name}")
+            QTimer.singleShot(300, lambda: self._start_indexing_path(next_path))
+            return
+        
+        # No more items - finish up
+        self.is_indexing = False
+        self.index_button_action.setText("Index Directory")
+        self._hide_index_controls()
         
         if 'error' in result:
             QMessageBox.critical(self, "Index Error", f"Error indexing directory:\n{result['error']}")
             self.status_bar.showMessage("Indexing failed")
+            return
+        
+        if result.get('cancelled'):
+            self.status_bar.showMessage(
+                f"Indexing cancelled. Indexed {result.get('indexed_files', 0)} files before cancellation."
+            )
+            # Still update stats for what was indexed
+            stats = search_service.get_index_statistics()
+            self.update_search_statistics(stats)
+            self.search_button.setEnabled(True)
+            self.refresh_debug_view()
             return
         
         # Update search statistics
@@ -2461,9 +2983,14 @@ Move Plan Summary:
     
     def on_index_error(self, error: str):
         """Handle index error."""
+        self._hide_index_controls()
+        
+        # Check if it was a cancellation
+        if "cancelled" in error.lower() or "interrupted" in error.lower():
+            self.status_bar.showMessage("Indexing cancelled")
+            return
+        
         QMessageBox.critical(self, "Index Error", f"Error indexing directory:\n{error}")
-        self.progress_bar.setVisible(False)
-        self.index_button_action.setEnabled(True)
         self.status_bar.showMessage("Indexing failed")
     
     def on_index_entire_pc(self):
@@ -2883,39 +3410,426 @@ Move Plan Summary:
         if self.search_input.text().strip():
             self.search_files()
     
+    def _create_separator(self) -> QWidget:
+        """Create a vertical separator for the Quick Actions bar."""
+        from PySide6.QtWidgets import QFrame
+        sep = QFrame()
+        sep.setFrameShape(QFrame.VLine)
+        sep.setFrameShadow(QFrame.Sunken)
+        sep.setStyleSheet("color: #555;")
+        return sep
+    
+    def _get_selected_file_ids(self, source: str = 'search') -> List[int]:
+        """Get file IDs for all CHECKED rows (checkbox) in the specified table."""
+        if source == 'debug':
+            table = self.debug_table
+            data_cache = getattr(self, '_last_debug_files', [])
+        else:
+            table = self.search_results_table
+            data_cache = getattr(self, '_last_search_results', [])
+        
+        file_ids = []
+        for row in range(table.rowCount()):
+            # Check if checkbox in column 0 is checked
+            checkbox_item = table.item(row, 0)
+            if checkbox_item and checkbox_item.checkState() == Qt.Checked:
+                if row < len(data_cache):
+                    file_id = data_cache[row].get('id')
+                    if file_id:
+                        file_ids.append(file_id)
+        return file_ids
+    
+    def _get_selected_files(self, source: str = 'search') -> List[Dict[str, Any]]:
+        """Get full file data for all CHECKED rows (checkbox) in the specified table."""
+        if source == 'debug':
+            table = self.debug_table
+            data_cache = getattr(self, '_last_debug_files', [])
+        else:
+            table = self.search_results_table
+            data_cache = getattr(self, '_last_search_results', [])
+        
+        files = []
+        for row in range(table.rowCount()):
+            # Check if checkbox in column 0 is checked
+            checkbox_item = table.item(row, 0)
+            if checkbox_item and checkbox_item.checkState() == Qt.Checked:
+                if row < len(data_cache):
+                    files.append(data_cache[row])
+        return files
+    
+    def _on_selection_changed(self, item=None):
+        """Update Quick Actions bar when checkbox changes in Search tab."""
+        # Only react to checkbox column changes (column 0)
+        if item is not None and item.column() != 0:
+            return
+        
+        checked_count = 0
+        for row in range(self.search_results_table.rowCount()):
+            checkbox_item = self.search_results_table.item(row, 0)
+            if checkbox_item and checkbox_item.checkState() == Qt.Checked:
+                checked_count += 1
+        
+        if checked_count > 0:
+            self.selection_count_label.setText(f"{checked_count} file{'s' if checked_count != 1 else ''} selected")
+            self.quick_actions_widget.setVisible(True)
+        else:
+            self.quick_actions_widget.setVisible(False)
+    
+    def _on_debug_selection_changed(self, item=None):
+        """Update Quick Actions bar when checkbox changes in Indexed Files tab."""
+        # Only react to checkbox column changes (column 0)
+        if item is not None and item.column() != 0:
+            return
+        
+        checked_count = 0
+        for row in range(self.debug_table.rowCount()):
+            checkbox_item = self.debug_table.item(row, 0)
+            if checkbox_item and checkbox_item.checkState() == Qt.Checked:
+                checked_count += 1
+        
+        if checked_count > 0:
+            self.debug_selection_count_label.setText(f"{checked_count} file{'s' if checked_count != 1 else ''} selected")
+            self.debug_quick_actions_widget.setVisible(True)
+        else:
+            self.debug_quick_actions_widget.setVisible(False)
+    
+    def _action_select_all(self, source: str = 'search'):
+        """Check all checkboxes in the specified table."""
+        if source == 'debug':
+            table = self.debug_table
+        else:
+            table = self.search_results_table
+        
+        table.blockSignals(True)
+        for row in range(table.rowCount()):
+            checkbox_item = table.item(row, 0)
+            if checkbox_item:
+                checkbox_item.setCheckState(Qt.Checked)
+        table.blockSignals(False)
+        
+        # Manually trigger update
+        if source == 'debug':
+            self._on_debug_selection_changed()
+        else:
+            self._on_selection_changed()
+    
+    def _action_clear_selection(self, source: str = 'search'):
+        """Uncheck all checkboxes in the specified table."""
+        if source == 'debug':
+            table = self.debug_table
+        else:
+            table = self.search_results_table
+        
+        table.blockSignals(True)
+        for row in range(table.rowCount()):
+            checkbox_item = table.item(row, 0)
+            if checkbox_item:
+                checkbox_item.setCheckState(Qt.Unchecked)
+        table.blockSignals(False)
+        
+        # Manually trigger update
+        if source == 'debug':
+            self._on_debug_selection_changed()
+        else:
+            self._on_selection_changed()
+    
+    def _action_remove_from_index(self, source: str = 'search'):
+        """Remove selected files from the index using background thread."""
+        file_ids = self._get_selected_file_ids(source)
+        if not file_ids:
+            return
+        
+        # Confirm removal
+        reply = QMessageBox.question(
+            self,
+            "Remove from Index",
+            f"Remove {len(file_ids)} file(s) from the index?\n\nThe actual files will NOT be deleted from your PC.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        
+        if reply != QMessageBox.Yes:
+            return
+        
+        # Show progress dialog
+        progress = QProgressDialog("Removing files from index...", "Cancel", 0, 0, self)
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.show()
+        QApplication.processEvents()
+        
+        # Run in background thread
+        self._batch_worker = BatchOperationWorker('remove', file_ids=file_ids)
+        self._batch_worker.operation_completed.connect(
+            lambda result: self._on_batch_operation_complete('remove', result, progress, source)
+        )
+        self._batch_worker.operation_error.connect(
+            lambda err: self._on_batch_operation_error(err, progress)
+        )
+        self._batch_worker.start()
+    
+    def _action_reindex_selected(self, source: str = 'search'):
+        """Re-index selected files using background thread."""
+        files = self._get_selected_files(source)
+        if not files:
+            return
+        
+        file_paths = [f.get('file_path') for f in files if f.get('file_path')]
+        if not file_paths:
+            return
+        
+        reply = QMessageBox.question(
+            self,
+            "Re-index Files",
+            f"Re-index {len(file_paths)} file(s)?\n\nThis will refresh their metadata and AI analysis.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        
+        if reply != QMessageBox.Yes:
+            return
+        
+        # Show progress dialog
+        progress = QProgressDialog("Re-indexing files...", "Cancel", 0, len(file_paths), self)
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.show()
+        QApplication.processEvents()
+        
+        # Run in background thread
+        self._batch_worker = BatchOperationWorker('reindex', file_paths=file_paths)
+        self._batch_worker.progress_updated.connect(
+            lambda curr, total, msg: self._on_batch_progress(progress, curr, total, msg)
+        )
+        self._batch_worker.operation_completed.connect(
+            lambda result: self._on_batch_operation_complete('reindex', result, progress, source)
+        )
+        self._batch_worker.operation_error.connect(
+            lambda err: self._on_batch_operation_error(err, progress)
+        )
+        self._batch_worker.start()
+    
+    def _action_add_tags(self, source: str = 'search'):
+        """Add tags to selected files using background thread."""
+        file_ids = self._get_selected_file_ids(source)
+        if not file_ids:
+            return
+        
+        # Show input dialog for tags
+        tags_text, ok = QInputDialog.getText(
+            self,
+            "Add Tags",
+            f"Enter tags to add to {len(file_ids)} file(s):\n(separate multiple tags with commas)",
+            QLineEdit.Normal,
+            ""
+        )
+        
+        if not ok or not tags_text.strip():
+            return
+        
+        # Parse tags
+        new_tags = [t.strip() for t in tags_text.split(',') if t.strip()]
+        if not new_tags:
+            return
+        
+        # Show progress dialog
+        progress = QProgressDialog("Adding tags...", None, 0, 0, self)
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.show()
+        QApplication.processEvents()
+        
+        # Run in background thread
+        self._batch_worker = BatchOperationWorker('add_tags', file_ids=file_ids, extra_data={'tags': new_tags})
+        self._batch_worker.operation_completed.connect(
+            lambda result: self._on_batch_operation_complete('add_tags', result, progress, source, extra={'tags': new_tags})
+        )
+        self._batch_worker.operation_error.connect(
+            lambda err: self._on_batch_operation_error(err, progress)
+        )
+        self._batch_worker.start()
+    
+    def _on_batch_progress(self, progress: QProgressDialog, current: int, total: int, message: str):
+        """Update progress dialog during batch operation."""
+        progress.setMaximum(total)
+        progress.setValue(current)
+        progress.setLabelText(message)
+        QApplication.processEvents()
+    
+    def _on_batch_operation_complete(self, operation: str, result: dict, progress: QProgressDialog, source: str, extra: dict = None):
+        """Handle batch operation completion."""
+        progress.close()
+        
+        if operation == 'remove':
+            QMessageBox.information(
+                self,
+                "Remove Complete",
+                f"Removed {result.get('removed', 0)} file(s) from index.\n"
+                f"Errors: {result.get('errors', 0)}"
+            )
+        elif operation == 'reindex':
+            QMessageBox.information(
+                self,
+                "Re-index Complete",
+                f"Updated: {result.get('updated', 0)}\n"
+                f"Not found: {result.get('not_found', 0)}\n"
+                f"Errors: {result.get('errors', 0)}"
+            )
+        elif operation == 'add_tags':
+            tags = extra.get('tags', []) if extra else []
+            QMessageBox.information(
+                self,
+                "Tags Added",
+                f"Added tags to {result.get('updated', 0)} file(s).\n"
+                f"Tags: {', '.join(tags)}\n"
+                f"Errors: {result.get('errors', 0)}"
+            )
+        
+        # Refresh views
+        if self.search_input.text().strip():
+            self.search_files()
+        self.refresh_debug_view()
+    
+    def _on_batch_operation_error(self, error: str, progress: QProgressDialog):
+        """Handle batch operation error."""
+        progress.close()
+        QMessageBox.critical(self, "Operation Failed", f"An error occurred:\n{error}")
+    
+    def _action_copy_paths(self, source: str = 'search'):
+        """Copy file paths of selected files to clipboard."""
+        files = self._get_selected_files(source)
+        if not files:
+            return
+        
+        paths = [f.get('file_path', '') for f in files if f.get('file_path')]
+        
+        if paths:
+            clipboard = QApplication.clipboard()
+            clipboard.setText('\n'.join(paths))
+            self.status_bar.showMessage(f"Copied {len(paths)} file path(s) to clipboard")
+    
+    def _action_open_folders(self, source: str = 'search'):
+        """Open containing folders of selected files."""
+        files = self._get_selected_files(source)
+        if not files:
+            return
+        
+        # Get unique folder paths
+        folders = set()
+        for f in files:
+            file_path = f.get('file_path')
+            if file_path:
+                folder = str(Path(file_path).parent)
+                folders.add(folder)
+        
+        if len(folders) > 5:
+            reply = QMessageBox.question(
+                self,
+                "Open Folders",
+                f"This will open {len(folders)} different folders.\nContinue?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No
+            )
+            if reply != QMessageBox.Yes:
+                return
+        
+        for folder in folders:
+            try:
+                if os.path.exists(folder):
+                    os.startfile(folder)
+            except Exception as e:
+                logger.error(f"Error opening folder {folder}: {e}")
+        
+        self.status_bar.showMessage(f"Opened {len(folders)} folder(s)")
+    
+    def _action_export_list(self, source: str = 'search'):
+        """Export selected files to CSV or TXT."""
+        files = self._get_selected_files(source)
+        if not files:
+            return
+        
+        # Show save dialog
+        file_path, selected_filter = QFileDialog.getSaveFileName(
+            self,
+            "Export File List",
+            "",
+            "CSV Files (*.csv);;Text Files (*.txt)"
+        )
+        
+        if not file_path:
+            return
+        
+        # Determine format
+        file_format = 'csv' if file_path.endswith('.csv') or 'CSV' in selected_filter else 'txt'
+        
+        # Ensure correct extension
+        if file_format == 'csv' and not file_path.endswith('.csv'):
+            file_path += '.csv'
+        elif file_format == 'txt' and not file_path.endswith('.txt'):
+            file_path += '.txt'
+        
+        from app.core.file_operations import get_file_operations
+        file_ops = get_file_operations()
+        
+        if file_ops.export_file_list(files, file_path, file_format):
+            self.status_bar.showMessage(f"Exported {len(files)} files to {file_path}")
+            
+            # Ask to open file
+            reply = QMessageBox.question(
+                self,
+                "Export Complete",
+                f"Exported {len(files)} file(s) to:\n{file_path}\n\nOpen the file?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes
+            )
+            if reply == QMessageBox.Yes:
+                try:
+                    os.startfile(file_path)
+                except Exception as e:
+                    logger.error(f"Error opening export file: {e}")
+        else:
+            QMessageBox.warning(self, "Export Failed", "Failed to export file list.")
+    
     def display_search_results(self, results: List[Dict[str, Any]]):
         """Display search results in the table."""
         self.search_results_table.setRowCount(len(results))
         
         for row, result in enumerate(results):
             file_id = result.get('id')
-            # File name
+            
+            # Checkbox column (col 0)
+            checkbox_item = QTableWidgetItem()
+            checkbox_item.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+            checkbox_item.setCheckState(Qt.Unchecked)
+            self.search_results_table.setItem(row, 0, checkbox_item)
+            
+            # File name (col 1)
             name_item = QTableWidgetItem(result['file_name'])
             name_item.setFlags(name_item.flags() & ~Qt.ItemIsEditable)
-            self.search_results_table.setItem(row, 0, name_item)
+            self.search_results_table.setItem(row, 1, name_item)
             
-            # Category
+            # Category (col 2)
             category_item = QTableWidgetItem(result['category'])
             category_item.setFlags(category_item.flags() & ~Qt.ItemIsEditable)
-            self.search_results_table.setItem(row, 1, category_item)
+            self.search_results_table.setItem(row, 2, category_item)
             
-            # Size
+            # Size (col 3)
             size_item = QTableWidgetItem(result.get('size_formatted', 'Unknown'))
             size_item.setFlags(size_item.flags() & ~Qt.ItemIsEditable)
-            self.search_results_table.setItem(row, 2, size_item)
+            self.search_results_table.setItem(row, 3, size_item)
             
-            # Relevance score
+            # Relevance score (col 4)
             relevance = result.get('relevance_score', 0)
             relevance_item = QTableWidgetItem(f"{relevance:.2f}")
             relevance_item.setFlags(relevance_item.flags() & ~Qt.ItemIsEditable)
-            self.search_results_table.setItem(row, 3, relevance_item)
+            self.search_results_table.setItem(row, 4, relevance_item)
             
-            # Label
+            # Label (col 5)
             label_item = QTableWidgetItem(result.get('label', '') or '')
             label_item.setFlags(label_item.flags() & ~Qt.ItemIsEditable)
-            self.search_results_table.setItem(row, 4, label_item)
+            self.search_results_table.setItem(row, 5, label_item)
 
-            # Tags
+            # Tags (col 6)
             tags_val = result.get('tags')
             if isinstance(tags_val, list):
                 tags_text = ", ".join(tags_val)
@@ -2923,28 +3837,28 @@ Move Plan Summary:
                 tags_text = tags_val or ''
             tags_item = QTableWidgetItem(tags_text)
             tags_item.setFlags(tags_item.flags() & ~Qt.ItemIsEditable)
-            self.search_results_table.setItem(row, 5, tags_item)
+            self.search_results_table.setItem(row, 6, tags_item)
 
-            # Caption
+            # Caption (col 7)
             caption_item = QTableWidgetItem(result.get('caption', '') or '')
             caption_item.setFlags((caption_item.flags() | Qt.ItemIsEditable))
-            self.search_results_table.setItem(row, 6, caption_item)
+            self.search_results_table.setItem(row, 7, caption_item)
 
-            # OCR preview
+            # OCR preview (col 8)
             ocr_preview = result.get('ocr_preview', '')
             if ocr_preview:
                 ocr_item = QTableWidgetItem(ocr_preview)
             else:
                 ocr_item = QTableWidgetItem("No OCR text")
             ocr_item.setFlags(ocr_item.flags() & ~Qt.ItemIsEditable)
-            self.search_results_table.setItem(row, 7, ocr_item)
+            self.search_results_table.setItem(row, 8, ocr_item)
 
-            # AI Source
+            # AI Source (col 9)
             ai_source_item = QTableWidgetItem(result.get('ai_source', '') or '')
             ai_source_item.setFlags(ai_source_item.flags() & ~Qt.ItemIsEditable)
-            self.search_results_table.setItem(row, 8, ai_source_item)
+            self.search_results_table.setItem(row, 9, ai_source_item)
 
-            # Vision score
+            # Vision score (col 10)
             vscore = result.get('vision_confidence', None)
             try:
                 vscore_text = f"{float(vscore):.2f}" if vscore is not None else ''
@@ -2952,26 +3866,26 @@ Move Plan Summary:
                 vscore_text = ''
             vscore_item = QTableWidgetItem(vscore_text)
             vscore_item.setFlags(vscore_item.flags() & ~Qt.ItemIsEditable)
-            self.search_results_table.setItem(row, 9, vscore_item)
+            self.search_results_table.setItem(row, 10, vscore_item)
 
-            # Purpose & Suggested filename from metadata
+            # Purpose & Suggested filename from metadata (col 11, 12)
             meta = result.get('metadata') or {}
             purpose_text = meta.get('purpose') or ''
             sfile_text = meta.get('suggested_filename') or ''
             purpose_item = QTableWidgetItem(purpose_text)
             purpose_item.setFlags((purpose_item.flags() | Qt.ItemIsEditable))
-            self.search_results_table.setItem(row, 10, purpose_item)
+            self.search_results_table.setItem(row, 11, purpose_item)
             sfile_item = QTableWidgetItem(sfile_text)
             sfile_item.setFlags((sfile_item.flags() | Qt.ItemIsEditable))
-            self.search_results_table.setItem(row, 11, sfile_item)
+            self.search_results_table.setItem(row, 12, sfile_item)
 
-            # Path
+            # Path (col 13)
             path_text = result.get('file_path', '') or ''
             path_item = QTableWidgetItem(path_text)
             path_item.setFlags(path_item.flags() & ~Qt.ItemIsEditable)
-            self.search_results_table.setItem(row, 12, path_item)
+            self.search_results_table.setItem(row, 13, path_item)
 
-            # Actions (Copy, Open)
+            # Actions (Copy, Open) (col 14)
             actions_widget = QWidget()
             actions_layout = QHBoxLayout(actions_widget)
             actions_layout.setContentsMargins(4, 4, 4, 4)
@@ -2983,7 +3897,7 @@ Move Plan Summary:
             actions_layout.addWidget(btn_copy)
             actions_layout.addWidget(btn_open)
             actions_layout.addStretch()
-            self.search_results_table.setCellWidget(row, 13, actions_widget)
+            self.search_results_table.setCellWidget(row, 14, actions_widget)
 
             # Connect actions
             file_path_for_row = path_text
@@ -3069,6 +3983,167 @@ Move Plan Summary:
         except Exception as e:
             QMessageBox.critical(self, "Open Error", f"Failed to open file:\n{e}")
     
+    # ==================== DRAG AND DROP ====================
+    
+    def dragEnterEvent(self, event):
+        """Handle drag enter - show visual feedback."""
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+            # Update drop zone styling to show it's active
+            self.drop_zone.setStyleSheet("""
+                QLabel {
+                    border: 3px solid #00E5FF;
+                    border-radius: 8px;
+                    background-color: rgba(0, 229, 255, 0.15);
+                    color: #00E5FF;
+                    font-size: 14px;
+                    font-weight: bold;
+                    padding: 10px;
+                }
+            """)
+            # Count files/folders being dragged
+            urls = event.mimeData().urls()
+            count = len(urls)
+            self.drop_zone.setText(f"📥 Drop to index {count} item{'s' if count > 1 else ''}")
+        else:
+            event.ignore()
+    
+    def dragLeaveEvent(self, event):
+        """Handle drag leave - restore normal styling."""
+        self._reset_drop_zone_style()
+        event.accept()
+    
+    def dropEvent(self, event):
+        """Handle file/folder drop - start indexing."""
+        self._reset_drop_zone_style()
+        
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+            urls = event.mimeData().urls()
+            paths = []
+            
+            for url in urls:
+                if url.isLocalFile():
+                    path = url.toLocalFile()
+                    paths.append(path)
+            
+            if paths:
+                self._handle_dropped_paths(paths)
+        else:
+            event.ignore()
+    
+    def _reset_drop_zone_style(self):
+        """Reset drop zone to default styling."""
+        self.drop_zone.setStyleSheet("""
+            QLabel {
+                border: 2px dashed #00B8D4;
+                border-radius: 8px;
+                background-color: rgba(0, 184, 212, 0.05);
+                color: #00B8D4;
+                font-size: 13px;
+                padding: 10px;
+            }
+        """)
+        self.drop_zone.setText("📁 Drag & drop files or folders here to index them")
+    
+    def _handle_dropped_paths(self, paths: list):
+        """Handle dropped file/folder paths and start indexing."""
+        # Collect all files to index
+        files_to_index = []
+        folders_to_index = []
+        
+        for path_str in paths:
+            path = Path(path_str)
+            if path.is_dir():
+                folders_to_index.append(path)
+            elif path.is_file():
+                files_to_index.append(path)
+        
+        # Show confirmation
+        msg_parts = []
+        if folders_to_index:
+            msg_parts.append(f"{len(folders_to_index)} folder{'s' if len(folders_to_index) > 1 else ''}")
+        if files_to_index:
+            msg_parts.append(f"{len(files_to_index)} file{'s' if len(files_to_index) > 1 else ''}")
+        
+        msg = f"Index {' and '.join(msg_parts)}?"
+        
+        reply = QMessageBox.question(
+            self,
+            "Index Dropped Items",
+            msg,
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes
+        )
+        
+        if reply != QMessageBox.Yes:
+            return
+        
+        # Index folders
+        if folders_to_index:
+            if self.is_indexing:
+                # Add all to queue
+                for folder in folders_to_index:
+                    self._add_to_index_queue(folder)
+            else:
+                # Start first, queue the rest
+                first = folders_to_index[0]
+                for folder in folders_to_index[1:]:
+                    self._add_to_index_queue(folder)
+                self.index_path = first
+                self.index_label.setText(f"Index folder: {first}")
+                self.index_button_action.setEnabled(True)
+                self._start_indexing_path(first)
+        
+        # Index individual files
+        if files_to_index and not folders_to_index:
+            self._index_individual_files(files_to_index)
+    
+    def _index_individual_files(self, files: list):
+        """Index individual dropped files."""
+        from app.core.search import search_service
+        
+        total = len(files)
+        self.drop_zone.setVisible(False)  # Hide drop zone during indexing
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setRange(0, total)
+        self.index_percent_label.setVisible(True)
+        self.index_progress_label.setVisible(True)
+        
+        indexed = 0
+        for file_path in files:
+            try:
+                result = search_service.index_single_file(file_path)
+                if not result.get('error'):
+                    indexed += 1
+                percent = int((indexed / total) * 100)
+                self.progress_bar.setValue(indexed)
+                self.index_percent_label.setText(f"{percent}%")
+                self.index_progress_label.setText(f"Indexing file {indexed} of {total}")
+                QApplication.processEvents()  # Keep UI responsive
+            except Exception as e:
+                logger.error(f"Error indexing {file_path}: {e}")
+        
+        # Done
+        self.progress_bar.setVisible(False)
+        self.index_percent_label.setVisible(False)
+        self.index_progress_label.setVisible(False)
+        self.drop_zone.setVisible(True)  # Show drop zone again
+        
+        QMessageBox.information(
+            self,
+            "Indexing Complete",
+            f"Successfully indexed {indexed} of {total} files."
+        )
+        
+        # Refresh views
+        self.refresh_debug_view()
+        stats = search_service.get_index_statistics()
+        self.update_search_statistics(stats)
+        self.search_button.setEnabled(True)
+    
+    # ==================== END DRAG AND DROP ====================
+    
     def update_search_statistics(self, stats: Dict[str, Any]):
         """Update search statistics display."""
         if not stats:
@@ -3100,47 +4175,78 @@ Move Plan Summary:
                 cursor.execute("SELECT * FROM files ORDER BY file_name")
                 rows = cursor.fetchall()
             
+            # Store file data for Quick Actions
+            self._last_debug_files = []
+            
             # Update debug table
             self._populating_debug_table = True
             self.debug_table.blockSignals(True)
             self.debug_table.setRowCount(len(rows))
             
             for row_idx, row in enumerate(rows):
-                # File name
-                name_item = QTableWidgetItem(row["file_name"])  # file_name
-                name_item.setFlags(name_item.flags() & ~Qt.ItemIsEditable)
-                # Store file id for save handler
+                # Build file dict for Quick Actions
                 try:
-                    name_item.setData(Qt.UserRole, row["id"])  # type: ignore[index]
+                    meta = json.loads(row["metadata"]) if row["metadata"] else {}
+                except Exception:
+                    meta = {}
+                try:
+                    tags_list = json.loads(row["tags"]) if row["tags"] else []
+                except Exception:
+                    tags_list = []
+                
+                file_dict = {
+                    'id': row["id"],
+                    'file_path': row["file_path"],
+                    'file_name': row["file_name"],
+                    'category': row["category"],
+                    'file_size': row["file_size"],
+                    'label': row["label"] if "label" in row.keys() else None,
+                    'tags': tags_list,
+                    'caption': row["caption"] if "caption" in row.keys() else None,
+                    'metadata': meta,
+                }
+                self._last_debug_files.append(file_dict)
+                
+                # Checkbox column (col 0)
+                checkbox_item = QTableWidgetItem()
+                checkbox_item.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                checkbox_item.setCheckState(Qt.Unchecked)
+                self.debug_table.setItem(row_idx, 0, checkbox_item)
+                
+                # File name (col 1)
+                name_item = QTableWidgetItem(row["file_name"])
+                name_item.setFlags(name_item.flags() & ~Qt.ItemIsEditable)
+                try:
+                    name_item.setData(Qt.UserRole, row["id"])
                 except Exception:
                     pass
-                self.debug_table.setItem(row_idx, 0, name_item)
+                self.debug_table.setItem(row_idx, 1, name_item)
                 
-                # Category
-                category_item = QTableWidgetItem(row["category"])  # category
+                # Category (col 2)
+                category_item = QTableWidgetItem(row["category"])
                 category_item.setFlags(category_item.flags() & ~Qt.ItemIsEditable)
-                self.debug_table.setItem(row_idx, 1, category_item)
+                self.debug_table.setItem(row_idx, 2, category_item)
                 
-                # Size
-                size_bytes = row["file_size"]  # file_size
+                # Size (col 3)
+                size_bytes = row["file_size"]
                 size_mb = round(size_bytes / (1024 * 1024), 2) if size_bytes else 0
                 size_item = QTableWidgetItem(f"{size_mb} MB")
                 size_item.setFlags(size_item.flags() & ~Qt.ItemIsEditable)
-                self.debug_table.setItem(row_idx, 2, size_item)
+                self.debug_table.setItem(row_idx, 3, size_item)
                 
-                # Has OCR
-                has_ocr = bool(row["has_ocr"])  # has_ocr
+                # Has OCR (col 4)
+                has_ocr = bool(row["has_ocr"])
                 ocr_item = QTableWidgetItem("Yes" if has_ocr else "No")
                 ocr_item.setFlags(ocr_item.flags() & ~Qt.ItemIsEditable)
-                self.debug_table.setItem(row_idx, 3, ocr_item)
+                self.debug_table.setItem(row_idx, 4, ocr_item)
 
-                # Label (column order: ... has_ocr[10], ocr_text[11], label[12], tags[13], caption[14])
+                # Label (col 5)
                 label = row["label"] if "label" in row.keys() else None
                 label_item = QTableWidgetItem(label or '')
                 label_item.setFlags((label_item.flags() | Qt.ItemIsEditable))
-                self.debug_table.setItem(row_idx, 4, label_item)
+                self.debug_table.setItem(row_idx, 5, label_item)
 
-                # Tags
+                # Tags (col 6)
                 tags_raw = row["tags"] if "tags" in row.keys() else None
                 try:
                     tags_list = json.loads(tags_raw) if tags_raw else []
@@ -3149,54 +4255,50 @@ Move Plan Summary:
                     tags_text = tags_raw or ''
                 tags_item = QTableWidgetItem(tags_text)
                 tags_item.setFlags((tags_item.flags() | Qt.ItemIsEditable))
-                self.debug_table.setItem(row_idx, 5, tags_item)
+                self.debug_table.setItem(row_idx, 6, tags_item)
 
-                # Caption
+                # Caption (col 7)
                 caption = row["caption"] if "caption" in row.keys() else None
                 caption_item = QTableWidgetItem(caption or '')
                 caption_item.setFlags((caption_item.flags() | Qt.ItemIsEditable))
-                self.debug_table.setItem(row_idx, 6, caption_item)
+                self.debug_table.setItem(row_idx, 7, caption_item)
                 
-                # OCR text preview
-                ocr_text = row["ocr_text"] or ""  # ocr_text
+                # OCR text preview (col 8)
+                ocr_text = row["ocr_text"] or ""
                 if ocr_text:
                     preview = ocr_text[:100] + "..." if len(ocr_text) > 100 else ocr_text
                 else:
                     preview = "No OCR text"
                 ocr_preview_item = QTableWidgetItem(preview)
                 ocr_preview_item.setFlags(ocr_preview_item.flags() & ~Qt.ItemIsEditable)
-                self.debug_table.setItem(row_idx, 7, ocr_preview_item)
+                self.debug_table.setItem(row_idx, 8, ocr_preview_item)
 
-                # AI source
+                # AI source (col 9)
                 ai_source = row["ai_source"] if "ai_source" in row.keys() else None
                 ai_source_item = QTableWidgetItem(ai_source or '')
                 ai_source_item.setFlags(ai_source_item.flags() & ~Qt.ItemIsEditable)
-                self.debug_table.setItem(row_idx, 8, ai_source_item)
+                self.debug_table.setItem(row_idx, 9, ai_source_item)
 
-                # Vision score
+                # Vision score (col 10)
                 try:
                     vscore = float(row["vision_confidence"]) if row["vision_confidence"] is not None else None
                 except Exception:
                     vscore = None
                 vscore_item = QTableWidgetItem(f"{vscore:.2f}" if vscore is not None else '')
                 vscore_item.setFlags(vscore_item.flags() & ~Qt.ItemIsEditable)
-                self.debug_table.setItem(row_idx, 9, vscore_item)
+                self.debug_table.setItem(row_idx, 10, vscore_item)
 
-                # Purpose (from metadata)
-                try:
-                    meta = json.loads(row["metadata"]) if row["metadata"] else {}
-                except Exception:
-                    meta = {}
+                # Purpose (col 11)
                 purpose_item = QTableWidgetItem((meta.get('purpose') or ''))
                 purpose_item.setFlags((purpose_item.flags() | Qt.ItemIsEditable))
-                self.debug_table.setItem(row_idx, 10, purpose_item)
+                self.debug_table.setItem(row_idx, 11, purpose_item)
 
-                # Suggested filename (from metadata)
+                # Suggested filename (col 12)
                 sfile_item = QTableWidgetItem((meta.get('suggested_filename') or ''))
                 sfile_item.setFlags((sfile_item.flags() | Qt.ItemIsEditable))
-                self.debug_table.setItem(row_idx, 11, sfile_item)
+                self.debug_table.setItem(row_idx, 12, sfile_item)
 
-                # Detected text (from metadata) – short preview
+                # Detected text (col 13)
                 dtxt = meta.get('detected_text') or ''
                 if dtxt:
                     dtxt_preview = dtxt[:100] + "..." if len(dtxt) > 100 else dtxt
@@ -3204,18 +4306,18 @@ Move Plan Summary:
                     dtxt_preview = ''
                 dtxt_item = QTableWidgetItem(dtxt_preview)
                 dtxt_item.setFlags(dtxt_item.flags() & ~Qt.ItemIsEditable)
-                self.debug_table.setItem(row_idx, 12, dtxt_item)
+                self.debug_table.setItem(row_idx, 13, dtxt_item)
                 
-                # File path
+                # File path (col 14)
                 file_path_val = row["file_path"] or ""
                 path_item = QTableWidgetItem(file_path_val)
                 path_item.setFlags(path_item.flags() & ~Qt.ItemIsEditable)
-                self.debug_table.setItem(row_idx, 13, path_item)
+                self.debug_table.setItem(row_idx, 14, path_item)
                 
-                # Actions (Copy, Open)
+                # Actions (col 15)
                 actions_widget = QWidget()
                 actions_layout = QHBoxLayout(actions_widget)
-                actions_layout.setContentsMargins(4, 2, 4, 2)
+                actions_layout.setContentsMargins(2, 0, 2, 0)  # Minimal margins
                 actions_layout.setSpacing(6)
                 actions_layout.setAlignment(Qt.AlignVCenter)
                 
@@ -3228,8 +4330,8 @@ Move Plan Summary:
                         border: none;
                         border-radius: 4px;
                         padding: 2px 6px;
-                        min-height: 26px;
-                        max-height: 26px;
+                        min-height: 24px;
+                        max-height: 24px;
                     }
                     QPushButton:hover {
                         background-color: #00ACC1;
@@ -3238,8 +4340,8 @@ Move Plan Summary:
                 
                 btn_copy = QPushButton("Copy")
                 btn_open = QPushButton("Open")
-                btn_copy.setFixedHeight(26)
-                btn_open.setFixedHeight(26)
+                btn_copy.setFixedHeight(24)
+                btn_open.setFixedHeight(24)
                 btn_copy.setMinimumWidth(48)
                 btn_open.setMinimumWidth(48)
                 btn_copy.setStyleSheet(btn_style)
@@ -3248,10 +4350,10 @@ Move Plan Summary:
                 btn_open.setToolTip("Open file with default app")
                 actions_layout.addWidget(btn_copy)
                 actions_layout.addWidget(btn_open)
-                self.debug_table.setCellWidget(row_idx, 14, actions_widget)
+                self.debug_table.setCellWidget(row_idx, 15, actions_widget)
                 
                 # Set row height to fit buttons properly
-                self.debug_table.setRowHeight(row_idx, 32)
+                self.debug_table.setRowHeight(row_idx, 48)
                 
                 # Connect actions
                 btn_copy.clicked.connect(lambda _, p=file_path_val: self.copy_path_to_clipboard(p))

@@ -167,7 +167,18 @@ class SearchService:
                         pass
                 if progress_cb:
                     name = file_path.name
-                    progress_cb(idx + 1, total, f"Indexed: {name}")
+                    try:
+                        progress_cb(idx + 1, total, f"Indexed: {name}")
+                    except InterruptedError:
+                        # User cancelled - return partial results
+                        logger.info(f"Indexing cancelled by user after {indexed_count} files")
+                        return {
+                            'total_files': len(files),
+                            'indexed_files': indexed_count,
+                            'files_with_ocr': ocr_count,
+                            'directory': str(directory_path),
+                            'cancelled': True
+                        }
             
             logger.info(f"Indexed {indexed_count} files ({ocr_count} with OCR)")
             
@@ -178,6 +189,16 @@ class SearchService:
                 'directory': str(directory_path)
             }
             
+        except InterruptedError:
+            # User cancelled
+            logger.info("Indexing cancelled by user")
+            return {
+                'total_files': 0,
+                'indexed_files': 0,
+                'files_with_ocr': 0,
+                'directory': str(directory_path),
+                'cancelled': True
+            }
         except Exception as e:
             logger.error(f"Error indexing directory {directory_path}: {e}")
             return {'error': str(e)}
