@@ -230,23 +230,16 @@ class AutoIndexWorker(QThread):
                 
                 metadata['last_indexed_at'] = datetime.utcnow().isoformat()
                 
-                # AI Vision analysis for images
+                # AI Vision analysis for images (uses configured AI provider)
                 ext = file_path.suffix.lower()
                 if ext in {'.png', '.jpg', '.jpeg', '.bmp', '.tiff', '.tif', '.gif', '.webp', '.avif', '.heic', '.heif', '.ico', '.raw', '.cr2', '.nef', '.arw', '.pdf'}:
                     self.status_update.emit(f"Analyzing: {file_path.name}")
                     
-                    if settings.use_openai_fallback:
-                        image_b64 = _file_to_b64(file_path)
-                        if image_b64:
-                            vision = gpt_vision_fallback(image_b64, filename=file_path.name)
-                            if vision:
-                                metadata.update(vision)
-                                metadata['ai_source'] = 'openai'
-                    else:
-                        vision = analyze_image(file_path)
-                        if vision:
-                            metadata.update(vision)
-                            metadata['ai_source'] = 'local'
+                    # analyze_image handles provider selection internally
+                    vision = analyze_image(file_path)
+                    if vision:
+                        metadata.update(vision)
+                        metadata['ai_source'] = settings.ai_provider
                 
                 # Add to index
                 file_index.add_file(metadata)
@@ -710,7 +703,8 @@ class MainWindow(QMainWindow):
         
         # Debug controls
         debug_controls = QHBoxLayout()
-        self.refresh_debug_button = QPushButton("Refresh Index View")
+        self.refresh_debug_button = QPushButton("Refresh View")
+        self.refresh_debug_button.setToolTip("Reload the Indexed Files table from the database (does not re-index files)")
         self.clear_index_button = QPushButton("Clear Index")
         debug_controls.addWidget(self.refresh_debug_button)
         debug_controls.addWidget(self.clear_index_button)
@@ -814,7 +808,7 @@ class MainWindow(QMainWindow):
         debug_layout.addWidget(self.debug_table)
         
         # Debug info
-        self.debug_info_label = QLabel("Click 'Refresh Index View' to see what's in the database")
+        self.debug_info_label = QLabel("Click 'Refresh View' to reload what's in the database")
         self.debug_info_label.setObjectName("secondaryLabel")
         debug_layout.addWidget(self.debug_info_label)
         
@@ -845,37 +839,133 @@ class MainWindow(QMainWindow):
         
         layout.addWidget(appearance_group)
 
-        # OpenAI toggle and key
+        # AI Providers section with toggle between Local and OpenAI
         ai_group = QGroupBox("AI Providers")
         ai_layout = QVBoxLayout(ai_group)
 
-        row1 = QHBoxLayout()
-        self.use_openai_checkbox = QPushButton("Use ChatGPT (OpenAI) Fallback: OFF")
-        self.use_openai_checkbox.setCheckable(True)
-        self.use_openai_checkbox.setChecked(settings.use_openai_fallback)
-        if settings.use_openai_fallback:
-            self.use_openai_checkbox.setText("Use ChatGPT (OpenAI) Fallback: ON")
-        row1.addWidget(self.use_openai_checkbox)
-        ai_layout.addLayout(row1)
+        # Provider selection row
+        provider_row = QHBoxLayout()
+        provider_row.addWidget(QLabel("AI Provider:"))
+        self.ai_provider_combo = QComboBox()
+        # OpenAI first (recommended), then Local, then None
+        self.ai_provider_combo.addItems([
+            "OpenAI (Recommended)",
+            "Local (Ollama - Advanced)",
+            "None (Basic metadata only)"
+        ])
+        # Set current selection based on settings.ai_provider
+        provider_map = {'openai': 0, 'local': 1, 'none': 2}
+        current_idx = provider_map.get(settings.ai_provider, 0)
+        self.ai_provider_combo.setCurrentIndex(current_idx)
+        self.ai_provider_combo.setMinimumWidth(220)
+        provider_row.addWidget(self.ai_provider_combo)
+        provider_row.addStretch()
+        ai_layout.addLayout(provider_row)
+        
+        # Cost info for OpenAI
+        cost_info = QLabel("💡 OpenAI costs ~$0.0002 per file (pennies per month for typical usage)")
+        cost_info.setStyleSheet("color: #888; font-size: 11px;")
+        ai_layout.addWidget(cost_info)
 
+        # Local AI Settings group (Advanced)
+        self.local_ai_group = QGroupBox("Local AI Settings (Advanced - Requires Ollama)")
+        local_ai_layout = QVBoxLayout(self.local_ai_group)
+        
+        # Warning about RAM requirements
+        warning_label = QLabel("⚠️ Local models require 8-16GB RAM. OpenAI is recommended for most users.")
+        warning_label.setStyleSheet("color: #cc7700; font-size: 11px;")
+        local_ai_layout.addWidget(warning_label)
+        
+        # Check Ollama Status button
+        ollama_row = QHBoxLayout()
+        self.check_ollama_btn = QPushButton("Check Ollama Status")
+        self.check_ollama_btn.setMinimumWidth(140)
+        ollama_row.addWidget(self.check_ollama_btn)
+        ollama_row.addStretch()
+        local_ai_layout.addLayout(ollama_row)
+        
+        # Info label about unified model
+        info_label = QLabel("Qwen 2.5-VL handles both text AND images in one model")
+        info_label.setStyleSheet("color: #888; font-style: italic;")
+        local_ai_layout.addWidget(info_label)
+        
+        # Single model row (Qwen 2.5-VL does both text and vision)
+        local_model_row = QHBoxLayout()
+        local_model_row.addWidget(QLabel("Local Model:"))
+        self.local_model_combo = QComboBox()
+        self.local_model_combo.setEditable(True)
+        local_model_options = [
+            "qwen2.5vl:3b",      # Recommended: handles both text AND vision (lighter)
+            "qwen2.5vl:7b",      # Larger version (needs 12+ GB RAM)
+            "llava:7b",          # Vision + some text
+            "llava:13b",         # Larger vision model
+            "minicpm-v",         # Vision-focused
+        ]
+        self.local_model_combo.addItems(local_model_options)
+        current_local_model = settings.local_model
+        if current_local_model and current_local_model not in local_model_options:
+            self.local_model_combo.addItem(current_local_model)
+        idx = self.local_model_combo.findText(current_local_model)
+        if idx >= 0:
+            self.local_model_combo.setCurrentIndex(idx)
+        else:
+            self.local_model_combo.setEditText(current_local_model)
+        self.local_model_combo.setMinimumWidth(200)
+        local_model_row.addWidget(self.local_model_combo)
+        local_model_row.addStretch()
+        local_ai_layout.addLayout(local_model_row)
+        
+        # Save local settings button
+        local_save_row = QHBoxLayout()
+        self.save_local_ai_btn = QPushButton("Save Local AI Settings")
+        local_save_row.addWidget(self.save_local_ai_btn)
+        local_save_row.addStretch()
+        local_ai_layout.addLayout(local_save_row)
+        
+        ai_layout.addWidget(self.local_ai_group)
+
+        # OpenAI Settings group
+        self.openai_group = QGroupBox("OpenAI Settings (Cloud)")
+        self.openai_group.setMinimumHeight(180)  # More height for both rows
+        openai_layout = QVBoxLayout(self.openai_group)
+        openai_layout.setSpacing(16)  # Spacing between rows
+        openai_layout.setContentsMargins(16, 36, 16, 20)  # Much more top padding to clear title
+
+        # API Key row
         row2 = QHBoxLayout()
+        row2.setSpacing(10)
+        api_key_label = QLabel("API Key:")
+        api_key_label.setFixedWidth(95)
+        api_key_label.setFixedHeight(34)
+        row2.addWidget(api_key_label)
         self.openai_key_input = QLineEdit()
         self.openai_key_input.setEchoMode(QLineEdit.Password)
         self.openai_key_input.setPlaceholderText("Enter OpenAI API key")
+        self.openai_key_input.setFixedHeight(34)
         if settings.openai_api_key:
             self.openai_key_input.setText(settings.openai_api_key)
-        row2.addWidget(QLabel("OpenAI API Key:"))
         row2.addWidget(self.openai_key_input)
         self.save_ai_settings_button = QPushButton("Save")
+        self.save_ai_settings_button.setFixedHeight(34)
+        self.save_ai_settings_button.setFixedWidth(75)
         self.delete_ai_key_button = QPushButton("Delete Key")
+        self.delete_ai_key_button.setFixedHeight(34)
+        self.delete_ai_key_button.setFixedWidth(110)  # Wider to fit text
         row2.addWidget(self.save_ai_settings_button)
         row2.addWidget(self.delete_ai_key_button)
-        ai_layout.addLayout(row2)
+        openai_layout.addLayout(row2)
 
+        # Vision Model row
         row3 = QHBoxLayout()
-        row3.addWidget(QLabel("OpenAI Vision Model:"))
+        row3.setSpacing(10)
+        vision_label = QLabel("Vision Model:")
+        vision_label.setFixedWidth(95)
+        vision_label.setFixedHeight(34)
+        row3.addWidget(vision_label)
         self.openai_model_combo = QComboBox()
         self.openai_model_combo.setEditable(True)
+        self.openai_model_combo.setFixedHeight(34)
+        self.openai_model_combo.setMinimumWidth(200)
         # Pre-populate common vision-capable models
         model_options = [
             "gpt-4o",
@@ -903,9 +993,17 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
         row3.addWidget(self.openai_model_combo)
-        ai_layout.addLayout(row3)
+        row3.addStretch()
+        openai_layout.addLayout(row3)
+        
+        ai_layout.addWidget(self.openai_group)
+        
+        # Update visibility based on current selection
+        self._update_ai_provider_visibility()
 
         layout.addWidget(ai_group)
+        
+        # Legacy checkbox removed - using ai_provider dropdown now
 
         # Quick Search settings
         qs_group = QGroupBox("Quick Search")
@@ -931,6 +1029,34 @@ class MainWindow(QMainWindow):
         qs_layout.addLayout(qs_row2)
 
         layout.addWidget(qs_group)
+        
+        # Search Enhancements section
+        search_group = QGroupBox("Search Enhancements")
+        search_layout = QVBoxLayout(search_group)
+        
+        # Single toggle: Spell Check (controls fuzzy + spell correction)
+        row = QHBoxLayout()
+        self.spell_check_btn = QPushButton(
+            "Spell Check: ON" if settings.enable_spell_check else "Spell Check: OFF"
+        )
+        self.spell_check_btn.setCheckable(True)
+        self.spell_check_btn.setChecked(settings.enable_spell_check)
+        self.spell_check_btn.setToolTip(
+            "When ON, the app fixes typos automatically:\n"
+            "• Fuzzy matching for dates/types (e.g., 'yestarday' → 'yesterday')\n"
+            "• Spell correction for general words"
+        )
+        self.spell_check_btn.clicked.connect(self.on_spell_check_toggle)
+        row.addWidget(self.spell_check_btn)
+        row.addStretch()
+        search_layout.addLayout(row)
+        
+        # Info label
+        search_info = QLabel("💡 Spell Check fixes typos in both dates/file types and general words.")
+        search_info.setStyleSheet("color: #888; font-size: 11px;")
+        search_layout.addWidget(search_info)
+        
+        layout.addWidget(search_group)
         
         # Database Maintenance section
         db_group = QGroupBox("Database Maintenance")
@@ -1161,6 +1287,7 @@ class MainWindow(QMainWindow):
         
         # Quick Actions connections (itemChanged fires when checkbox is clicked)
         self.search_results_table.itemChanged.connect(self._on_selection_changed)
+        self.search_results_table.itemChanged.connect(self.on_search_cell_changed)
         self.action_remove_btn.clicked.connect(self._action_remove_from_index)
         self.action_reindex_btn.clicked.connect(self._action_reindex_selected)
         self.action_add_tags_btn.clicked.connect(self._action_add_tags)
@@ -1190,8 +1317,13 @@ class MainWindow(QMainWindow):
         self.clear_index_button.clicked.connect(self.clear_index)
         
         # Settings tab connections
-        if hasattr(self, 'use_openai_checkbox'):
-            self.use_openai_checkbox.toggled.connect(self.on_toggle_openai)
+        # AI Provider selection
+        if hasattr(self, 'ai_provider_combo'):
+            self.ai_provider_combo.currentIndexChanged.connect(self._update_ai_provider_visibility)
+        if hasattr(self, 'check_ollama_btn'):
+            self.check_ollama_btn.clicked.connect(self._check_ollama_status)
+        if hasattr(self, 'save_local_ai_btn'):
+            self.save_local_ai_btn.clicked.connect(self.on_save_local_ai)
         if hasattr(self, 'save_ai_settings_button'):
             self.save_ai_settings_button.clicked.connect(self.on_save_openai)
         if hasattr(self, 'delete_ai_key_button'):
@@ -2270,13 +2402,6 @@ class MainWindow(QMainWindow):
         except Exception:
             return False
 
-    def on_toggle_openai(self, checked: bool):
-        settings.set_use_openai_fallback(bool(checked))
-        self.use_openai_checkbox.setText(
-            "Use ChatGPT (OpenAI) Fallback: ON" if checked else "Use ChatGPT (OpenAI) Fallback: OFF"
-        )
-        self.status_bar.showMessage("OpenAI fallback " + ("enabled" if checked else "disabled"))
-
     def on_save_openai(self):
         key = self.openai_key_input.text().strip()
         settings.set_openai_api_key(key)
@@ -2289,10 +2414,84 @@ class MainWindow(QMainWindow):
         self.openai_key_input.clear()
         self.status_bar.showMessage("OpenAI API key deleted")
 
+    def _update_ai_provider_visibility(self):
+        """Show/hide Local vs OpenAI settings based on provider selection."""
+        idx = self.ai_provider_combo.currentIndex()
+        # 0 = OpenAI, 1 = Local, 2 = None
+        self.openai_group.setVisible(idx == 0)
+        self.local_ai_group.setVisible(idx == 1)
+        
+        # Save the provider selection
+        provider_map = {0: 'openai', 1: 'local', 2: 'none'}
+        provider_names = {0: 'OpenAI (Recommended)', 1: 'Local (Ollama)', 2: 'None'}
+        settings.set_ai_provider(provider_map.get(idx, 'openai'))
+        
+        # Show status message
+        if hasattr(self, 'status_bar'):
+            self.status_bar.showMessage(f"AI Provider: {provider_names.get(idx, 'OpenAI')}")
+
+    def on_save_local_ai(self):
+        """Save local AI model settings."""
+        local_model = self.local_model_combo.currentText().strip() or settings.local_model
+        settings.set_local_model(local_model)
+        self.status_bar.showMessage(f"Local AI model saved: {local_model}")
+
+    def _check_ollama_status(self):
+        """Check if Ollama is running and list available models."""
+        import requests
+        try:
+            r = requests.get("http://localhost:11434/api/tags", timeout=3)
+            if r.ok:
+                data = r.json()
+                models = [m.get('name', 'unknown') for m in data.get('models', [])]
+                if models:
+                    model_list = "\n• ".join(models)
+                    QMessageBox.information(
+                        self, 
+                        "Ollama Status", 
+                        f"✓ Ollama is running!\n\nInstalled models:\n• {model_list}\n\n"
+                        f"Tip: To install new models, run:\n  ollama pull <model-name>"
+                    )
+                else:
+                    QMessageBox.information(
+                        self, 
+                        "Ollama Status", 
+                        "✓ Ollama is running, but no models are installed.\n\n"
+                        "Install the recommended model (handles both text AND images):\n"
+                        "  ollama pull qwen2.5vl:3b"
+                    )
+            else:
+                QMessageBox.warning(
+                    self, 
+                    "Ollama Status", 
+                    "Ollama is not responding.\n\nMake sure Ollama is running."
+                )
+        except requests.exceptions.ConnectionError:
+            QMessageBox.warning(
+                self, 
+                "Ollama Status", 
+                "Ollama is not running.\n\n"
+                "Start it by:\n"
+                "1. Open a terminal\n"
+                "2. Run: ollama serve\n\n"
+                "Or download from: https://ollama.com"
+            )
+        except Exception as e:
+            QMessageBox.warning(
+                self, 
+                "Ollama Status", 
+                f"Error checking Ollama status:\n{str(e)}"
+            )
+
     def on_toggle_gpt_rerank(self, checked: bool):
         settings.set_use_openai_search_rerank(bool(checked))
         self.gpt_rerank_button.setText("GPT Rerank: ON" if checked else "GPT Rerank: OFF")
         self.status_bar.showMessage("GPT rerank " + ("enabled" if checked else "disabled"))
+
+    def on_spell_check_toggle(self, checked: bool):
+        settings.set_enable_spell_check(bool(checked))
+        self.spell_check_btn.setText("Spell Check: ON" if checked else "Spell Check: OFF")
+        self.status_bar.showMessage("Spell check " + ("enabled" if checked else "disabled"))
 
     # Quick Search settings handlers
     def on_qs_autopaste(self, checked: bool):
@@ -2315,8 +2514,12 @@ class MainWindow(QMainWindow):
         # Hotkey will take effect on next app start; to apply now, restart the app
 
     def on_debug_cell_changed(self, item: QTableWidgetItem) -> None:
+        # DIAGNOSTIC: Log every call to this handler
+        logger.warning(f"[HANDLER] on_debug_cell_changed FIRED: row={item.row()}, col={item.column()}, text='{item.text()[:50] if item.text() else ''}'")
+        
         # Avoid handling during table population
         if getattr(self, '_populating_debug_table', False):
+            logger.warning("[HANDLER] on_debug_cell_changed BLOCKED by _populating_debug_table flag")
             return
         try:
             row = item.row()
@@ -3792,6 +3995,13 @@ Move Plan Summary:
     
     def display_search_results(self, results: List[Dict[str, Any]]):
         """Display search results in the table."""
+        # DIAGNOSTIC: Log signal blocking
+        logger.warning(f"[DISPLAY] display_search_results START: {len(results)} results, blocking signals...")
+        
+        # Block signals to prevent itemChanged from firing during population
+        self._populating_search_table = True
+        self.search_results_table.blockSignals(True)
+        
         self.search_results_table.setRowCount(len(results))
         
         for row, result in enumerate(results):
@@ -3904,10 +4114,19 @@ Move Plan Summary:
             btn_copy.clicked.connect(lambda _, p=file_path_for_row: self.copy_path_to_clipboard(p))
             btn_open.clicked.connect(lambda _, p=file_path_for_row: self.open_file_in_os(p))
 
-        # Hook up edit commits
-        self.search_results_table.itemChanged.connect(self.on_search_cell_changed)
+        # Re-enable signals after population is complete
+        self.search_results_table.blockSignals(False)
+        self._populating_search_table = False
+        logger.warning("[DISPLAY] display_search_results END: signals unblocked")
 
     def on_search_cell_changed(self, item: QTableWidgetItem) -> None:
+        # DIAGNOSTIC: Log every call to this handler
+        logger.warning(f"[HANDLER] on_search_cell_changed FIRED: row={item.row()}, col={item.column()}, text='{item.text()[:50] if item.text() else ''}'")
+        
+        # Avoid handling during table population
+        if getattr(self, '_populating_search_table', False):
+            logger.warning("[HANDLER] on_search_cell_changed BLOCKED by _populating_search_table flag")
+            return
         try:
             row = item.row()
             col = item.column()
@@ -3920,38 +4139,33 @@ Move Plan Summary:
             if not file_id:
                 return
             # Determine which field is being edited
+            # Column layout: 0=Checkbox, 1=Name, 2=Category, 3=Size, 4=Relevance, 5=Label, 
+            # 6=Tags, 7=Caption, 8=OCR, 9=AI Source, 10=Vision, 11=Purpose, 12=Suggested filename, 13=Path, 14=Actions
             new_val = item.text()
-            if col == 6:  # Caption
+            ok = False
+            if col == 7:  # Caption
                 ok = file_index.update_file_field(file_id, 'caption', new_val)
-            elif col == 10:  # Purpose (metadata)
+                if ok:
+                    rec['caption'] = new_val
+            elif col == 11:  # Purpose (metadata)
                 meta = rec.get('metadata') or {}
                 meta['purpose'] = new_val
                 ok = file_index.update_file_field(file_id, 'metadata', meta)
-            elif col == 11:  # Suggested filename (metadata)
+                if ok:
+                    rec.setdefault('metadata', {})
+                    rec['metadata']['purpose'] = new_val
+            elif col == 12:  # Suggested filename (metadata)
                 meta = rec.get('metadata') or {}
                 meta['suggested_filename'] = new_val
                 ok = file_index.update_file_field(file_id, 'metadata', meta)
-            elif col == 4:  # Label
-                ok = file_index.update_file_field(file_id, 'label', new_val)
-            elif col == 5:  # Tags (comma-separated)
-                tags = [t.strip() for t in (new_val or '').split(',') if t.strip()]
-                ok = file_index.update_file_field(file_id, 'tags', tags)
+                if ok:
+                    rec.setdefault('metadata', {})
+                    rec['metadata']['suggested_filename'] = new_val
             else:
+                # Non-editable column, ignore
                 return
             if ok:
                 self.status_bar.showMessage("Saved edit")
-                # refresh our cache minimally
-                rec['caption'] = new_val if col == 6 else rec.get('caption')
-                if col in (10, 11):
-                    rec.setdefault('metadata', {})
-                    if col == 10:
-                        rec['metadata']['purpose'] = new_val
-                    else:
-                        rec['metadata']['suggested_filename'] = new_val
-                if col == 4:
-                    rec['label'] = new_val
-                if col == 5:
-                    rec['tags'] = tags
             else:
                 QMessageBox.critical(self, "Save Error", "Failed to save your edit.")
         except Exception as e:

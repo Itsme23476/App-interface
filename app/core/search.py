@@ -6,11 +6,14 @@ import logging
 import re
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Callable, Tuple
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
 from .database import file_index
 from .scan import scan_directory
 from .categorize import get_file_metadata
 from .vision import analyze_image, analyze_text, gpt_vision_fallback, describe_image_detailed
 from .settings import settings
+from .text_extract import extract_file_text, get_supported_text_formats
 import os
 from .embeddings import embed_text
 import hashlib
@@ -18,11 +21,135 @@ from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
+# Parallel processing settings
+MAX_CONCURRENT_AI_REQUESTS = 50  # Tier 2: 5,000 RPM allows 50-80 safely
+
 class SearchService:
     """High-level search service for file discovery."""
     
     def __init__(self):
         self.index = file_index
+        self._cancel_flag = threading.Event()
+    
+    def cancel_indexing(self):
+        """Signal to cancel ongoing indexing operation."""
+        self._cancel_flag.set()
+        logger.info("Indexing cancellation requested")
+    
+    def _process_single_file(self, file_data: Dict, directory_path: Path) -> Dict[str, Any]:
+        """
+        Process a single file with AI analysis. Called in parallel.
+        
+        Returns:
+            Dictionary with file metadata and AI analysis results
+        """
+        try:
+            # Get file path
+            if 'source_path' in file_data:
+                file_path = Path(file_data['source_path'])
+            else:
+                file_path = directory_path / file_data['name']
+            
+            # Get basic metadata
+            full_metadata = get_file_metadata(file_path)
+            
+            # Compute content hash
+            try:
+                h = hashlib.sha256()
+                with open(file_path, 'rb') as fh:
+                    for chunk in iter(lambda: fh.read(1024 * 1024), b''):
+                        h.update(chunk)
+                full_metadata['content_hash'] = h.hexdigest()
+            except Exception:
+                full_metadata['content_hash'] = None
+            
+            full_metadata['last_indexed_at'] = datetime.utcnow().isoformat()
+            full_metadata['source_path'] = str(file_path)
+            
+            # Check if file already indexed with same content hash - skip AI analysis
+            existing = self.index.get_file_by_path(str(file_path))
+            if existing and existing.get('content_hash') == full_metadata.get('content_hash'):
+                # File unchanged - skip expensive AI analysis, return existing data
+                logger.debug(f"Skipping unchanged file: {file_path.name}")
+                existing['_file_path'] = file_path
+                existing['_skipped'] = True
+                return existing
+            
+            # Check for cancellation before AI call
+            if self._cancel_flag.is_set():
+                return {'_file_path': file_path, '_cancelled': True, **full_metadata}
+            
+            # AI Analysis - Vision for images/PDFs; Text LLM for others
+            ext = file_path.suffix.lower()
+            image_extensions = {'.png', '.jpg', '.jpeg', '.bmp', '.tiff', '.tif', '.gif', '.webp', '.avif', '.heic', '.heif', '.ico', '.raw', '.cr2', '.nef', '.arw', '.pdf'}
+            
+            if ext in image_extensions:
+                # Image/PDF: Use vision model
+                if settings.ai_provider == 'openai':
+                    from .vision import _file_to_b64
+                    image_b64 = _file_to_b64(file_path)
+                    if image_b64:
+                        gptv = gpt_vision_fallback(image_b64, filename=file_path.name)
+                        if gptv:
+                            full_metadata.update(gptv)
+                            full_metadata['ai_source'] = 'openai:gpt-4o'
+                else:
+                    # Local models path
+                    use_detailed = os.environ.get('USE_DETAILED_VISION', '1').strip() not in {'0', 'false', 'no'}
+                    vision = None
+                    if use_detailed:
+                        vision = describe_image_detailed(file_path)
+                    if not vision or not vision.get('caption'):
+                        vision = analyze_image(file_path)
+                    if not vision or not vision.get('caption'):
+                        # Fallback to cloud
+                        from .vision import _file_to_b64
+                        image_b64 = _file_to_b64(file_path)
+                        if image_b64:
+                            gptv = gpt_vision_fallback(image_b64, filename=file_path.name)
+                            if gptv:
+                                vision = gptv
+                                full_metadata['ai_source'] = 'openai:'
+                    if vision:
+                        full_metadata.update(vision)
+                        if 'ai_source' not in full_metadata:
+                            full_metadata['ai_source'] = 'ollama:local'
+            else:
+                # Non-image: Extract text and analyze
+                snippet = ""
+                try:
+                    extracted = extract_file_text(file_path)
+                    if extracted:
+                        snippet = extracted
+                        if ext == '.csv' or ext in {'.xlsx', '.xls'}:
+                            full_metadata['ocr_text'] = extracted[:5000]
+                            full_metadata['has_ocr'] = True
+                    else:
+                        with open(file_path, 'r', encoding='utf-8', errors='ignore') as fh:
+                            snippet = fh.read(8000)
+                except Exception:
+                    snippet = ""
+                
+                if snippet:
+                    tvision = analyze_text(snippet, filename=file_path.name)
+                    if tvision:
+                        full_metadata.update(tvision)
+                        if settings.ai_provider == 'openai':
+                            full_metadata['ai_source'] = 'openai:gpt-4o-mini'
+                        else:
+                            full_metadata['ai_source'] = 'ollama:qwen2.5vl'
+            
+            full_metadata['_file_path'] = file_path
+            return full_metadata
+            
+        except Exception as e:
+            logger.error(f"Error processing file {file_data.get('name', 'unknown')}: {e}")
+            return {
+                '_file_path': Path(file_data.get('source_path', file_data.get('name', 'unknown'))),
+                '_error': str(e),
+                'name': file_data.get('name', 'unknown'),
+                'source_path': file_data.get('source_path', ''),
+            }
     
     def index_directory(
         self,
@@ -31,174 +158,153 @@ class SearchService:
         progress_cb: Optional[Callable[[int, int, str], None]] = None,
     ) -> Dict[str, Any]:
         """
-        Index all files in a directory for search.
+        Index all files in a directory for search using parallel processing.
         
         Args:
             directory_path: Directory to index
             recursive: Whether to scan subdirectories
+            progress_cb: Callback for progress updates (current, total, message)
             
         Returns:
             Dictionary with indexing statistics
         """
         try:
             logger.info(f"Starting to index directory: {directory_path}")
+            self._cancel_flag.clear()
             
             # Scan directory for files
             files = scan_directory(directory_path)
             total = len(files)
-            if progress_cb:
-                progress_cb(0, total, "Starting indexing...")
             
-            # Index each file
+            if progress_cb:
+                progress_cb(0, total, "Starting parallel indexing...")
+            
+            if total == 0:
+                return {
+                    'total_files': 0,
+                    'indexed_files': 0,
+                    'files_with_ocr': 0,
+                    'directory': str(directory_path)
+                }
+            
+            # Process files in parallel
             indexed_count = 0
             ocr_count = 0
+            skipped_count = 0
+            completed = 0
+            cancelled = False
             
-            for idx, file_data in enumerate(files):
-                # Get full metadata including OCR
-                # Handle both cases: when source_path exists or when we need to construct it
-                if 'source_path' in file_data:
-                    file_path = Path(file_data['source_path'])
-                else:
-                    # Construct path from directory and filename
-                    file_path = directory_path / file_data['name']
+            logger.info(f"Processing {total} files with {MAX_CONCURRENT_AI_REQUESTS} concurrent workers")
+            
+            with ThreadPoolExecutor(max_workers=MAX_CONCURRENT_AI_REQUESTS) as executor:
+                # Submit all tasks
+                future_to_idx = {
+                    executor.submit(self._process_single_file, file_data, directory_path): idx
+                    for idx, file_data in enumerate(files)
+                }
                 
-                full_metadata = get_file_metadata(file_path)
-
-                # Compute content hash for idempotency
-                try:
-                    h = hashlib.sha256()
-                    with open(file_path, 'rb') as fh:
-                        for chunk in iter(lambda: fh.read(1024 * 1024), b''):
-                            h.update(chunk)
-                    full_metadata['content_hash'] = h.hexdigest()
-                except Exception:
-                    full_metadata['content_hash'] = None
-
-                full_metadata['last_indexed_at'] = datetime.utcnow().isoformat()
-                
-                # Ensure source_path is set
-                full_metadata['source_path'] = str(file_path)
-
-                # Vision for images/PDFs; Text LLM for others
-                try:
-                    ext = file_path.suffix.lower()
-                    if ext in {'.png', '.jpg', '.jpeg', '.bmp', '.tiff', '.tif', '.gif', '.webp', '.avif', '.heic', '.heif', '.ico', '.raw', '.cr2', '.nef', '.arw', '.pdf'}:
-                        # If OpenAI toggle is ON, use only OpenAI (no local models)
-                        if settings.use_openai_fallback:
-                            from .vision import _file_to_b64  # reuse helper
-                            vision = None
-                            image_b64 = _file_to_b64(file_path)
-                            if image_b64:
-                                gptv = gpt_vision_fallback(image_b64, filename=file_path.name)
-                                if gptv:
-                                    vision = gptv
-                                    full_metadata['ai_source'] = 'openai:'
-                            if vision:
-                                full_metadata.update(vision)
-                        else:
-                            # Local models path
-                            use_detailed = os.environ.get('USE_DETAILED_VISION', '1').strip() not in {'0','false','no'}
-                            vision = None
-                            if use_detailed:
-                                # Prefer detailed description via Llama vision first
-                                vision = describe_image_detailed(file_path)
-                            if not vision or not vision.get('caption'):
-                                # Fallback to compact classifier (moondream)
-                                vision = analyze_image(file_path)
-                            if not vision or not vision.get('caption'):
-                                # Optional cloud fallback when toggle is off but API is set
-                                from .vision import _file_to_b64  # reuse helper
-                                image_b64 = _file_to_b64(file_path)
-                                if image_b64:
-                                    gptv = gpt_vision_fallback(image_b64, filename=file_path.name)
-                                    if gptv:
-                                        vision = gptv
-                                        full_metadata['ai_source'] = 'openai:'
-                            if vision:
-                                full_metadata.update(vision)
-                                # Set ai_source depending on which model produced data if not already set
-                                if 'ai_source' not in full_metadata:
-                                    if use_detailed and vision.get('caption') and vision.get('label'):
-                                        full_metadata['ai_source'] = 'ollama:llama3.2-vision'
-                                    else:
-                                        full_metadata['ai_source'] = 'ollama:moondream'
-                    else:
-                        # Non-image files: if OpenAI-only is ON, skip local classification
-                        if not settings.use_openai_fallback:
-                            # Read small snippet for local text classification
-                            snippet = ""
+                # Process results as they complete
+                for future in as_completed(future_to_idx):
+                    if self._cancel_flag.is_set():
+                        cancelled = True
+                        # Cancel remaining futures
+                        for f in future_to_idx:
+                            f.cancel()
+                        break
+                    
+                    try:
+                        result = future.result(timeout=120)  # 2 min timeout per file
+                        file_path = result.pop('_file_path', None)
+                        error = result.pop('_error', None)
+                        was_cancelled = result.pop('_cancelled', False)
+                        was_skipped = result.pop('_skipped', False)
+                        
+                        if was_cancelled:
+                            cancelled = True
+                            break
+                        
+                        if error:
+                            logger.warning(f"File processing error: {error}")
+                            completed += 1
+                            continue
+                        
+                        # Handle skipped (unchanged) files
+                        if was_skipped:
+                            skipped_count += 1
+                            completed += 1
+                            if progress_cb:
+                                name = file_path.name if file_path else "file"
+                                try:
+                                    progress_cb(completed, total, f"Skipped (unchanged): {name}")
+                                except InterruptedError:
+                                    self._cancel_flag.set()
+                                    cancelled = True
+                                    break
+                            continue
+                        
+                        # Index the file
+                        if self.index.add_file(result):
+                            indexed_count += 1
+                            if result.get('has_ocr', False):
+                                ocr_count += 1
+                            
+                            # Create embedding (quick operation)
                             try:
-                                with open(file_path, 'r', encoding='utf-8', errors='ignore') as fh:
-                                    snippet = fh.read(8000)
+                                rec = self.index.get_file_by_path(str(file_path))
+                                if rec:
+                                    text_parts = [rec.get('file_name') or '']
+                                    if rec.get('label'):
+                                        text_parts.append(rec['label'])
+                                    if rec.get('tags'):
+                                        text_parts.append(' '.join(rec['tags']))
+                                    if rec.get('caption'):
+                                        text_parts.append(rec['caption'])
+                                    if rec.get('ocr_text'):
+                                        text_parts.append(rec['ocr_text'])
+                                    text_blob = ' '.join([t for t in text_parts if t])[:5000]
+                                    vec = embed_text(text_blob)
+                                    if vec:
+                                        self.index.upsert_embedding(rec['id'], 'ollama:nomic-embed-text', vec)
                             except Exception:
-                                snippet = ""
-                            if snippet:
-                                tvision = analyze_text(snippet, filename=file_path.name)
-                                if tvision:
-                                    full_metadata.update(tvision)
-                                    full_metadata['ai_source'] = 'ollama:' + 'llama3.2:1b'
-                except Exception:
-                    pass
-                
-                # Index the file
-                if self.index.add_file(full_metadata):
-                    indexed_count += 1
-                    if full_metadata.get('has_ocr', False):
-                        ocr_count += 1
-                    # After insert/update, create embedding
-                    try:
-                        # Fetch id
-                        rec = self.index.get_file_by_path(str(file_path))
-                        if rec:
-                            text_parts = [rec.get('file_name') or '', ' ']
-                            if rec.get('label'):
-                                text_parts.append(rec['label'])
-                            if rec.get('tags'):
-                                text_parts.append(' '.join(rec['tags']))
-                            if rec.get('caption'):
-                                text_parts.append(rec['caption'])
-                            if rec.get('ocr_text'):
-                                text_parts.append(rec['ocr_text'])
-                            text_blob = ' '.join([t for t in text_parts if t])[:5000]
-                            vec = embed_text(text_blob)
-                            if vec:
-                                self.index.upsert_embedding(rec['id'], 'ollama:nomic-embed-text', vec)
-                    except Exception:
-                        pass
-                if progress_cb:
-                    name = file_path.name
-                    try:
-                        progress_cb(idx + 1, total, f"Indexed: {name}")
-                    except InterruptedError:
-                        # User cancelled - return partial results
-                        logger.info(f"Indexing cancelled by user after {indexed_count} files")
-                        return {
-                            'total_files': len(files),
-                            'indexed_files': indexed_count,
-                            'files_with_ocr': ocr_count,
-                            'directory': str(directory_path),
-                            'cancelled': True
-                        }
+                                pass
+                        
+                        completed += 1
+                        
+                        # Progress callback
+                        if progress_cb:
+                            name = file_path.name if file_path else "file"
+                            try:
+                                progress_cb(completed, total, f"Indexed: {name}")
+                            except InterruptedError:
+                                self._cancel_flag.set()
+                                cancelled = True
+                                break
+                                
+                    except Exception as e:
+                        completed += 1
+                        logger.error(f"Error in future result: {e}")
             
-            logger.info(f"Indexed {indexed_count} files ({ocr_count} with OCR)")
+            if cancelled:
+                logger.info(f"Indexing cancelled after {indexed_count} files ({skipped_count} skipped)")
+                return {
+                    'total_files': total,
+                    'indexed_files': indexed_count,
+                    'skipped_files': skipped_count,
+                    'files_with_ocr': ocr_count,
+                    'directory': str(directory_path),
+                    'cancelled': True
+                }
+            
+            logger.info(f"Indexed {indexed_count} files, skipped {skipped_count} unchanged ({ocr_count} with OCR)")
             
             return {
-                'total_files': len(files),
+                'total_files': total,
                 'indexed_files': indexed_count,
+                'skipped_files': skipped_count,
                 'files_with_ocr': ocr_count,
                 'directory': str(directory_path)
             }
             
-        except InterruptedError:
-            # User cancelled
-            logger.info("Indexing cancelled by user")
-            return {
-                'total_files': 0,
-                'indexed_files': 0,
-                'files_with_ocr': 0,
-                'directory': str(directory_path),
-                'cancelled': True
-            }
         except Exception as e:
             logger.error(f"Error indexing directory {directory_path}: {e}")
             return {'error': str(e)}

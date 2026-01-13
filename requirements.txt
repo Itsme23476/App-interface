@@ -15,3 +15,5 @@ supabase-auth>=2.0.0
 httpx>=0.26.0
 dateparser>=1.2.0
 PyPDF2>=3.0.0
+rapidfuzz>=3.0.0
+pyspellchecker>=0.8.0

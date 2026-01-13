@@ -187,7 +187,9 @@ class FileOperations:
                             current_tags = []
                             if row['tags']:
                                 try:
-                                    current_tags = json.loads(row['tags'])
+                            # tags may be stored as JSON list or comma-separated string
+                            from app.core.database import _parse_tags_value
+                            current_tags = _parse_tags_value(row['tags']) or []
                                     if not isinstance(current_tags, list):
                                         current_tags = [current_tags] if current_tags else []
                                 except:

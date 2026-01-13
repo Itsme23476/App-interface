@@ -2,11 +2,12 @@
 Natural Language Query Parser for Search Filters.
 Extracts date ranges and file types from user queries.
 Supports complex date expressions like "previous Thursday" or "January 3, 2023".
+Includes fuzzy matching and spell checking for typo tolerance.
 """
 
 import re
 import logging
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple, List
 from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
@@ -17,6 +18,141 @@ try:
     HAS_DATEPARSER = True
 except ImportError:
     HAS_DATEPARSER = False
+
+# Try to import rapidfuzz for fuzzy matching
+try:
+    from rapidfuzz import fuzz, process
+    HAS_RAPIDFUZZ = True
+except ImportError:
+    HAS_RAPIDFUZZ = False
+    logger.warning("rapidfuzz not installed - fuzzy matching disabled. Run: pip install rapidfuzz")
+
+# Try to import spellchecker
+try:
+    from spellchecker import SpellChecker
+    HAS_SPELLCHECKER = True
+    _spell_checker = SpellChecker()
+    # Add custom words that might not be in dictionary
+    _spell_checker.word_frequency.load_words([
+        'thumbnail', 'thumbnails', 'screenshot', 'screenshots', 
+        'pdf', 'pdfs', 'jpeg', 'png', 'webp', 'avif',
+        'docx', 'xlsx', 'pptx', 'csv', 'json', 'yaml'
+    ])
+except ImportError:
+    HAS_SPELLCHECKER = False
+    _spell_checker = None
+    logger.warning("pyspellchecker not installed - spell check disabled. Run: pip install pyspellchecker")
+
+
+# Keywords for fuzzy matching (date-related)
+DATE_KEYWORDS = [
+    'today', 'yesterday', 'week', 'month', 'year',
+    'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday',
+    'january', 'february', 'march', 'april', 'may', 'june',
+    'july', 'august', 'september', 'october', 'november', 'december',
+    'last', 'this', 'previous', 'next', 'past', 'ago', 'days'
+]
+
+# Keywords for fuzzy matching (type-related)
+TYPE_KEYWORDS = [
+    'image', 'images', 'photo', 'photos', 'picture', 'pictures',
+    'screenshot', 'screenshots', 'thumbnail', 'thumbnails',
+    'document', 'documents', 'pdf', 'pdfs', 'video', 'videos',
+    'audio', 'music', 'code', 'spreadsheet', 'spreadsheets'
+]
+
+# All keywords for fuzzy matching
+ALL_KEYWORDS = DATE_KEYWORDS + TYPE_KEYWORDS
+
+
+def fuzzy_correct_word(word: str, threshold: int = 80) -> str:
+    """
+    Try to correct a misspelled word using fuzzy matching against known keywords.
+    
+    Args:
+        word: The potentially misspelled word
+        threshold: Minimum similarity score (0-100) to accept a match
+        
+    Returns:
+        Corrected word if a good match found, otherwise original word
+    """
+    if not HAS_RAPIDFUZZ or len(word) < 3:
+        return word
+    
+    word_lower = word.lower()
+    
+    # Skip if it's already a known keyword
+    if word_lower in ALL_KEYWORDS:
+        return word
+    
+    # Find best match among keywords
+    result = process.extractOne(word_lower, ALL_KEYWORDS, scorer=fuzz.ratio)
+    
+    if result and result[1] >= threshold:
+        matched_word, score, _ = result
+        logger.debug(f"Fuzzy matched '{word}' -> '{matched_word}' (score: {score})")
+        return matched_word
+    
+    return word
+
+
+def spell_check_query(query: str) -> str:
+    """
+    Apply spell checking to correct common typos in the query.
+    
+    Args:
+        query: The user's search query
+        
+    Returns:
+        Query with spelling corrections applied
+    """
+    if not HAS_SPELLCHECKER or not _spell_checker:
+        return query
+    
+    words = query.split()
+    corrected_words = []
+    
+    for word in words:
+        # Skip short words and words with special characters
+        if len(word) < 3 or not word.isalpha():
+            corrected_words.append(word)
+            continue
+        
+        # Check if word is misspelled
+        if word.lower() not in _spell_checker:
+            correction = _spell_checker.correction(word.lower())
+            if correction and correction != word.lower():
+                logger.debug(f"Spell corrected '{word}' -> '{correction}'")
+                corrected_words.append(correction)
+            else:
+                corrected_words.append(word)
+        else:
+            corrected_words.append(word)
+    
+    return ' '.join(corrected_words)
+
+
+def apply_fuzzy_corrections(query: str) -> str:
+    """
+    Apply fuzzy matching to correct typos in date/type keywords.
+    
+    Args:
+        query: The user's search query
+        
+    Returns:
+        Query with fuzzy corrections applied
+    """
+    if not HAS_RAPIDFUZZ:
+        return query
+    
+    words = query.split()
+    corrected_words = []
+    
+    for word in words:
+        corrected = fuzzy_correct_word(word)
+        corrected_words.append(corrected)
+    
+    return ' '.join(corrected_words)
 
 # Day name to weekday number mapping (Monday=0, Sunday=6)
 DAY_NAME_TO_WEEKDAY = {
@@ -363,7 +499,11 @@ def parse_query(query: str) -> Dict:
             - date_range: Tuple of (start_date, end_date) if date_filter detected
             - extensions: List of file extensions if type_filter detected
             - specific_date: The specific date if a complex date was parsed (for display)
+            - corrections_applied: List of corrections made (for UI feedback)
     """
+    # Import settings to check if features are enabled
+    from .settings import settings
+    
     result = {
         'clean_query': query,
         'date_filter': None,
@@ -371,9 +511,28 @@ def parse_query(query: str) -> Dict:
         'date_range': (None, None),
         'extensions': None,
         'specific_date': None,
+        'corrections_applied': [],
     }
     
-    clean_query = query.lower()
+    # Apply corrections if enabled
+    processed_query = query
+    
+    # Single toggle: Spell Check (controls both fuzzy + spell correction)
+    if settings.enable_spell_check:
+        # Step 1: Fuzzy match common keywords (dates/types)
+        if HAS_RAPIDFUZZ:
+            corrected = apply_fuzzy_corrections(processed_query)
+            if corrected != processed_query:
+                result['corrections_applied'].append(f"Fuzzy: '{processed_query}' → '{corrected}'")
+                processed_query = corrected
+        # Step 2: Spell check general words (dictionary-based)
+        if HAS_SPELLCHECKER:
+            corrected = spell_check_query(processed_query)
+            if corrected != processed_query:
+                result['corrections_applied'].append(f"Spell: '{processed_query}' → '{corrected}'")
+                processed_query = corrected
+    
+    clean_query = processed_query.lower()
     date_matched_text = None
     
     # First, try simple date patterns (today, yesterday, etc.)
@@ -388,7 +547,7 @@ def parse_query(query: str) -> Dict:
     
     # If no simple pattern matched, try complex date parsing with dateparser
     if result['date_filter'] is None:
-        filter_label, date_range, matched_text = try_parse_complex_date(query)
+        filter_label, date_range, matched_text = try_parse_complex_date(processed_query)
         if filter_label and date_range:
             result['date_filter'] = filter_label
             result['date_range'] = date_range
@@ -405,8 +564,12 @@ def parse_query(query: str) -> Dict:
         if re.search(pattern, clean_query, re.IGNORECASE):
             result['type_filter'] = filter_value
             result['extensions'] = TYPE_EXTENSIONS.get(filter_value, [])
-            # Remove the matched pattern from query
-            clean_query = re.sub(pattern, '', clean_query, flags=re.IGNORECASE)
+            # Only remove the pattern if there are OTHER words in the query
+            # This prevents "thumbnail" from being stripped when it's the only search term
+            temp_query = re.sub(pattern, '', clean_query, flags=re.IGNORECASE).strip()
+            if temp_query:  # Only strip if something remains
+                clean_query = temp_query
+            # If nothing remains, keep the original as search term (don't strip)
             break  # Only use first match
     
     # Clean up the query (remove extra spaces, common words)
@@ -418,7 +581,11 @@ def parse_query(query: str) -> Dict:
     if clean_query or result['date_filter'] or result['type_filter']:
         result['clean_query'] = clean_query  # Can be empty string for date-only searches
     else:
-        result['clean_query'] = query  # No filters detected, keep original
+        result['clean_query'] = processed_query  # No filters detected, keep processed query
+    
+    # Log corrections if any were made
+    if result['corrections_applied']:
+        logger.info(f"Query corrections applied: {result['corrections_applied']}")
     
     return result
 

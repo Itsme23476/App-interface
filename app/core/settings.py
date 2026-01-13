@@ -15,13 +15,16 @@ class Settings:
         self.app_name = "ai-file-organizer"
         self.category_map = self._load_default_categories()
         self.mime_fallbacks = self._get_mime_fallbacks()
-        # AI options
-        self.use_openai_fallback: bool = False
+        # AI Provider: 'openai' (default, recommended), 'local' (Ollama), or 'none'
+        self.ai_provider: str = 'openai'  # OpenAI is now the default - no local setup needed!
         self.openai_api_key: str | None = os.environ.get('OPENAI_API_KEY')
-        self.openai_vision_model: str = os.environ.get('OPENAI_VISION_MODEL', 'gpt-4o')
+        self.openai_vision_model: str = os.environ.get('OPENAI_VISION_MODEL', 'gpt-4o-mini')  # Cost-effective default
         # Search rerank option (ChatGPT)
         self.use_openai_search_rerank: bool = False
         self.openai_search_model: str = 'gpt-4o-mini'
+        # Local AI model settings (Ollama)
+        # Qwen 2.5-VL handles BOTH text AND vision in one model
+        self.local_model: str = 'qwen2.5vl:3b'
         # Quick search overlay
         self.use_quick_search: bool = True
         self.quick_search_shortcut: str = 'ctrl+alt+h'
@@ -32,6 +35,11 @@ class Settings:
         self.theme: str = 'dark'
         # Auto-index downloads folder
         self.auto_index_downloads: bool = False
+        # OCR during indexing (slow - disable for faster indexing)
+        self.enable_ocr_indexing: bool = False
+        # Search enhancements
+        # Single toggle: when enabled, we apply BOTH fuzzy keyword matching + spell correction
+        self.enable_spell_check: bool = False
         # Auth tokens (stored securely)
         self.auth_access_token: str = ''
         self.auth_refresh_token: str = ''
@@ -110,8 +118,22 @@ class Settings:
                 pass
         self._save_config()
 
+    def set_ai_provider(self, provider: str) -> None:
+        """Set the AI provider: 'openai' (default), 'local' (Ollama), or 'none'."""
+        if provider in ('openai', 'local', 'none'):
+            self.ai_provider = provider
+        else:
+            self.ai_provider = 'openai'  # Default to OpenAI
+        self._save_config()
+    
+    # Legacy compatibility - maps to ai_provider
+    @property
+    def use_openai_fallback(self) -> bool:
+        """Legacy property - returns True if AI provider is OpenAI."""
+        return self.ai_provider == 'openai'
+    
     def set_use_openai_fallback(self, use: bool) -> None:
-        self.use_openai_fallback = bool(use)
+        self.ai_provider = 'openai' if use else 'local'
         self._save_config()
 
     def set_openai_vision_model(self, model: str) -> None:
@@ -128,6 +150,12 @@ class Settings:
             pass
         self._save_config()
 
+    # Local AI model setter
+    def set_local_model(self, model: str) -> None:
+        """Set the local model for Ollama (Qwen 2.5-VL handles both text and vision)."""
+        self.local_model = (model or '').strip() or 'qwen2.5vl:3b'
+        self._save_config()
+
     # Persistence helpers
     def _config_file(self) -> Path:
         return self.get_app_data_dir() / 'settings.json'
@@ -138,7 +166,14 @@ class Settings:
             return
         with open(cfg_file, 'r', encoding='utf-8') as f:
             data = json.load(f)
-        self.use_openai_fallback = bool(data.get('use_openai_fallback', self.use_openai_fallback))
+        # AI Provider (migrate from old use_openai_fallback)
+        ai_prov = data.get('ai_provider')
+        if ai_prov in ('openai', 'local', 'none'):
+            self.ai_provider = ai_prov
+        elif data.get('use_openai_fallback'):
+            # Migrate old setting: if they had OpenAI fallback enabled, keep using OpenAI
+            self.ai_provider = 'openai'
+        # else keep default 'openai'
         self.use_openai_search_rerank = bool(data.get('use_openai_search_rerank', self.use_openai_search_rerank))
         self.use_quick_search = bool(data.get('use_quick_search', self.use_quick_search))
         k = data.get('openai_api_key')
@@ -152,6 +187,14 @@ class Settings:
         sm = data.get('openai_search_model')
         if isinstance(sm, str) and sm.strip():
             self.openai_search_model = sm.strip()
+        # Local AI model (single model for both text and vision)
+        lm = data.get('local_model')
+        if isinstance(lm, str) and lm.strip():
+            # Migrate from 7b to 3b (7b requires too much RAM for most systems)
+            loaded_model = lm.strip()
+            if loaded_model == 'qwen2.5vl:7b':
+                loaded_model = 'qwen2.5vl:3b'  # Auto-migrate to lighter version
+            self.local_model = loaded_model
         qs = data.get('quick_search_shortcut')
         if isinstance(qs, str) and qs.strip():
             self.quick_search_shortcut = qs.strip().lower()
@@ -166,6 +209,19 @@ class Settings:
             self.theme = theme
         # Auto-index downloads
         self.auto_index_downloads = bool(data.get('auto_index_downloads', False))
+        # OCR during indexing (disabled by default for speed)
+        self.enable_ocr_indexing = bool(data.get('enable_ocr_indexing', False))
+        # Search enhancements
+        # Migration: previously we had separate enable_fuzzy_search and enable_spell_check.
+        # Now a single toggle controls both; treat either legacy flag as enabling spell_check.
+        legacy_fuzzy = data.get('enable_fuzzy_search')
+        legacy_spell = data.get('enable_spell_check')
+        if legacy_spell is not None:
+            self.enable_spell_check = bool(legacy_spell)
+        elif legacy_fuzzy is not None:
+            self.enable_spell_check = bool(legacy_fuzzy)
+        else:
+            self.enable_spell_check = bool(data.get('enable_spell_check', self.enable_spell_check))
         # Auth tokens
         self.auth_access_token = data.get('auth_access_token', '')
         self.auth_refresh_token = data.get('auth_refresh_token', '')
@@ -173,11 +229,12 @@ class Settings:
 
     def _save_config(self) -> None:
         cfg = {
-            'use_openai_fallback': self.use_openai_fallback,
+            'ai_provider': self.ai_provider,
             'openai_api_key': self.openai_api_key or '',
             'openai_vision_model': self.openai_vision_model,
             'use_openai_search_rerank': self.use_openai_search_rerank,
             'openai_search_model': self.openai_search_model,
+            'local_model': self.local_model,
             'use_quick_search': self.use_quick_search,
             'quick_search_shortcut': self.quick_search_shortcut,
             'quick_search_autopaste': self.quick_search_autopaste,
@@ -185,6 +242,8 @@ class Settings:
             'quick_search_geometry': self.quick_search_geometry,
             'theme': self.theme,
             'auto_index_downloads': self.auto_index_downloads,
+            'enable_ocr_indexing': self.enable_ocr_indexing,
+            'enable_spell_check': self.enable_spell_check,
             'auth_access_token': self.auth_access_token,
             'auth_refresh_token': self.auth_refresh_token,
             'auth_user_email': self.auth_user_email,
@@ -242,6 +301,11 @@ class Settings:
     def has_stored_session(self) -> bool:
         """Check if we have stored auth tokens."""
         return bool(self.auth_access_token and self.auth_refresh_token)
+
+    def set_enable_spell_check(self, enabled: bool) -> None:
+        """Enable or disable typo correction in search (fuzzy + spell check)."""
+        self.enable_spell_check = bool(enabled)
+        self._save_config()
 
 
 # Global settings instance

@@ -104,8 +104,8 @@ def get_file_metadata(file_path: Path) -> dict:
             "is_dir": file_path.is_dir()
         }
         
-        # Add OCR text if supported
-        if file_path.suffix.lower() in get_supported_formats():
+        # Add OCR text if supported AND enabled (OCR is slow)
+        if settings.enable_ocr_indexing and file_path.suffix.lower() in get_supported_formats():
             ocr_text = extract_text_from_file(file_path)
             if ocr_text:
                 metadata["ocr_text"] = ocr_text

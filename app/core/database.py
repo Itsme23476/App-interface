@@ -12,6 +12,34 @@ from .settings import settings
 
 logger = logging.getLogger(__name__)
 
+def _parse_tags_value(raw: Any) -> Optional[List[str]]:
+    """Parse tags stored in DB.
+
+    Historically tags were stored either as JSON list text or a comma-separated string.
+    Return a list of strings (lowercased) or None.
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, list):
+        return [str(t).strip() for t in raw if str(t).strip()]
+    if not isinstance(raw, str):
+        return None
+    s = raw.strip()
+    if not s:
+        return None
+    # Try JSON list first
+    try:
+        v = json.loads(s)
+        if isinstance(v, list):
+            return [str(t).strip() for t in v if str(t).strip()]
+        if isinstance(v, str) and v.strip():
+            # Sometimes legacy stored a JSON string
+            return [t.strip() for t in v.split(",") if t.strip()]
+    except Exception:
+        pass
+    # Fallback: comma-separated string
+    return [t.strip() for t in s.split(",") if t.strip()]
+
 class FileIndex:
     """SQLite database for file indexing and search."""
     
@@ -138,6 +166,12 @@ class FileIndex:
         """Update a single editable field for a file. Returns True on success.
         Allowed fields: label, caption, tags, user_tags, metadata.
         """
+        # DIAGNOSTIC: Log every database write
+        import traceback
+        stack_summary = ''.join(traceback.format_stack()[-5:-1])
+        logger.warning(f"[DB_WRITE] update_file_field called: file_id={file_id}, field='{field}', value={repr(value)[:100]}")
+        logger.warning(f"[DB_WRITE] Call stack:\n{stack_summary}")
+        
         allowed = {"label", "caption", "tags", "user_tags", "metadata"}
         if field not in allowed:
             return False
@@ -173,6 +207,11 @@ class FileIndex:
         Returns:
             True if successful, False otherwise
         """
+        # DIAGNOSTIC: Log add_file calls with tags info
+        file_name = file_data.get('name', 'unknown')
+        incoming_tags = file_data.get('tags')
+        logger.warning(f"[DB_WRITE] add_file called: file='{file_name}', incoming_tags={repr(incoming_tags)[:100]}")
+        
         try:
             with sqlite3.connect(self.db_path) as conn:
                 conn.row_factory = sqlite3.Row
@@ -187,6 +226,46 @@ class FileIndex:
                 category = file_data.get('category', 'Misc')
                 has_ocr = file_data.get('has_ocr', False)
                 ocr_text = file_data.get('ocr_text', '')
+
+                # Preserve existing AI/user-enriched fields if this update doesn't provide them.
+                # This prevents accidental wiping when a "refresh/reindex" path only recomputes basic metadata.
+                try:
+                    cursor.execute(
+                        "SELECT label, tags, caption, ocr_text, has_ocr, ai_source, vision_confidence, metadata, user_tags "
+                        "FROM files WHERE file_path = ?",
+                        (file_path,),
+                    )
+                    existing = cursor.fetchone()
+                except Exception:
+                    existing = None
+
+                # label/caption: preserve if incoming empty
+                if existing is not None:
+                    if not (file_data.get('label') or '').strip():
+                        file_data['label'] = existing['label'] if 'label' in existing.keys() else file_data.get('label')
+                    if not (file_data.get('caption') or '').strip():
+                        file_data['caption'] = existing['caption'] if 'caption' in existing.keys() else file_data.get('caption')
+
+                    # tags: preserve if incoming missing/empty
+                    incoming_tags = file_data.get('tags')
+                    incoming_list = incoming_tags if isinstance(incoming_tags, list) else _parse_tags_value(incoming_tags)
+                    if not incoming_list:
+                        prev_list = _parse_tags_value(existing['tags']) if 'tags' in existing.keys() else None
+                        if prev_list:
+                            file_data['tags'] = prev_list
+
+                    # ocr_text: preserve if incoming empty but existing has OCR text
+                    if (not (ocr_text or '').strip()) and ('ocr_text' in existing.keys()) and (existing['ocr_text'] or '').strip():
+                        ocr_text = existing['ocr_text']
+                        has_ocr = bool(existing['has_ocr']) if 'has_ocr' in existing.keys() else has_ocr
+                        file_data['ocr_text'] = ocr_text
+                        file_data['has_ocr'] = has_ocr
+
+                    # ai_source / vision_confidence: preserve if incoming missing
+                    if file_data.get('ai_source') is None and 'ai_source' in existing.keys():
+                        file_data['ai_source'] = existing['ai_source']
+                    if file_data.get('vision_confidence') is None and 'vision_confidence' in existing.keys():
+                        file_data['vision_confidence'] = existing['vision_confidence']
                 
                 # Get file dates
                 try:
@@ -225,6 +304,17 @@ class FileIndex:
                     'detected_text': file_data.get('detected_text', None),
                     'description': file_data.get('description', None),
                 }
+
+                # Merge existing metadata if present and new values are None
+                if existing is not None and 'metadata' in existing.keys() and existing['metadata']:
+                    try:
+                        prev_meta = json.loads(existing['metadata']) if isinstance(existing['metadata'], str) else {}
+                        if isinstance(prev_meta, dict):
+                            for k, v in prev_meta.items():
+                                if metadata.get(k) is None and v is not None:
+                                    metadata[k] = v
+                    except Exception:
+                        pass
                 
                 # Insert or update file
                 cursor.execute("""
@@ -338,7 +428,7 @@ class FileIndex:
                         'has_ocr': bool(row['has_ocr']),
                         'ocr_text': row['ocr_text'],
                         'label': row['label'] if 'label' in row.keys() else None,
-                        'tags': json.loads(row['tags']) if row['tags'] else None,
+                        'tags': _parse_tags_value(row['tags']),
                         'caption': row['caption'] if 'caption' in row.keys() else None,
                         'vision_confidence': row['vision_confidence'] if 'vision_confidence' in row.keys() else None,
                         'metadata': json.loads(row['metadata']) if row['metadata'] else {},
@@ -460,7 +550,7 @@ class FileIndex:
                             'has_ocr': bool(row['has_ocr']),
                             'ocr_text': row['ocr_text'],
                             'label': row['label'] if 'label' in row.keys() else None,
-                            'tags': json.loads(row['tags']) if row['tags'] else None,
+                            'tags': _parse_tags_value(row['tags']),
                             'caption': row['caption'] if 'caption' in row.keys() else None,
                             'ai_source': row['ai_source'] if 'ai_source' in row.keys() else None,
                             'vision_confidence': row['vision_confidence'] if 'vision_confidence' in row.keys() else None,
@@ -508,9 +598,10 @@ class FileIndex:
                         'has_ocr': bool(row['has_ocr']),
                         'ocr_text': row['ocr_text'],
                         'label': row['label'] if 'label' in row.keys() else None,
-                        'tags': json.loads(row['tags']) if row['tags'] else None,
+                        'tags': _parse_tags_value(row['tags']),
                         'caption': row['caption'] if 'caption' in row.keys() else None,
                         'vision_confidence': row['vision_confidence'] if 'vision_confidence' in row.keys() else None,
+                        'content_hash': row['content_hash'] if 'content_hash' in row.keys() else None,
                         'metadata': json.loads(row['metadata']) if row['metadata'] else {}
                     }
                 return None
@@ -587,7 +678,7 @@ class FileIndex:
                         'has_ocr': bool(row['has_ocr']),
                         'ocr_text': row['ocr_text'],
                         'label': row['label'],
-                        'tags': json.loads(row['tags']) if row['tags'] else None,
+                        'tags': _parse_tags_value(row['tags']),
                         'caption': row['caption'],
                         'vision_confidence': row['vision_confidence'],
                         'metadata': json.loads(row['metadata']) if row['metadata'] else {},
