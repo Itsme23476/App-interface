@@ -78,29 +78,29 @@ class ThemeManager(QObject):
         return new_theme
     
     def _apply_dark_palette(self, app: QApplication):
-        """Apply dark color palette."""
+        """Apply dark color palette with purple accent."""
         palette = QPalette()
-        palette.setColor(QPalette.Window, QColor(18, 18, 18))
-        palette.setColor(QPalette.WindowText, QColor(224, 224, 224))
-        palette.setColor(QPalette.Base, QColor(30, 30, 30))
-        palette.setColor(QPalette.AlternateBase, QColor(18, 18, 18))
+        palette.setColor(QPalette.Window, QColor(15, 15, 15))        # #0F0F0F
+        palette.setColor(QPalette.WindowText, QColor(224, 224, 224)) # #E0E0E0
+        palette.setColor(QPalette.Base, QColor(26, 26, 26))          # #1A1A1A
+        palette.setColor(QPalette.AlternateBase, QColor(15, 15, 15)) # #0F0F0F
         palette.setColor(QPalette.ToolTipBase, QColor(30, 30, 30))
         palette.setColor(QPalette.ToolTipText, QColor(224, 224, 224))
         palette.setColor(QPalette.Text, QColor(224, 224, 224))
         palette.setColor(QPalette.Button, QColor(30, 30, 30))
         palette.setColor(QPalette.ButtonText, QColor(224, 224, 224))
         palette.setColor(QPalette.BrightText, Qt.red)
-        palette.setColor(QPalette.Link, QColor(0, 229, 255))
-        palette.setColor(QPalette.Highlight, QColor(0, 229, 255))
-        palette.setColor(QPalette.HighlightedText, Qt.black)
+        palette.setColor(QPalette.Link, QColor(124, 77, 255))        # #7C4DFF Purple accent
+        palette.setColor(QPalette.Highlight, QColor(124, 77, 255))   # #7C4DFF
+        palette.setColor(QPalette.HighlightedText, Qt.white)
         app.setPalette(palette)
     
     def _apply_light_palette(self, app: QApplication):
-        """Apply light color palette."""
+        """Apply light color palette with purple accent."""
         palette = QPalette()
-        palette.setColor(QPalette.Window, QColor(245, 245, 245))
-        palette.setColor(QPalette.WindowText, QColor(26, 26, 26))
-        palette.setColor(QPalette.Base, QColor(255, 255, 255))
+        palette.setColor(QPalette.Window, QColor(250, 251, 252))     # #FAFBFC
+        palette.setColor(QPalette.WindowText, QColor(26, 26, 26))    # #1A1A1A
+        palette.setColor(QPalette.Base, QColor(255, 255, 255))       # #FFFFFF
         palette.setColor(QPalette.AlternateBase, QColor(248, 248, 248))
         palette.setColor(QPalette.ToolTipBase, QColor(255, 255, 255))
         palette.setColor(QPalette.ToolTipText, QColor(26, 26, 26))
@@ -108,8 +108,8 @@ class ThemeManager(QObject):
         palette.setColor(QPalette.Button, QColor(255, 255, 255))
         palette.setColor(QPalette.ButtonText, QColor(26, 26, 26))
         palette.setColor(QPalette.BrightText, Qt.red)
-        palette.setColor(QPalette.Link, QColor(0, 184, 212))
-        palette.setColor(QPalette.Highlight, QColor(0, 184, 212))
+        palette.setColor(QPalette.Link, QColor(124, 77, 255))        # #7C4DFF Purple accent
+        palette.setColor(QPalette.Highlight, QColor(124, 77, 255))   # #7C4DFF
         palette.setColor(QPalette.HighlightedText, Qt.white)
         app.setPalette(palette)
 

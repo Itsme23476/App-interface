@@ -610,6 +610,22 @@ class FileIndex:
             logger.error(f"Error getting file {file_path}: {e}")
             return None
 
+    def get_file_count(self) -> int:
+        """
+        Get the total count of indexed files.
+        
+        Returns:
+            Number of files in the database
+        """
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT COUNT(*) FROM files")
+                return cursor.fetchone()[0]
+        except Exception as e:
+            logger.error(f"Error getting file count: {e}")
+            return 0
+
     # ---------- Embeddings helpers ----------
     def upsert_embedding(self, file_id: int, model: str, vector: List[float]) -> None:
         try:

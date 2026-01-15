@@ -13,7 +13,8 @@ from PySide6.QtWidgets import (
     QFileDialog, QMessageBox, QProgressBar, QStatusBar,
     QHeaderView, QGroupBox, QTextEdit, QSplitter, QTabWidget,
     QLineEdit, QCompleter, QListWidget, QListWidgetItem, QComboBox,
-    QApplication, QCheckBox, QProgressDialog, QInputDialog, QFrame
+    QApplication, QCheckBox, QProgressDialog, QInputDialog, QFrame,
+    QSizePolicy, QStackedWidget, QButtonGroup, QScrollArea
 )
 from PySide6.QtCore import Qt, QThread, Signal, QTimer, QUrl
 from PySide6.QtGui import QFont, QIcon, QDesktopServices, QShortcut, QKeySequence
@@ -284,31 +285,133 @@ class MainWindow(QMainWindow):
         logger.info("Main window initialized")
     
     def setup_ui(self):
-        """Setup the user interface."""
-        self.setWindowTitle("File Search Assistant v1.0")
+        """Setup the user interface with modern sidebar navigation."""
+        self.setWindowTitle("Lumina - File Search Assistant")
         self.setMinimumSize(1200, 800)
         
         # Central widget
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         
-        # Main layout
-        main_layout = QVBoxLayout(central_widget)
+        # Main horizontal layout: Sidebar | Content
+        main_layout = QHBoxLayout(central_widget)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
         
-        # Create tab widget
-        self.tab_widget = QTabWidget()
-        main_layout.addWidget(self.tab_widget)
+        # Left Sidebar (fixed width ~220px)
+        self.sidebar = QWidget()
+        self.sidebar.setObjectName("sidebar")
+        self.sidebar.setFixedWidth(220)
+        self.setup_sidebar()
+        main_layout.addWidget(self.sidebar)
         
-        # Create tabs
-        # self.setup_organize_tab()  # Hidden for MVP - search-only mode
-        self.setup_search_tab()
-        self.setup_debug_tab()  # Restored: View all indexed files
-        self.setup_settings_tab()
+        # Content area with stacked pages
+        self.page_stack = QStackedWidget()
+        self.page_stack.setObjectName("pageStack")
+        main_layout.addWidget(self.page_stack)
+        
+        # Create pages (order matters - matches nav button indices)
+        self.setup_search_page()      # Index 0
+        self.setup_index_page()       # Index 1
+        self.setup_settings_page()    # Index 2
+        
+        # Set default page to Search
+        self.page_stack.setCurrentIndex(0)
+        self.nav_buttons[0].setChecked(True)
         
         # Status bar
         self.status_bar = QStatusBar()
+        self.status_bar.setObjectName("statusBar")
         self.setStatusBar(self.status_bar)
         self.status_bar.showMessage("Ready")
+    
+    def setup_sidebar(self):
+        """Setup the left sidebar with navigation and account section."""
+        sidebar_layout = QVBoxLayout(self.sidebar)
+        sidebar_layout.setContentsMargins(0, 0, 0, 0)
+        sidebar_layout.setSpacing(0)
+        
+        # Logo/App Title section
+        logo_container = QWidget()
+        logo_container.setObjectName("logoContainer")
+        logo_layout = QHBoxLayout(logo_container)
+        logo_layout.setContentsMargins(20, 20, 20, 16)
+        
+        logo_icon = QLabel("✦")
+        logo_icon.setObjectName("logoIcon")
+        logo_layout.addWidget(logo_icon)
+        
+        logo_text = QLabel("Lumina")
+        logo_text.setObjectName("logoText")
+        logo_layout.addWidget(logo_text)
+        logo_layout.addStretch()
+        
+        sidebar_layout.addWidget(logo_container)
+        
+        # Navigation buttons
+        nav_container = QWidget()
+        nav_container.setObjectName("navContainer")
+        nav_layout = QVBoxLayout(nav_container)
+        nav_layout.setContentsMargins(8, 8, 8, 8)
+        nav_layout.setSpacing(4)
+        
+        self.nav_buttons = []
+        self.nav_button_group = QButtonGroup(self)
+        self.nav_button_group.setExclusive(True)
+        
+        nav_items = [
+            ("🔍", "Search", 0),
+            ("📁", "Index Files", 1),
+            ("⚙️", "Settings", 2),
+        ]
+        
+        for icon, text, idx in nav_items:
+            btn = QPushButton(f"  {icon}  {text}")
+            btn.setObjectName("navButton")
+            btn.setCheckable(True)
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.clicked.connect(lambda checked, i=idx: self._on_nav_clicked(i))
+            nav_layout.addWidget(btn)
+            self.nav_buttons.append(btn)
+            self.nav_button_group.addButton(btn, idx)
+        
+        nav_layout.addStretch()
+        sidebar_layout.addWidget(nav_container, 1)  # Takes remaining space
+        
+        # Account section at bottom
+        account_container = QWidget()
+        account_container.setObjectName("accountContainer")
+        account_layout = QHBoxLayout(account_container)
+        account_layout.setContentsMargins(16, 12, 16, 16)
+        account_layout.setSpacing(12)
+        
+        # Avatar circle with initials
+        self.avatar_label = QLabel("?")
+        self.avatar_label.setObjectName("avatarCircle")
+        self.avatar_label.setFixedSize(40, 40)
+        self.avatar_label.setAlignment(Qt.AlignCenter)
+        account_layout.addWidget(self.avatar_label)
+        
+        # Name and plan info
+        info_container = QWidget()
+        info_layout = QVBoxLayout(info_container)
+        info_layout.setContentsMargins(0, 0, 0, 0)
+        info_layout.setSpacing(2)
+        
+        self.account_name_label = QLabel("Not logged in")
+        self.account_name_label.setObjectName("accountName")
+        info_layout.addWidget(self.account_name_label)
+        
+        self.account_plan_label = QLabel("Free Plan")
+        self.account_plan_label.setObjectName("accountPlan")
+        info_layout.addWidget(self.account_plan_label)
+        
+        account_layout.addWidget(info_container, 1)
+        sidebar_layout.addWidget(account_container)
+    
+    def _on_nav_clicked(self, index: int):
+        """Handle navigation button clicks."""
+        self.page_stack.setCurrentIndex(index)
     
     def setup_organize_tab(self):
         """Setup the file organization tab."""
@@ -381,408 +484,465 @@ class MainWindow(QMainWindow):
         # Add organize tab
         self.tab_widget.addTab(organize_widget, "Organize Files")
     
-    def setup_search_tab(self):
-        """Setup the search tab."""
-        search_widget = QWidget()
-        search_layout = QVBoxLayout(search_widget)
+    def setup_search_page(self):
+        """Setup the clean Search page with hero heading and modern search bar."""
+        search_page = QWidget()
+        search_page.setObjectName("searchPage")
+        page_layout = QVBoxLayout(search_page)
+        page_layout.setContentsMargins(40, 0, 40, 20)
+        page_layout.setSpacing(0)
         
-        # Indexing group
-        self.index_group = QGroupBox("Index Directory for Search")
-        index_layout = QVBoxLayout(self.index_group)
+        # Top spacer for results mode (hidden in landing mode)
+        self.search_top_spacer = QWidget()
+        self.search_top_spacer.setFixedHeight(20)
+        self.search_top_spacer.setVisible(False)
+        page_layout.addWidget(self.search_top_spacer)
         
-        # Drop zone for drag and drop
-        self.drop_zone = QLabel("📁 Drag & drop files or folders here to index them")
-        self.drop_zone.setAlignment(Qt.AlignCenter)
-        self.drop_zone.setFixedHeight(70)  # Fixed height to prevent expansion
-        self.drop_zone.setStyleSheet("""
-            QLabel {
-                border: 2px dashed #00B8D4;
-                border-radius: 8px;
-                background-color: rgba(0, 184, 212, 0.05);
-                color: #00B8D4;
-                font-size: 13px;
-                padding: 10px;
-            }
-        """)
-        index_layout.addWidget(self.drop_zone)
+        # Hero section (landing state - hidden after search)
+        self.hero_section = QWidget()
+        hero_layout = QVBoxLayout(self.hero_section)
+        hero_layout.setContentsMargins(0, 0, 0, 0)
+        hero_layout.setSpacing(12)
         
-        # Add spacing after drop zone
-        index_layout.addSpacing(15)
+        # Hero heading
+        self.hero_heading = QLabel("What are you looking for?")
+        self.hero_heading.setObjectName("heroHeading")
+        self.hero_heading.setAlignment(Qt.AlignCenter)
+        hero_layout.addWidget(self.hero_heading)
         
-        # Index folder selection
-        index_folder_layout = QHBoxLayout()
-        self.index_label = QLabel("Index folder: Not selected")
-        self.index_label.setObjectName("secondaryLabel")
-        self.index_button = QPushButton("Select Folder to Index")
-        index_folder_layout.addWidget(self.index_label)
-        index_folder_layout.addWidget(self.index_button)
-        index_layout.addLayout(index_folder_layout)
+        # Subtitle
+        self.hero_subtitle = QLabel("Search across your entire local drive instantly.")
+        self.hero_subtitle.setObjectName("heroSubtitle")
+        self.hero_subtitle.setAlignment(Qt.AlignCenter)
+        hero_layout.addWidget(self.hero_subtitle)
         
-        # Index button
-        self.index_button_action = QPushButton("Index Directory")
-        self.index_button_action.setObjectName("primaryButton")
-        self.index_button_action.setEnabled(False)
-        index_layout.addWidget(self.index_button_action)
+        hero_layout.addSpacing(32)
         
-        # Pause and Cancel buttons side by side (hidden until indexing starts)
-        btn_row = QHBoxLayout()
-        btn_row.setSpacing(10)
+        # Top spacer to push hero content to ~35% from top
+        self.hero_top_spacer = QWidget()
+        self.hero_top_spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        page_layout.addWidget(self.hero_top_spacer, 35)
         
-        self.index_pause_btn = QPushButton("⏸ Pause")
-        self.index_pause_btn.setObjectName("secondaryButton")
-        self.index_pause_btn.setVisible(False)
-        self.index_pause_btn.setMinimumWidth(120)
-        btn_row.addWidget(self.index_pause_btn)
+        page_layout.addWidget(self.hero_section)
         
-        self.index_cancel_btn = QPushButton("✕ Cancel")
-        self.index_cancel_btn.setVisible(False)
-        self.index_cancel_btn.setMinimumWidth(120)
-        btn_row.addWidget(self.index_cancel_btn)
+        # Modern Search Bar Container (large pill shape) - always visible
+        self.search_container = QWidget()
+        self.search_container.setObjectName("searchContainerLarge")
+        self.search_container.setMinimumHeight(70)
+        self.search_container.setMaximumHeight(74)
+        self.search_container.setMinimumWidth(550)
+        self.search_container.setMaximumWidth(750)
+        search_bar_layout = QHBoxLayout(self.search_container)
+        search_bar_layout.setContentsMargins(28, 12, 12, 12)
+        search_bar_layout.setSpacing(16)
         
-        index_layout.addLayout(btn_row)
-        
-        # Progress bar for indexing with percentage
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setVisible(False)
-        self.progress_bar.setTextVisible(True)
-        self.progress_bar.setFormat("%p% complete (%v / %m files)")
-        self.progress_bar.setMinimumWidth(300)
-        self.progress_bar.setMinimumHeight(25)
-        self.progress_bar.setProperty("paused", False)
-        index_layout.addWidget(self.progress_bar)
-        
-        # Prominent percentage label
-        self.index_percent_label = QLabel("0%")
-        self.index_percent_label.setStyleSheet("font-size: 18px; font-weight: bold; color: #00B8D4;")
-        self.index_percent_label.setAlignment(Qt.AlignCenter)
-        self.index_percent_label.setVisible(False)
-        index_layout.addWidget(self.index_percent_label)
-        
-        # Progress label for current file
-        self.index_progress_label = QLabel("")
-        self.index_progress_label.setObjectName("secondaryLabel")
-        self.index_progress_label.setVisible(False)
-        index_layout.addWidget(self.index_progress_label)
-        
-        # Spacer before queue row (expands when queue is visible)
-        self.queue_top_spacer = QWidget()
-        self.queue_top_spacer.setFixedHeight(0)
-        self.queue_top_spacer.setVisible(False)
-        index_layout.addWidget(self.queue_top_spacer)
-        
-        # Queue indicator row with proper spacing
-        self.queue_row = QFrame()  # Use QFrame for proper border styling
-        self.queue_row.setObjectName("queueRow")
-        self.queue_row.setVisible(False)
-        self.queue_row.setMinimumHeight(45)
-        self.queue_row.setStyleSheet("""
-            QFrame#queueRow {
-                background-color: rgba(0, 184, 212, 0.15);
-                border: 1px solid rgba(0, 184, 212, 0.3);
-                border-radius: 6px;
-            }
-        """)
-        queue_row_layout = QHBoxLayout(self.queue_row)
-        queue_row_layout.setContentsMargins(12, 10, 12, 10)
-        queue_row_layout.setSpacing(12)
-        
-        self.queue_label = QLabel("📋 Queue: 0 pending")
-        self.queue_label.setStyleSheet("color: #00B8D4; font-weight: bold; font-size: 13px; background: transparent;")
-        queue_row_layout.addWidget(self.queue_label)
-        
-        self.queue_items_label = QLabel("")
-        self.queue_items_label.setStyleSheet("color: #888888; font-size: 12px; background: transparent;")
-        queue_row_layout.addWidget(self.queue_items_label)
-        
-        queue_row_layout.addStretch()
-        
-        self.clear_queue_btn = QPushButton("Clear")
-        self.clear_queue_btn.setMaximumWidth(60)
-        self.clear_queue_btn.setMaximumHeight(24)
-        self.clear_queue_btn.clicked.connect(self._clear_index_queue)
-        queue_row_layout.addWidget(self.clear_queue_btn)
-        
-        index_layout.addWidget(self.queue_row)
-        
-        # Add a spacer that will expand when queue is visible
-        self.queue_spacer = QWidget()
-        self.queue_spacer.setFixedHeight(0)  # Initially no extra space
-        self.queue_spacer.setVisible(False)
-        index_layout.addWidget(self.queue_spacer)
-        
-        search_layout.addWidget(self.index_group)
-        
-        # Quick Index Options group
-        quick_index_group = QGroupBox("Quick Index Options")
-        quick_index_layout = QVBoxLayout(quick_index_group)
-        
-        # Index entire PC button
-        pc_index_layout = QHBoxLayout()
-        self.index_pc_button = QPushButton("🖥️ Index Entire PC")
-        self.index_pc_button.setToolTip("Index all files on your computer. This may take a long time.")
-        pc_index_layout.addWidget(self.index_pc_button)
-        pc_index_layout.addStretch()
-        quick_index_layout.addLayout(pc_index_layout)
-        
-        # Auto-index Downloads toggle
-        auto_index_layout = QHBoxLayout()
-        self.auto_index_downloads_btn = QPushButton("📥 Auto-Index New Files: OFF")
-        self.auto_index_downloads_btn.setCheckable(True)
-        self.auto_index_downloads_btn.setChecked(settings.auto_index_downloads)
-        if settings.auto_index_downloads:
-            self.auto_index_downloads_btn.setText("📥 Auto-Index New Files: ON")
-        self.auto_index_downloads_btn.setToolTip("Automatically index new files added to common folders (Downloads, Desktop, Documents, etc.)")
-        auto_index_layout.addWidget(self.auto_index_downloads_btn)
-        auto_index_layout.addStretch()
-        quick_index_layout.addLayout(auto_index_layout)
-        
-        # Status label for auto-index
-        self.auto_index_status = QLabel("")
-        self.auto_index_status.setObjectName("secondaryLabel")
-        quick_index_layout.addWidget(self.auto_index_status)
-        
-        search_layout.addWidget(quick_index_group)
-        
-        # Search group
-        search_group = QGroupBox("Search Files")
-        search_group_layout = QVBoxLayout(search_group)
-        
-        # Search input
-        search_input_layout = QHBoxLayout()
+        # Search input - larger
         self.search_input = QLineEdit()
-        self.search_input.setPlaceholderText("Search (operators: type:<label>, tag:<text>, has:ocr, has:vision)")
-        self.search_button = QPushButton("Search")
-        self.search_button.setObjectName("primaryButton")
-        self.search_button.setEnabled(False)
-        # New: GPT rerank toggle
-        self.gpt_rerank_button = QPushButton("GPT Rerank: OFF")
-        self.gpt_rerank_button.setCheckable(True)
-        self.gpt_rerank_button.setChecked(settings.use_openai_search_rerank)
-        if settings.use_openai_search_rerank:
-            self.gpt_rerank_button.setText("GPT Rerank: ON")
-        search_input_layout.addWidget(self.search_input)
-        search_input_layout.addWidget(self.search_button)
-        search_input_layout.addWidget(self.gpt_rerank_button)
-        search_group_layout.addLayout(search_input_layout)
-
-        # Query debug info
-        self.search_debug_label = QLabel("")
-        self.search_debug_label.setObjectName("secondaryLabel")
-        search_group_layout.addWidget(self.search_debug_label)
+        self.search_input.setObjectName("heroSearchInputLarge")
+        self.search_input.setPlaceholderText("Search files, folders, or describe what you need...")
+        self.search_input.setMinimumHeight(50)
+        search_bar_layout.addWidget(self.search_input, 1)
         
-        # Filter row
-        filter_layout = QHBoxLayout()
-        filter_layout.addWidget(QLabel("Filters:"))
+        # AI indicator
+        self.ai_label = QLabel("✦ AI")
+        self.ai_label.setObjectName("aiIndicatorLarge")
+        search_bar_layout.addWidget(self.ai_label)
         
-        # File type dropdown
-        self.type_filter = QComboBox()
-        self.type_filter.addItems(["All Types", "Images", "Documents", "PDFs", "Videos", "Audio", "Code"])
-        self.type_filter.setMinimumWidth(100)
-        filter_layout.addWidget(self.type_filter)
+        # Round search button - larger
+        self.search_button = QPushButton("→")
+        self.search_button.setObjectName("searchSubmitBtnLarge")
+        self.search_button.setFixedSize(50, 50)
+        self.search_button.setCursor(Qt.PointingHandCursor)
+        search_bar_layout.addWidget(self.search_button)
         
-        # Date range dropdown
-        self.date_filter = QComboBox()
-        self.date_filter.addItems(["Any Time", "Today", "Yesterday", "This Week", "This Month", "This Year"])
-        self.date_filter.setMinimumWidth(100)
-        filter_layout.addWidget(self.date_filter)
+        # Center the search container
+        search_row = QHBoxLayout()
+        search_row.addStretch()
+        search_row.addWidget(self.search_container)
+        search_row.addStretch()
+        page_layout.addLayout(search_row)
         
-        # Clear filters button
-        self.clear_filters_btn = QPushButton("Clear Filters")
-        self.clear_filters_btn.setToolTip("Reset all filters")
-        filter_layout.addWidget(self.clear_filters_btn)
+        page_layout.addSpacing(24)
         
-        # Filter status label
-        self.filter_status_label = QLabel("")
-        self.filter_status_label.setObjectName("secondaryLabel")
-        filter_layout.addWidget(self.filter_status_label)
+        # Quick filter chips - always visible
+        self.chips_container = QWidget()
+        chips_layout = QHBoxLayout(self.chips_container)
+        chips_layout.setContentsMargins(0, 0, 0, 0)
+        chips_layout.setSpacing(12)
+        chips_layout.addStretch()
         
-        filter_layout.addStretch()
-        search_group_layout.addLayout(filter_layout)
+        self.filter_chips = {}
+        chip_items = ["Recent Files", "Images", "Documents", "Videos", "Projects", "Archives"]
+        for chip_text in chip_items:
+            chip = QPushButton(chip_text)
+            chip.setObjectName("filterChip")
+            chip.setCursor(Qt.PointingHandCursor)
+            chip.setCheckable(True)
+            chip.clicked.connect(lambda checked, t=chip_text: self._on_filter_chip_clicked(t, checked))
+            chips_layout.addWidget(chip)
+            self.filter_chips[chip_text] = chip
+        
+        chips_layout.addStretch()
+        page_layout.addWidget(self.chips_container)
+        
+        page_layout.addSpacing(20)
+        
+        # Bottom spacer for landing mode (hidden after search)
+        self.hero_bottom_spacer = QWidget()
+        self.hero_bottom_spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        page_layout.addWidget(self.hero_bottom_spacer, 50)
+        
+        # Search Results section (shown after searching)
+        results_container = QWidget()
+        results_container.setObjectName("resultsContainer")
+        results_layout = QVBoxLayout(results_container)
+        results_layout.setContentsMargins(0, 0, 0, 0)
+        results_layout.setSpacing(8)
         
         # Quick Actions bar (hidden by default, shown when files selected)
         self.quick_actions_widget = QWidget()
         self.quick_actions_widget.setObjectName("quickActionsBar")
         quick_actions_layout = QHBoxLayout(self.quick_actions_widget)
-        quick_actions_layout.setContentsMargins(8, 6, 8, 6)
+        quick_actions_layout.setContentsMargins(12, 8, 12, 8)
         quick_actions_layout.setSpacing(8)
         
-        # Selection counter
         self.selection_count_label = QLabel("0 files selected")
         self.selection_count_label.setObjectName("selectionLabel")
         quick_actions_layout.addWidget(self.selection_count_label)
         
         quick_actions_layout.addWidget(self._create_separator())
         
-        # Action buttons
-        self.action_remove_btn = QPushButton("🗑️ Remove from Index")
-        self.action_remove_btn.setToolTip("Remove selected files from the index (files stay on PC)")
+        self.action_remove_btn = QPushButton("Remove")
         self.action_remove_btn.setObjectName("quickActionBtn")
         quick_actions_layout.addWidget(self.action_remove_btn)
         
-        self.action_reindex_btn = QPushButton("🔄 Re-index")
-        self.action_reindex_btn.setToolTip("Re-scan selected files to update metadata")
+        self.action_reindex_btn = QPushButton("Re-index")
         self.action_reindex_btn.setObjectName("quickActionBtn")
         quick_actions_layout.addWidget(self.action_reindex_btn)
         
-        self.action_add_tags_btn = QPushButton("🏷️ Add Tags")
-        self.action_add_tags_btn.setToolTip("Add tags to selected files")
+        self.action_add_tags_btn = QPushButton("Add Tags")
         self.action_add_tags_btn.setObjectName("quickActionBtn")
         quick_actions_layout.addWidget(self.action_add_tags_btn)
         
-        self.action_copy_paths_btn = QPushButton("📋 Copy Paths")
-        self.action_copy_paths_btn.setToolTip("Copy file paths to clipboard")
+        self.action_copy_paths_btn = QPushButton("Copy Paths")
         self.action_copy_paths_btn.setObjectName("quickActionBtn")
         quick_actions_layout.addWidget(self.action_copy_paths_btn)
         
-        self.action_open_folders_btn = QPushButton("📂 Open Folders")
-        self.action_open_folders_btn.setToolTip("Open containing folders in Explorer")
+        self.action_open_folders_btn = QPushButton("Open Folder")
         self.action_open_folders_btn.setObjectName("quickActionBtn")
         quick_actions_layout.addWidget(self.action_open_folders_btn)
         
-        self.action_export_btn = QPushButton("📤 Export List")
-        self.action_export_btn.setToolTip("Export selected files to CSV or TXT")
+        self.action_export_btn = QPushButton("Export")
         self.action_export_btn.setObjectName("quickActionBtn")
         quick_actions_layout.addWidget(self.action_export_btn)
         
         quick_actions_layout.addStretch()
         
-        # Select All / Clear Selection buttons
         self.action_select_all_btn = QPushButton("Select All")
         self.action_select_all_btn.setObjectName("quickActionBtnSecondary")
         quick_actions_layout.addWidget(self.action_select_all_btn)
         
-        self.action_clear_selection_btn = QPushButton("Clear Selection")
+        self.action_clear_selection_btn = QPushButton("Clear")
         self.action_clear_selection_btn.setObjectName("quickActionBtnSecondary")
         quick_actions_layout.addWidget(self.action_clear_selection_btn)
         
-        self.quick_actions_widget.setVisible(False)  # Hidden until files selected
-        search_group_layout.addWidget(self.quick_actions_widget)
+        self.quick_actions_widget.setVisible(False)
+        results_layout.addWidget(self.quick_actions_widget)
         
-        # Search results
+        # Search results table
         self.search_results_table = QTableWidget()
+        self.search_results_table.setObjectName("searchResultsTable")
         self.search_results_table.setShowGrid(False)
         self.search_results_table.setAlternatingRowColors(True)
         self.search_results_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.search_results_table.setSelectionMode(QTableWidget.ExtendedSelection)
-        self.search_results_table.setColumnCount(15)  # Added checkbox column
-        self.search_results_table.setHorizontalHeaderLabels([
-            "✓", "File Name", "Category", "Size", "Relevance", "Label", "Tags", "Caption", "OCR Preview", "AI Source", "Vision Score", "Purpose", "Suggested Filename", "Path", "Actions"
-        ])
+        self.search_results_table.verticalHeader().setDefaultSectionSize(46)
+        self.search_results_table.setColumnCount(5)
+        self.search_results_table.setHorizontalHeaderLabels(["✓", "File Name", "Folder", "Size", "Actions"])
+        
         search_header = self.search_results_table.horizontalHeader()
-        search_header.setSectionResizeMode(0, QHeaderView.Fixed)  # Checkbox
+        search_header.setSectionResizeMode(QHeaderView.Interactive)
+        search_header.setSectionResizeMode(0, QHeaderView.Fixed)
         self.search_results_table.setColumnWidth(0, 40)
         search_header.setSectionResizeMode(1, QHeaderView.Stretch)
-        search_header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        search_header.setSectionResizeMode(2, QHeaderView.Stretch)
         search_header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
-        search_header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
-        search_header.setSectionResizeMode(5, QHeaderView.ResizeToContents)
-        search_header.setSectionResizeMode(6, QHeaderView.ResizeToContents)
-        search_header.setSectionResizeMode(7, QHeaderView.Stretch)
-        search_header.setSectionResizeMode(8, QHeaderView.Stretch)
-        search_header.setSectionResizeMode(9, QHeaderView.ResizeToContents)
-        search_header.setSectionResizeMode(10, QHeaderView.ResizeToContents)
-        search_header.setSectionResizeMode(11, QHeaderView.ResizeToContents)
-        search_header.setSectionResizeMode(12, QHeaderView.ResizeToContents)
-        search_header.setSectionResizeMode(13, QHeaderView.Stretch)
-        search_header.setSectionResizeMode(14, QHeaderView.ResizeToContents)
-        search_group_layout.addWidget(self.search_results_table)
+        search_header.setSectionResizeMode(4, QHeaderView.Interactive)
+        self.search_results_table.setColumnWidth(4, 220)
+        search_header.setStretchLastSection(True)
+        self.search_results_table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.search_results_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.search_results_table.cellDoubleClicked.connect(self._on_search_result_double_click)
+        
+        results_layout.addWidget(self.search_results_table)
         
         # Search statistics
-        self.search_stats_label = QLabel("No files indexed yet")
-        search_group_layout.addWidget(self.search_stats_label)
+        self.search_stats_label = QLabel("")
+        self.search_stats_label.setObjectName("searchStatsLabel")
+        results_layout.addWidget(self.search_stats_label)
         
-        search_layout.addWidget(search_group)
+        page_layout.addWidget(results_container, 1)
         
-        # Add search tab
-        self.tab_widget.addTab(search_widget, "Search Files")
+        # Hidden filter controls (used internally)
+        self.type_filter = QComboBox()
+        self.type_filter.addItems(["All Types", "Images", "Documents", "PDFs", "Videos", "Audio", "Code"])
+        self.type_filter.setCurrentIndex(0)
+        self.type_filter.setVisible(False)
+        
+        self.date_filter = QComboBox()
+        self.date_filter.addItems(["Any Time", "Today", "Yesterday", "This Week", "This Month", "This Year"])
+        self.date_filter.setVisible(False)
+        
+        self.clear_filters_btn = QPushButton("Clear Filters")
+        self.clear_filters_btn.setVisible(False)
+        
+        self.filter_status_label = QLabel("")
+        self.filter_status_label.setVisible(False)
+        
+        self.search_debug_label = QLabel("")
+        self.search_debug_label.setVisible(False)
+        
+        # Add page to stack
+        self.page_stack.addWidget(search_page)
     
-    def setup_debug_tab(self):
-        """Setup the debug tab to show indexed files."""
-        debug_widget = QWidget()
-        debug_layout = QVBoxLayout(debug_widget)
+    def _on_filter_chip_clicked(self, chip_text: str, checked: bool):
+        """Handle filter chip clicks to filter search results."""
+        # Map chip text to type filter
+        type_map = {
+            "Recent Files": 0,  # All Types
+            "Images": 1,
+            "Documents": 2,
+            "Videos": 4,
+            "Projects": 0,  # All Types (custom handling needed)
+            "Archives": 0,  # All Types (custom handling needed)
+        }
         
-        # Debug controls
-        debug_controls = QHBoxLayout()
-        self.refresh_debug_button = QPushButton("Refresh View")
-        self.refresh_debug_button.setToolTip("Reload the Indexed Files table from the database (does not re-index files)")
-        self.clear_index_button = QPushButton("Clear Index")
-        debug_controls.addWidget(self.refresh_debug_button)
-        debug_controls.addWidget(self.clear_index_button)
-        debug_controls.addStretch()
-        debug_layout.addLayout(debug_controls)
+        # Uncheck other chips
+        for name, chip in self.filter_chips.items():
+            if name != chip_text:
+                chip.setChecked(False)
         
-        # Quick Actions bar for Indexed Files tab (same style as Search tab)
+        if checked and chip_text in type_map:
+            self.type_filter.setCurrentIndex(type_map[chip_text])
+            # Trigger search with the new filter
+            if self.search_input.text().strip():
+                self.perform_search()
+            else:
+                # Just filter existing results
+                self.perform_search()
+    
+    def setup_index_page(self):
+        """Setup the Index Management page with clean drop zone and View Files button."""
+        index_page = QWidget()
+        index_page.setObjectName("indexPage")
+        page_layout = QVBoxLayout(index_page)
+        page_layout.setContentsMargins(60, 50, 60, 40)
+        page_layout.setSpacing(24)
+        
+        # Centered content container
+        content_container = QWidget()
+        content_layout = QVBoxLayout(content_container)
+        content_layout.setAlignment(Qt.AlignCenter)
+        content_layout.setSpacing(32)
+        
+        # Drop zone for drag and drop - large centered card
+        self.drop_zone = QWidget()
+        self.drop_zone.setObjectName("dropZoneLarge")
+        self.drop_zone.setMinimumHeight(320)
+        self.drop_zone.setCursor(Qt.PointingHandCursor)
+        self.drop_zone.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        
+        drop_layout = QVBoxLayout(self.drop_zone)
+        drop_layout.setAlignment(Qt.AlignCenter)
+        drop_layout.setSpacing(16)
+        
+        # Large icon
+        self.drop_icon = QLabel("📁")
+        self.drop_icon.setObjectName("dropIconLarge")
+        self.drop_icon.setAlignment(Qt.AlignCenter)
+        self.drop_icon.setStyleSheet("font-size: 64px; background: transparent;")
+        drop_layout.addWidget(self.drop_icon, 0, Qt.AlignCenter)
+        
+        # Main text
+        self.drop_title = QLabel("Add folder to index")
+        self.drop_title.setObjectName("dropTitleLarge")
+        self.drop_title.setAlignment(Qt.AlignCenter)
+        drop_layout.addWidget(self.drop_title)
+        
+        # Subtitle
+        self.drop_subtitle = QLabel("Drag and drop folders here, or click to browse")
+        self.drop_subtitle.setObjectName("dropSubtitleLarge")
+        self.drop_subtitle.setAlignment(Qt.AlignCenter)
+        drop_layout.addWidget(self.drop_subtitle)
+        
+        # Make the entire widget clickable
+        self.drop_zone.mousePressEvent = self._on_drop_zone_clicked
+        content_layout.addWidget(self.drop_zone, 1)
+        
+        # Progress section (hidden until indexing)
+        self.index_progress_container = QWidget()
+        self.index_progress_container.setObjectName("progressContainer")
+        progress_layout = QVBoxLayout(self.index_progress_container)
+        progress_layout.setContentsMargins(0, 0, 0, 0)
+        progress_layout.setSpacing(8)
+        
+        # Progress bar
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setObjectName("indexProgressBar")
+        self.progress_bar.setTextVisible(True)
+        self.progress_bar.setFormat("%p% complete (%v / %m files)")
+        self.progress_bar.setMinimumHeight(24)
+        self.progress_bar.setProperty("paused", False)
+        progress_layout.addWidget(self.progress_bar)
+        
+        # Progress label
+        self.index_progress_label = QLabel("")
+        self.index_progress_label.setObjectName("progressLabel")
+        progress_layout.addWidget(self.index_progress_label)
+        
+        # Progress percentage
+        self.index_percent_label = QLabel("0%")
+        self.index_percent_label.setObjectName("percentLabel")
+        self.index_percent_label.setAlignment(Qt.AlignCenter)
+        progress_layout.addWidget(self.index_percent_label)
+        
+        # Pause/Cancel buttons
+        btn_row = QHBoxLayout()
+        btn_row.setAlignment(Qt.AlignCenter)
+        self.index_pause_btn = QPushButton("Pause")
+        self.index_pause_btn.setObjectName("secondaryButton")
+        btn_row.addWidget(self.index_pause_btn)
+        
+        self.index_cancel_btn = QPushButton("Cancel")
+        self.index_cancel_btn.setObjectName("secondaryButton")
+        btn_row.addWidget(self.index_cancel_btn)
+        progress_layout.addLayout(btn_row)
+        
+        self.index_progress_container.setVisible(False)
+        content_layout.addWidget(self.index_progress_container)
+        
+        # View Indexed Files button - prominent and centered
+        self.view_files_btn = QPushButton("View Indexed Files (0)")
+        self.view_files_btn.setObjectName("viewFilesButton")
+        self.view_files_btn.setCursor(Qt.PointingHandCursor)
+        self.view_files_btn.setMinimumHeight(52)
+        self.view_files_btn.setMinimumWidth(280)
+        self.view_files_btn.clicked.connect(self._show_files_overlay)
+        content_layout.addWidget(self.view_files_btn, 0, Qt.AlignCenter)
+        
+        page_layout.addWidget(content_container, 1)
+        
+        # Hidden compatibility stubs
+        self.indexed_paths_list = None
+        self.active_indicator = None
+        self.clear_all_paths_btn = QPushButton()
+        self.clear_all_paths_btn.setVisible(False)
+        self.index_label = QLabel("")
+        self.index_label.setVisible(False)
+        self.index_button = QPushButton("")
+        self.index_button.setVisible(False)
+        self.index_button_action = QPushButton("")
+        self.index_button_action.setVisible(False)
+        self.queue_row = QFrame()
+        self.queue_row.setVisible(False)
+        self.queue_label = QLabel("")
+        self.queue_items_label = QLabel("")
+        self.clear_queue_btn = QPushButton("")
+        self.queue_top_spacer = QWidget()
+        self.queue_spacer = QWidget()
+        self.quick_index_header = QPushButton("")
+        self.quick_index_content = QWidget()
+        self.index_pc_button = QPushButton("")
+        self.auto_index_downloads_btn = QPushButton("")
+        self.auto_index_status = QLabel("")
+        self.advanced_header = QPushButton("")
+        self.advanced_content = QWidget()
+        self.refresh_debug_button = QPushButton("")
+        self.refresh_debug_button.setVisible(False)
+        self.clear_index_button = QPushButton("")
+        self.clear_index_button.setVisible(False)
+        
+        # Info label (shown at bottom of page)
+        self.debug_info_label = QLabel("")
+        self.debug_info_label.setObjectName("infoLabel")
+        self.debug_info_label.setAlignment(Qt.AlignCenter)
+        page_layout.addWidget(self.debug_info_label)
+        
+        # Create the files table (will be shown in overlay)
+        self._setup_files_table()
+        
+        # Add page to stack
+        self.page_stack.addWidget(index_page)
+    
+    def _setup_files_table(self):
+        """Setup the files table widget (used in overlay dialog)."""
+        # Quick Actions bar for file management
         self.debug_quick_actions_widget = QWidget()
         self.debug_quick_actions_widget.setObjectName("quickActionsBar")
         debug_qa_layout = QHBoxLayout(self.debug_quick_actions_widget)
-        debug_qa_layout.setContentsMargins(8, 6, 8, 6)
+        debug_qa_layout.setContentsMargins(12, 8, 12, 8)
         debug_qa_layout.setSpacing(8)
         
-        # Selection counter
         self.debug_selection_count_label = QLabel("0 files selected")
         self.debug_selection_count_label.setObjectName("selectionLabel")
         debug_qa_layout.addWidget(self.debug_selection_count_label)
         
         debug_qa_layout.addWidget(self._create_separator())
         
-        # Action buttons
-        self.debug_action_remove_btn = QPushButton("🗑️ Remove from Index")
-        self.debug_action_remove_btn.setToolTip("Remove selected files from the index (files stay on PC)")
+        self.debug_action_remove_btn = QPushButton("Remove")
+        self.debug_action_remove_btn.setToolTip("Remove selected files from the index")
         self.debug_action_remove_btn.setObjectName("quickActionBtn")
         debug_qa_layout.addWidget(self.debug_action_remove_btn)
         
-        self.debug_action_reindex_btn = QPushButton("🔄 Re-index")
-        self.debug_action_reindex_btn.setToolTip("Re-scan selected files to update metadata")
+        self.debug_action_reindex_btn = QPushButton("Re-index")
         self.debug_action_reindex_btn.setObjectName("quickActionBtn")
         debug_qa_layout.addWidget(self.debug_action_reindex_btn)
         
-        self.debug_action_add_tags_btn = QPushButton("🏷️ Add Tags")
-        self.debug_action_add_tags_btn.setToolTip("Add tags to selected files")
+        self.debug_action_add_tags_btn = QPushButton("Add Tags")
         self.debug_action_add_tags_btn.setObjectName("quickActionBtn")
         debug_qa_layout.addWidget(self.debug_action_add_tags_btn)
         
-        self.debug_action_copy_paths_btn = QPushButton("📋 Copy Paths")
-        self.debug_action_copy_paths_btn.setToolTip("Copy file paths to clipboard")
+        self.debug_action_copy_paths_btn = QPushButton("Copy Paths")
         self.debug_action_copy_paths_btn.setObjectName("quickActionBtn")
         debug_qa_layout.addWidget(self.debug_action_copy_paths_btn)
         
-        self.debug_action_open_folders_btn = QPushButton("📂 Open Folders")
-        self.debug_action_open_folders_btn.setToolTip("Open containing folders in Explorer")
+        self.debug_action_open_folders_btn = QPushButton("Open Folder")
         self.debug_action_open_folders_btn.setObjectName("quickActionBtn")
         debug_qa_layout.addWidget(self.debug_action_open_folders_btn)
         
-        self.debug_action_export_btn = QPushButton("📤 Export List")
-        self.debug_action_export_btn.setToolTip("Export selected files to CSV or TXT")
+        self.debug_action_export_btn = QPushButton("Export")
         self.debug_action_export_btn.setObjectName("quickActionBtn")
         debug_qa_layout.addWidget(self.debug_action_export_btn)
         
         debug_qa_layout.addStretch()
         
-        # Select All / Clear Selection buttons
         self.debug_action_select_all_btn = QPushButton("Select All")
         self.debug_action_select_all_btn.setObjectName("quickActionBtnSecondary")
         debug_qa_layout.addWidget(self.debug_action_select_all_btn)
         
-        self.debug_action_clear_selection_btn = QPushButton("Clear Selection")
+        self.debug_action_clear_selection_btn = QPushButton("Clear")
         self.debug_action_clear_selection_btn.setObjectName("quickActionBtnSecondary")
         debug_qa_layout.addWidget(self.debug_action_clear_selection_btn)
         
-        self.debug_quick_actions_widget.setVisible(False)  # Hidden until files selected
-        debug_layout.addWidget(self.debug_quick_actions_widget)
+        self.debug_quick_actions_widget.setVisible(False)
         
-        # Debug table with checkbox column
+        # Simplified files table
         self.debug_table = QTableWidget()
+        self.debug_table.setObjectName("filesTable")
         self.debug_table.setShowGrid(False)
         self.debug_table.setAlternatingRowColors(True)
         self.debug_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.debug_table.setSelectionMode(QTableWidget.ExtendedSelection)
-        self.debug_table.setColumnCount(16)  # Added checkbox column
-        self.debug_table.verticalHeader().setDefaultSectionSize(48)  # Increased row height for buttons
+        self.debug_table.setColumnCount(16)
+        self.debug_table.verticalHeader().setDefaultSectionSize(48)
         self.debug_table.setHorizontalHeaderLabels([
-            "✓", "File Name", "Category", "Size", "Has OCR", "Label", "Tags", "Caption", "OCR Text Preview", "AI Source", "Vision Score", "Purpose", "Suggested Filename", "Detected Text", "File Path", "Actions"
+            "✓", "File Name", "Category", "Size", "Has OCR", "Label", "Tags", "Caption", 
+            "OCR Text Preview", "AI Source", "Vision Score", "Purpose", "Suggested Filename", 
+            "Detected Text", "File Path", "Actions"
         ])
+        
         debug_header = self.debug_table.horizontalHeader()
-        debug_header.setSectionResizeMode(0, QHeaderView.Fixed)  # Checkbox
+        debug_header.setSectionResizeMode(0, QHeaderView.Fixed)
         self.debug_table.setColumnWidth(0, 40)
         debug_header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
         debug_header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
@@ -790,39 +950,301 @@ class MainWindow(QMainWindow):
         debug_header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
         debug_header.setSectionResizeMode(5, QHeaderView.ResizeToContents)
         debug_header.setSectionResizeMode(6, QHeaderView.ResizeToContents)
-        debug_header.setSectionResizeMode(7, QHeaderView.Interactive)  # Caption
+        debug_header.setSectionResizeMode(7, QHeaderView.Interactive)
         self.debug_table.setColumnWidth(7, 200)
-        debug_header.setSectionResizeMode(8, QHeaderView.Interactive)  # OCR Text Preview
+        debug_header.setSectionResizeMode(8, QHeaderView.Interactive)
         self.debug_table.setColumnWidth(8, 200)
         debug_header.setSectionResizeMode(9, QHeaderView.ResizeToContents)
         debug_header.setSectionResizeMode(10, QHeaderView.ResizeToContents)
         debug_header.setSectionResizeMode(11, QHeaderView.ResizeToContents)
-        debug_header.setSectionResizeMode(12, QHeaderView.Interactive)  # Suggested Filename
+        debug_header.setSectionResizeMode(12, QHeaderView.Interactive)
         self.debug_table.setColumnWidth(12, 200)
-        debug_header.setSectionResizeMode(13, QHeaderView.Interactive)  # Detected Text
+        debug_header.setSectionResizeMode(13, QHeaderView.Interactive)
         self.debug_table.setColumnWidth(13, 150)
-        debug_header.setSectionResizeMode(14, QHeaderView.Interactive)  # File Path
+        debug_header.setSectionResizeMode(14, QHeaderView.Interactive)
         self.debug_table.setColumnWidth(14, 300)
-        debug_header.setSectionResizeMode(15, QHeaderView.Interactive)  # Actions
-        self.debug_table.setColumnWidth(15, 140)  # Action buttons
-        debug_layout.addWidget(self.debug_table)
+        debug_header.setSectionResizeMode(15, QHeaderView.Interactive)
+        self.debug_table.setColumnWidth(15, 140)
         
-        # Debug info
-        self.debug_info_label = QLabel("Click 'Refresh View' to reload what's in the database")
-        self.debug_info_label.setObjectName("secondaryLabel")
-        debug_layout.addWidget(self.debug_info_label)
-        
-        # Add debug tab
-        self.tab_widget.addTab(debug_widget, "Indexed Files")
-
-        # Handle edits in debug table
+        # Connect signals
         self.debug_table.itemChanged.connect(self.on_debug_cell_changed)
-        # Handle double-click to show full content
         self.debug_table.cellDoubleClicked.connect(self.on_debug_cell_double_clicked)
+    
+    def _show_files_overlay(self):
+        """Show fullscreen overlay with indexed files table."""
+        from PySide6.QtWidgets import QDialog, QFrame
+        
+        # Detect current theme
+        is_dark = settings.theme == 'dark'
+        
+        # Theme-aware colors
+        if is_dark:
+            bg_color = "#1a1a2e"
+            card_bg = "#252540"
+            text_color = "#FFFFFF"
+            subtitle_color = "#888888"
+            border_color = "#3A3A5A"
+            close_bg = "rgba(255, 255, 255, 0.1)"
+            close_hover = "rgba(124, 77, 255, 0.2)"
+        else:
+            bg_color = "#FFFFFF"
+            card_bg = "#F8F6FF"
+            text_color = "#1A1A1A"
+            subtitle_color = "#666666"
+            border_color = "#E8E8E8"
+            close_bg = "rgba(0, 0, 0, 0.05)"
+            close_hover = "rgba(124, 77, 255, 0.15)"
+        
+        # Create overlay dialog
+        overlay = QDialog(self)
+        overlay.setWindowTitle("Indexed Files")
+        overlay.setObjectName("filesOverlay")
+        overlay.setModal(True)
+        overlay.resize(int(self.width() * 0.92), int(self.height() * 0.88))
+        
+        # Center the dialog
+        overlay.move(
+            self.x() + (self.width() - overlay.width()) // 2,
+            self.y() + (self.height() - overlay.height()) // 2
+        )
+        
+        layout = QVBoxLayout(overlay)
+        layout.setContentsMargins(32, 28, 32, 24)
+        layout.setSpacing(20)
+        
+        # Header with title and close button
+        header = QHBoxLayout()
+        header.setSpacing(12)
+        
+        # Folder icon to match the index page
+        icon_label = QLabel("📁")
+        icon_label.setStyleSheet(f"font-size: 28px; background: transparent;")
+        header.addWidget(icon_label)
+        
+        title = QLabel("Indexed Files")
+        title.setStyleSheet(f"font-size: 24px; font-weight: 600; color: #7C4DFF; background: transparent;")
+        header.addWidget(title)
+        
+        header.addStretch()
+        
+        # Refresh button - styled to match theme
+        refresh_btn = QPushButton("Refresh")
+        refresh_btn.setCursor(Qt.PointingHandCursor)
+        refresh_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {card_bg};
+                color: {text_color};
+                border: 1px solid {border_color};
+                border-radius: 8px;
+                padding: 8px 16px;
+                font-size: 13px;
+                font-weight: 500;
+            }}
+            QPushButton:hover {{
+                background-color: rgba(124, 77, 255, 0.1);
+                border-color: #7C4DFF;
+                color: #7C4DFF;
+            }}
+        """)
+        refresh_btn.clicked.connect(self.refresh_debug_view)
+        header.addWidget(refresh_btn)
+        
+        # Clear All button
+        clear_btn = QPushButton("Clear All")
+        clear_btn.setCursor(Qt.PointingHandCursor)
+        clear_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {card_bg};
+                color: {text_color};
+                border: 1px solid {border_color};
+                border-radius: 8px;
+                padding: 8px 16px;
+                font-size: 13px;
+                font-weight: 500;
+            }}
+            QPushButton:hover {{
+                background-color: rgba(255, 100, 100, 0.1);
+                border-color: #FF6B6B;
+                color: #FF6B6B;
+            }}
+        """)
+        clear_btn.clicked.connect(lambda: self._clear_all_indexed(overlay))
+        header.addWidget(clear_btn)
+        
+        # Close button
+        close_btn = QPushButton("✕")
+        close_btn.setFixedSize(40, 40)
+        close_btn.setCursor(Qt.PointingHandCursor)
+        close_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: {close_bg};
+                border: none;
+                border-radius: 20px;
+                font-size: 18px;
+                color: {subtitle_color};
+            }}
+            QPushButton:hover {{
+                background: {close_hover};
+                color: #7C4DFF;
+            }}
+        """)
+        close_btn.clicked.connect(overlay.close)
+        header.addWidget(close_btn)
+        
+        layout.addLayout(header)
+        
+        # Quick actions bar - apply theme-aware styling
+        layout.addWidget(self.debug_quick_actions_widget)
+        
+        # Style the quick actions bar with clean ghost buttons
+        ghost_btn_style = f"""
+            QPushButton {{
+                background: transparent;
+                border: none;
+                color: #7C4DFF;
+                font-size: 13px;
+                font-weight: 500;
+                padding: 8px 14px;
+                border-radius: 8px;
+            }}
+            QPushButton:hover {{
+                background: rgba(124, 77, 255, 0.1);
+            }}
+            QPushButton:pressed {{
+                background: rgba(124, 77, 255, 0.18);
+            }}
+        """
+        
+        secondary_btn_style = f"""
+            QPushButton {{
+                background: {card_bg};
+                border: 1px solid {border_color};
+                color: {subtitle_color};
+                font-size: 12px;
+                font-weight: 500;
+                padding: 6px 12px;
+                border-radius: 6px;
+            }}
+            QPushButton:hover {{
+                background: rgba(124, 77, 255, 0.08);
+                border-color: #7C4DFF;
+                color: #7C4DFF;
+            }}
+        """
+        
+        selection_badge_style = f"""
+            QLabel {{
+                background: rgba(124, 77, 255, 0.12);
+                color: #7C4DFF;
+                font-size: 13px;
+                font-weight: 600;
+                padding: 6px 14px;
+                border-radius: 16px;
+            }}
+        """
+        
+        # Apply styles to action buttons
+        self.debug_action_remove_btn.setStyleSheet(ghost_btn_style)
+        self.debug_action_reindex_btn.setStyleSheet(ghost_btn_style)
+        self.debug_action_add_tags_btn.setStyleSheet(ghost_btn_style)
+        self.debug_action_copy_paths_btn.setStyleSheet(ghost_btn_style)
+        self.debug_action_open_folders_btn.setStyleSheet(ghost_btn_style)
+        self.debug_action_export_btn.setStyleSheet(ghost_btn_style)
+        
+        # Apply secondary styles
+        self.debug_action_select_all_btn.setStyleSheet(secondary_btn_style)
+        self.debug_action_clear_selection_btn.setStyleSheet(secondary_btn_style)
+        
+        # Apply selection badge style
+        self.debug_selection_count_label.setStyleSheet(selection_badge_style)
+        
+        # Style the quick actions container
+        self.debug_quick_actions_widget.setStyleSheet(f"""
+            QWidget#quickActionsBar {{
+                background: {card_bg};
+                border: 1px solid {border_color};
+                border-radius: 10px;
+                padding: 4px;
+            }}
+        """)
+        
+        # Table container with subtle styling
+        table_container = QFrame()
+        table_container.setObjectName("tableContainer")
+        table_container.setStyleSheet(f"""
+            QFrame#tableContainer {{
+                background-color: {card_bg};
+                border: 1px solid {border_color};
+                border-radius: 12px;
+            }}
+        """)
+        table_layout = QVBoxLayout(table_container)
+        table_layout.setContentsMargins(0, 0, 0, 0)
+        table_layout.addWidget(self.debug_table)
+        
+        layout.addWidget(table_container, 1)
+        
+        # File count label
+        count_label = QLabel(f"{self.debug_table.rowCount()} files indexed")
+        count_label.setStyleSheet(f"color: {subtitle_color}; font-size: 13px; background: transparent;")
+        count_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(count_label)
+        
+        # Apply theme-aware styling to dialog
+        overlay.setStyleSheet(f"""
+            QDialog#filesOverlay {{
+                background-color: {bg_color};
+            }}
+        """)
+        
+        # Show the overlay
+        self.refresh_debug_view()
+        overlay.exec()
+        
+        # After closing, restore widgets to main window (for next time)
+        # The widgets are still valid, just not displayed
+    
+    def _clear_all_indexed(self, dialog=None):
+        """Clear all indexed files."""
+        from PySide6.QtWidgets import QMessageBox
+        reply = QMessageBox.question(
+            self, "Clear Index",
+            "Are you sure you want to remove all indexed files?",
+            QMessageBox.Yes | QMessageBox.No
+        )
+        if reply == QMessageBox.Yes:
+            try:
+                from app.core.indexer import FileIndexer
+                indexer = FileIndexer()
+                conn = indexer._get_connection()
+                cursor = conn.cursor()
+                cursor.execute("DELETE FROM files")
+                cursor.execute("DELETE FROM file_fts")
+                conn.commit()
+                conn.close()
+                self.refresh_debug_view()
+                self._update_view_files_button_count()
+                if dialog:
+                    dialog.close()
+            except Exception as e:
+                logger.error(f"Error clearing index: {e}")
+    
+    def _update_view_files_button_count(self):
+        """Update the View Files button with the current file count."""
+        try:
+            from app.core.indexer import FileIndexer
+            indexer = FileIndexer()
+            files = indexer.get_all_indexed_files()
+            count = len(files)
+            self.view_files_btn.setText(f"View Indexed Files ({count})")
+        except Exception as e:
+            logger.error(f"Error updating file count: {e}")
+            self.view_files_btn.setText("View Indexed Files (0)")
 
-    def setup_settings_tab(self):
-        """Settings tab for AI options."""
+    def setup_settings_page(self):
+        """Setup the Settings page with AI and app configuration."""
         settings_widget = QWidget()
+        settings_widget.setObjectName("settingsPage")
         layout = QVBoxLayout(settings_widget)
 
         # Appearance / Theme
@@ -1034,6 +1456,21 @@ class MainWindow(QMainWindow):
         search_group = QGroupBox("Search Enhancements")
         search_layout = QVBoxLayout(search_group)
         
+        # Smart Rerank toggle (moved from search area for cleaner UI)
+        gpt_row = QHBoxLayout()
+        self.gpt_rerank_button = QPushButton(
+            "Smart Rerank: ON" if settings.use_openai_search_rerank else "Smart Rerank: OFF"
+        )
+        self.gpt_rerank_button.setCheckable(True)
+        self.gpt_rerank_button.setChecked(settings.use_openai_search_rerank)
+        self.gpt_rerank_button.setToolTip(
+            "When ON, uses GPT to re-rank search results for better relevance.\n"
+            "Requires OpenAI API key. Adds a small cost per search."
+        )
+        gpt_row.addWidget(self.gpt_rerank_button)
+        gpt_row.addStretch()
+        search_layout.addLayout(gpt_row)
+        
         # Single toggle: Spell Check (controls fuzzy + spell correction)
         row = QHBoxLayout()
         self.spell_check_btn = QPushButton(
@@ -1124,7 +1561,8 @@ class MainWindow(QMainWindow):
         
         layout.addStretch()
 
-        self.tab_widget.addTab(settings_widget, "Settings")
+        # Add page to stack
+        self.page_stack.addWidget(settings_widget)
     
     def _update_theme_button(self):
         """Update the theme toggle button text and state."""
@@ -1143,11 +1581,17 @@ class MainWindow(QMainWindow):
         self.status_bar.showMessage(f"Switched to {new_theme} mode", 3000)
     
     def _refresh_account_info(self):
-        """Refresh and display account information."""
+        """Refresh and display account information in sidebar and settings."""
         if supabase_auth.is_authenticated:
             # Display email
             email = supabase_auth.user_email or "Unknown"
             self.account_email_label.setText(email)
+            
+            # Update sidebar
+            name = email.split('@')[0].title() if '@' in email else email
+            self.account_name_label.setText(name)
+            initials = name[:2].upper() if name else "?"
+            self.avatar_label.setText(initials)
             
             # Check subscription status
             result = supabase_auth.check_subscription()
@@ -1164,7 +1608,8 @@ class MainWindow(QMainWindow):
                         self.account_sub_label.setText(f"✓ Active ({status})")
                 else:
                     self.account_sub_label.setText(f"✓ Active ({status})")
-                self.account_sub_label.setStyleSheet("color: #00E5FF;")
+                self.account_sub_label.setStyleSheet("color: #7C4DFF;")
+                self.account_plan_label.setText("Pro Plan")
             else:
                 status = result.get('status')
                 if status:
@@ -1172,10 +1617,15 @@ class MainWindow(QMainWindow):
                 else:
                     self.account_sub_label.setText("No subscription")
                 self.account_sub_label.setStyleSheet("color: #FF6B6B;")
+                self.account_plan_label.setText("Free Plan")
         else:
             self.account_email_label.setText("Not logged in")
             self.account_sub_label.setText("No subscription")
             self.account_sub_label.setStyleSheet("")
+            # Update sidebar
+            self.account_name_label.setText("Not logged in")
+            self.account_plan_label.setText("Free Plan")
+            self.avatar_label.setText("?")
     
     def _sign_out(self):
         """Sign out the current user and show login dialog."""
@@ -1312,9 +1762,10 @@ class MainWindow(QMainWindow):
         self.index_pc_button.clicked.connect(self.on_index_entire_pc)
         self.auto_index_downloads_btn.toggled.connect(self.on_toggle_auto_index_downloads)
         
-        # Debug/Indexed Files tab connections
+        # Index page connections
         self.refresh_debug_button.clicked.connect(self.refresh_debug_view)
         self.clear_index_button.clicked.connect(self.clear_index)
+        self.clear_all_paths_btn.clicked.connect(self._clear_all_indexed_paths)
         
         # Settings tab connections
         # AI Provider selection
@@ -2430,6 +2881,20 @@ class MainWindow(QMainWindow):
         if hasattr(self, 'status_bar'):
             self.status_bar.showMessage(f"AI Provider: {provider_names.get(idx, 'OpenAI')}")
 
+    def _toggle_quick_index_options(self):
+        """Toggle visibility of More Options content."""
+        visible = not self.quick_index_content.isVisible()
+        self.quick_index_content.setVisible(visible)
+        arrow = "▼" if visible else "▶"
+        self.quick_index_header.setText(f"{arrow} More Options")
+
+    def _toggle_advanced_filters(self):
+        """Toggle visibility of Advanced filters content."""
+        visible = not self.advanced_content.isVisible()
+        self.advanced_content.setVisible(visible)
+        arrow = "▼" if visible else "▶"
+        self.advanced_header.setText(f"{arrow} Advanced")
+
     def on_save_local_ai(self):
         """Save local AI model settings."""
         local_model = self.local_model_combo.currentText().strip() or settings.local_model
@@ -2485,7 +2950,7 @@ class MainWindow(QMainWindow):
 
     def on_toggle_gpt_rerank(self, checked: bool):
         settings.set_use_openai_search_rerank(bool(checked))
-        self.gpt_rerank_button.setText("GPT Rerank: ON" if checked else "GPT Rerank: OFF")
+        self.gpt_rerank_button.setText("Smart Rerank: ON" if checked else "Smart Rerank: OFF")
         self.status_bar.showMessage("GPT rerank " + ("enabled" if checked else "disabled"))
 
     def on_spell_check_toggle(self, checked: bool):
@@ -2563,6 +3028,9 @@ class MainWindow(QMainWindow):
                 return
             if ok:
                 self.status_bar.showMessage("Saved edit")
+                # Clear selection to remove the persistent highlight
+                self.debug_table.clearSelection()
+                self.debug_table.setCurrentCell(-1, -1)
             else:
                 QMessageBox.critical(self, "Save Error", "Failed to save your edit.")
         except Exception as e:
@@ -2600,7 +3068,7 @@ class MainWindow(QMainWindow):
                     background-color: #1E1E1E;
                 }
                 QLabel {
-                    color: #00B8D4;
+                    color: #7C4DFF;
                     font-size: 16px;
                     font-weight: bold;
                     padding: 10px 0;
@@ -2609,16 +3077,16 @@ class MainWindow(QMainWindow):
                 QTextEdit {
                     background-color: #2A2A2A;
                     color: #FFFFFF;
-                    border: 2px solid #00B8D4;
+                    border: 2px solid #7C4DFF;
                     border-radius: 8px;
                     font-size: 14px;
                     padding: 15px;
                 }
                 QTextEdit:focus {
-                    border: 2px solid #00E5FF;
+                    border: 2px solid #9575FF;
                 }
                 QPushButton {
-                    background-color: #00B8D4;
+                    background-color: #7C4DFF;
                     color: white;
                     font-size: 13px;
                     font-weight: bold;
@@ -2628,7 +3096,7 @@ class MainWindow(QMainWindow):
                     min-width: 100px;
                 }
                 QPushButton:hover {
-                    background-color: #00ACC1;
+                    background-color: #9575FF;
                 }
             """
         else:
@@ -2637,7 +3105,7 @@ class MainWindow(QMainWindow):
                     background-color: #FFFFFF;
                 }
                 QLabel {
-                    color: #00838F;
+                    color: #7C4DFF;
                     font-size: 16px;
                     font-weight: bold;
                     padding: 10px 0;
@@ -2646,16 +3114,16 @@ class MainWindow(QMainWindow):
                 QTextEdit {
                     background-color: #F5F5F5;
                     color: #1A1A1A;
-                    border: 2px solid #00B8D4;
+                    border: 2px solid #7C4DFF;
                     border-radius: 8px;
                     font-size: 14px;
                     padding: 15px;
                 }
                 QTextEdit:focus {
-                    border: 2px solid #00ACC1;
+                    border: 2px solid #9575FF;
                 }
                 QPushButton {
-                    background-color: #00B8D4;
+                    background-color: #7C4DFF;
                     color: white;
                     font-size: 13px;
                     font-weight: bold;
@@ -2665,7 +3133,7 @@ class MainWindow(QMainWindow):
                     min-width: 100px;
                 }
                 QPushButton:hover {
-                    background-color: #00ACC1;
+                    background-color: #9575FF;
                 }
             """
         
@@ -2914,7 +3382,7 @@ Move Plan Summary:
     def select_index_folder(self):
         """Select folder to index for search."""
         folder = QFileDialog.getExistingDirectory(
-            self, "Select Folder to Index", str(Path.home())
+            self, "Choose Folder", str(Path.home())
         )
         
         if folder:
@@ -2993,6 +3461,10 @@ Move Plan Summary:
         self.index_button_action.setText("➕ Add to Queue")
         self.index_button_action.setEnabled(True)  # Allow adding more
         
+        # Show progress container (contains progress bar, labels, buttons)
+        if hasattr(self, 'index_progress_container'):
+            self.index_progress_container.setVisible(True)
+        
         # Show progress controls with explicit text settings
         self.progress_bar.setVisible(True)
         self.progress_bar.setTextVisible(True)
@@ -3001,11 +3473,14 @@ Move Plan Summary:
         self.progress_bar.setProperty("paused", False)
         self.progress_bar.style().unpolish(self.progress_bar)
         self.progress_bar.style().polish(self.progress_bar)
-        self.drop_zone.setVisible(False)  # Hide drop zone during indexing
+        
+        # Update drop zone text instead of hiding it completely
+        self._update_drop_zone(f"Indexing: {path.name}", "Drop more folders to add to queue")
+        
         self.index_percent_label.setVisible(True)
         self.index_percent_label.setText("0%")
         self.index_pause_btn.setVisible(True)
-        self.index_pause_btn.setText("⏸ Pause")
+        self.index_pause_btn.setText("Pause")
         self.index_cancel_btn.setVisible(True)
         self.index_progress_label.setVisible(True)
         # Keep button enabled so user can add more files to queue
@@ -3057,7 +3532,7 @@ Move Plan Summary:
             self.index_pause_btn.setText("⏸ Pause")
             self.status_bar.showMessage("Indexing resumed...")
             self.index_progress_label.setStyleSheet("")  # Normal color
-            self.index_percent_label.setStyleSheet("font-size: 18px; font-weight: bold; color: #00B8D4;")
+            self.index_percent_label.setStyleSheet("font-size: 18px; font-weight: bold; color: #7C4DFF;")
             # Reset progress bar to normal color using property
             self.progress_bar.setProperty("paused", False)
             self.progress_bar.style().unpolish(self.progress_bar)
@@ -3118,7 +3593,7 @@ Move Plan Summary:
                 percent = int((done / total) * 100)
                 # Update the prominent percentage label
                 self.index_percent_label.setText(f"{percent}%")
-                self.index_percent_label.setStyleSheet("font-size: 18px; font-weight: bold; color: #00B8D4;")
+                self.index_percent_label.setStyleSheet("font-size: 18px; font-weight: bold; color: #7C4DFF;")
                 self.index_progress_label.setText(f"Processing file {done} of {total}")
                 self.index_progress_label.setStyleSheet("")  # Reset style
             else:
@@ -3131,13 +3606,22 @@ Move Plan Summary:
     
     def _hide_index_controls(self):
         """Hide indexing controls after completion."""
+        # Hide progress container
+        if hasattr(self, 'index_progress_container'):
+            self.index_progress_container.setVisible(False)
+        
         self.progress_bar.setVisible(False)
         self.index_pause_btn.setVisible(False)
         self.index_cancel_btn.setVisible(False)
         self.index_progress_label.setVisible(False)
         self.index_percent_label.setVisible(False)
-        self.drop_zone.setVisible(True)  # Show drop zone again
+        
+        # Reset drop zone text
+        self._update_drop_zone("Add folder to index", "Drag and drop or click to browse")
         self.index_button_action.setEnabled(True)
+        
+        # Update indexed paths list
+        self._update_indexed_paths_list()
     
     def on_index_completed(self, result: Dict[str, Any]):
         """Handle index completion."""
@@ -3151,7 +3635,7 @@ Move Plan Summary:
         
         # No more items - finish up
         self.is_indexing = False
-        self.index_button_action.setText("Index Directory")
+        self.index_button_action.setText("Add Folder")
         self._hide_index_controls()
         
         if 'error' in result:
@@ -3177,12 +3661,23 @@ Move Plan Summary:
         # Enable search
         self.search_button.setEnabled(True)
         
-        # Refresh debug view
+        # Refresh debug view and force UI update
         self.refresh_debug_view()
         
+        # Force table to update visually
+        if hasattr(self, 'debug_table'):
+            self.debug_table.viewport().update()
+            QApplication.processEvents()
+        
+        # Show success message
+        indexed_count = result.get('indexed_files', 0)
         self.status_bar.showMessage(
-            f"Indexed {result['indexed_files']} files ({result['files_with_ocr']} with OCR)"
+            f"✓ Indexed {indexed_count} files ({result.get('files_with_ocr', 0)} with OCR)"
         )
+        
+        # Update info label
+        if hasattr(self, 'debug_info_label'):
+            self.debug_info_label.setText(f"Showing {indexed_count} indexed files")
     
     def on_index_error(self, error: str):
         """Handle index error."""
@@ -3197,17 +3692,17 @@ Move Plan Summary:
         self.status_bar.showMessage("Indexing failed")
     
     def on_index_entire_pc(self):
-        """Handle 'Index Entire PC' button click with warning."""
+        """Handle 'Search Entire PC' button click with warning."""
         # Show warning dialog
         reply = QMessageBox.warning(
             self,
-            "Index Entire PC",
-            "⚠️ This will scan and index ALL files on your computer.\n\n"
-            "This operation can take a very long time (hours) depending on:\n"
+            "Search Entire PC",
+            "⚠️ This will scan ALL files on your computer.\n\n"
+            "This can take a very long time (hours) depending on:\n"
             "• Number of files on your PC\n"
             "• Disk speed\n"
             "• AI analysis settings\n\n"
-            "The app will remain usable during indexing.\n\n"
+            "The app will remain usable during this process.\n\n"
             "Do you want to continue?",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No
@@ -3319,13 +3814,13 @@ Move Plan Summary:
         self.index_worker.start()
     
     def on_toggle_auto_index_downloads(self, checked: bool):
-        """Handle auto-index toggle with warning."""
+        """Handle auto-add toggle with warning."""
         if checked:
             # Show warning before enabling
             reply = QMessageBox.warning(
                 self,
-                "Enable Auto-Index New Files",
-                "📥 This will automatically index any NEW files added to common folders:\n\n"
+                "Enable Auto-Add New Files",
+                "📥 This will automatically add any NEW files from common folders:\n\n"
                 "• Downloads\n"
                 "• Desktop\n"
                 "• Documents\n"
@@ -3333,7 +3828,7 @@ Move Plan Summary:
                 "• Videos\n"
                 "• Music\n"
                 "• OneDrive (if present)\n\n"
-                "Only files added AFTER enabling will be indexed.\n"
+                "Only files added AFTER enabling will be included.\n"
                 "Existing files will NOT be touched.\n\n"
                 "Do you want to enable this feature?",
                 QMessageBox.Yes | QMessageBox.No,
@@ -3342,7 +3837,7 @@ Move Plan Summary:
             
             if reply == QMessageBox.Yes:
                 settings.set_auto_index_downloads(True)
-                self.auto_index_downloads_btn.setText("📥 Auto-Index New Files: ON")
+                self.auto_index_downloads_btn.setText("📥 Auto-Add New Files: ON")
                 self._start_downloads_watcher()
                 self.auto_index_status.setText("Monitoring folders for new files...")
             else:
@@ -3350,7 +3845,7 @@ Move Plan Summary:
                 self.auto_index_downloads_btn.setChecked(False)
         else:
             settings.set_auto_index_downloads(False)
-            self.auto_index_downloads_btn.setText("📥 Auto-Index New Files: OFF")
+            self.auto_index_downloads_btn.setText("📥 Auto-Add New Files: OFF")
             self._stop_downloads_watcher()
             self.auto_index_status.setText("")
     
@@ -3465,9 +3960,60 @@ Move Plan Summary:
     
     def update_search_button_state(self):
         """Update search button enabled state."""
-        has_index = hasattr(self, 'index_path') and self.index_path is not None
+        # Enable if there's a query AND (index_path is set OR there are indexed files in DB)
+        has_index_path = hasattr(self, 'index_path') and self.index_path is not None
         has_query = bool(self.search_input.text().strip())
-        self.search_button.setEnabled(has_index and has_query)
+        
+        # Also check if database has any indexed files (for cases where user opens app with existing data)
+        has_indexed_files = False
+        try:
+            from app.core.database import file_index
+            has_indexed_files = file_index.get_file_count() > 0
+        except Exception:
+            pass
+        
+        self.search_button.setEnabled(has_query and (has_index_path or has_indexed_files))
+    
+    def _show_search_loading(self):
+        """Show loading state on search bar (like ChatGPT/Claude)."""
+        # Change button to loading spinner
+        if hasattr(self, 'search_button'):
+            self._original_btn_text = self.search_button.text()
+            self.search_button.setText("⏳")
+            self.search_button.setEnabled(False)
+        
+        # Change AI label to show searching
+        if hasattr(self, 'ai_label'):
+            self._original_ai_text = self.ai_label.text()
+            self.ai_label.setText("Searching...")
+            self.ai_label.setStyleSheet("color: #7C4DFF; font-size: 13px; font-weight: 500; background: transparent;")
+        
+        # Add pulsing effect to search container
+        if hasattr(self, 'search_container'):
+            self.search_container.setStyleSheet("""
+                QWidget#searchContainerLarge {
+                    border: 2px solid #7C4DFF;
+                }
+            """)
+        
+        # Process events to show the loading state immediately
+        QApplication.processEvents()
+    
+    def _hide_search_loading(self):
+        """Hide loading state and restore normal search bar."""
+        # Restore button
+        if hasattr(self, 'search_button') and hasattr(self, '_original_btn_text'):
+            self.search_button.setText(self._original_btn_text)
+            self.search_button.setEnabled(True)
+        
+        # Restore AI label
+        if hasattr(self, 'ai_label') and hasattr(self, '_original_ai_text'):
+            self.ai_label.setText(self._original_ai_text)
+            self.ai_label.setStyleSheet("")  # Reset to QSS default
+        
+        # Remove pulsing effect
+        if hasattr(self, 'search_container'):
+            self.search_container.setStyleSheet("")  # Reset to QSS default
     
     def search_files(self):
         """Search for files with NLP parsing and filters."""
@@ -3480,6 +4026,9 @@ Move Plan Summary:
         
         if not query and not has_ui_filters:
             return
+        
+        # Show loading state
+        self._show_search_loading()
         
         self.status_bar.showMessage(f"Searching for: {query}" if query else "Browsing files...")
         
@@ -3584,8 +4133,14 @@ Move Plan Summary:
         else:
             self.search_debug_label.setText("")
         
+        # Switch to results view (hide hero, show compact search)
+        self._switch_to_results_view()
+        
         # Display results
         self.display_search_results(results)
+        
+        # Hide loading state
+        self._hide_search_loading()
         
         # Update status message
         if is_date_only_search:
@@ -3993,8 +4548,131 @@ Move Plan Summary:
         else:
             QMessageBox.warning(self, "Export Failed", "Failed to export file list.")
     
+    def _switch_to_results_view(self):
+        """Switch search page from landing state to results state with smooth animation."""
+        from PySide6.QtCore import QPropertyAnimation, QEasingCurve, QParallelAnimationGroup
+        
+        # Skip if already in results view
+        if hasattr(self, '_in_results_view') and self._in_results_view:
+            return
+        self._in_results_view = True
+        
+        # Create animation group for smooth transition
+        self._transition_group = QParallelAnimationGroup(self)
+        
+        # Animate hero section height collapse
+        if hasattr(self, 'hero_section') and self.hero_section.isVisible():
+            hero_anim = QPropertyAnimation(self.hero_section, b"maximumHeight")
+            hero_anim.setDuration(350)
+            hero_anim.setStartValue(self.hero_section.height())
+            hero_anim.setEndValue(0)
+            hero_anim.setEasingCurve(QEasingCurve.OutCubic)
+            hero_anim.finished.connect(lambda: self.hero_section.setVisible(False))
+            self._transition_group.addAnimation(hero_anim)
+        
+        # Animate top spacer collapse
+        if hasattr(self, 'hero_top_spacer') and self.hero_top_spacer.isVisible():
+            spacer_anim = QPropertyAnimation(self.hero_top_spacer, b"maximumHeight")
+            spacer_anim.setDuration(350)
+            spacer_anim.setStartValue(self.hero_top_spacer.height())
+            spacer_anim.setEndValue(0)
+            spacer_anim.setEasingCurve(QEasingCurve.OutCubic)
+            spacer_anim.finished.connect(lambda: self.hero_top_spacer.setVisible(False))
+            self._transition_group.addAnimation(spacer_anim)
+        
+        # Animate bottom spacer collapse
+        if hasattr(self, 'hero_bottom_spacer') and self.hero_bottom_spacer.isVisible():
+            bottom_anim = QPropertyAnimation(self.hero_bottom_spacer, b"maximumHeight")
+            bottom_anim.setDuration(350)
+            bottom_anim.setStartValue(self.hero_bottom_spacer.height())
+            bottom_anim.setEndValue(0)
+            bottom_anim.setEasingCurve(QEasingCurve.OutCubic)
+            bottom_anim.finished.connect(lambda: self.hero_bottom_spacer.setVisible(False))
+            self._transition_group.addAnimation(bottom_anim)
+        
+        # Animate search bar shrink
+        if hasattr(self, 'search_container'):
+            search_anim = QPropertyAnimation(self.search_container, b"maximumHeight")
+            search_anim.setDuration(300)
+            search_anim.setStartValue(self.search_container.height())
+            search_anim.setEndValue(56)
+            search_anim.setEasingCurve(QEasingCurve.OutCubic)
+            self._transition_group.addAnimation(search_anim)
+        
+        # Show the compact top spacer
+        if hasattr(self, 'search_top_spacer'):
+            self.search_top_spacer.setVisible(True)
+        
+        # Start animation
+        self._transition_group.start()
+    
+    def _switch_to_landing_view(self):
+        """Switch search page back to landing state with hero content."""
+        from PySide6.QtCore import QPropertyAnimation, QEasingCurve, QParallelAnimationGroup
+        
+        # Skip if already in landing view
+        if not hasattr(self, '_in_results_view') or not self._in_results_view:
+            return
+        self._in_results_view = False
+        
+        # Show hero elements first (set to visible with 0 height)
+        if hasattr(self, 'hero_section'):
+            self.hero_section.setVisible(True)
+            self.hero_section.setMaximumHeight(0)
+        if hasattr(self, 'hero_top_spacer'):
+            self.hero_top_spacer.setVisible(True)
+            self.hero_top_spacer.setMaximumHeight(0)
+        if hasattr(self, 'hero_bottom_spacer'):
+            self.hero_bottom_spacer.setVisible(True)
+            self.hero_bottom_spacer.setMaximumHeight(0)
+        
+        # Hide the compact top spacer
+        if hasattr(self, 'search_top_spacer'):
+            self.search_top_spacer.setVisible(False)
+        
+        # Create animation group
+        self._landing_group = QParallelAnimationGroup(self)
+        
+        # Animate hero section expand
+        if hasattr(self, 'hero_section'):
+            hero_anim = QPropertyAnimation(self.hero_section, b"maximumHeight")
+            hero_anim.setDuration(350)
+            hero_anim.setStartValue(0)
+            hero_anim.setEndValue(150)
+            hero_anim.setEasingCurve(QEasingCurve.OutCubic)
+            self._landing_group.addAnimation(hero_anim)
+        
+        # Animate spacers expand
+        if hasattr(self, 'hero_top_spacer'):
+            spacer_anim = QPropertyAnimation(self.hero_top_spacer, b"maximumHeight")
+            spacer_anim.setDuration(350)
+            spacer_anim.setStartValue(0)
+            spacer_anim.setEndValue(16777215)  # QWIDGETSIZE_MAX
+            spacer_anim.setEasingCurve(QEasingCurve.OutCubic)
+            self._landing_group.addAnimation(spacer_anim)
+        
+        if hasattr(self, 'hero_bottom_spacer'):
+            bottom_anim = QPropertyAnimation(self.hero_bottom_spacer, b"maximumHeight")
+            bottom_anim.setDuration(350)
+            bottom_anim.setStartValue(0)
+            bottom_anim.setEndValue(16777215)
+            bottom_anim.setEasingCurve(QEasingCurve.OutCubic)
+            self._landing_group.addAnimation(bottom_anim)
+        
+        # Animate search bar expand
+        if hasattr(self, 'search_container'):
+            search_anim = QPropertyAnimation(self.search_container, b"maximumHeight")
+            search_anim.setDuration(300)
+            search_anim.setStartValue(56)
+            search_anim.setEndValue(74)
+            search_anim.setEasingCurve(QEasingCurve.OutCubic)
+            self._landing_group.addAnimation(search_anim)
+        
+        # Start animation
+        self._landing_group.start()
+    
     def display_search_results(self, results: List[Dict[str, Any]]):
-        """Display search results in the table."""
+        """Display search results in the simplified table (File Name, Folder, Size, Actions)."""
         # DIAGNOSTIC: Log signal blocking
         logger.warning(f"[DISPLAY] display_search_results START: {len(results)} results, blocking signals...")
         
@@ -4003,173 +4681,134 @@ Move Plan Summary:
         self.search_results_table.blockSignals(True)
         
         self.search_results_table.setRowCount(len(results))
+        actions_col = 4
+        max_actions_width = self.search_results_table.columnWidth(actions_col)
         
         for row, result in enumerate(results):
-            file_id = result.get('id')
+            file_path = result.get('file_path', '') or ''
+            
+            # Ensure the row is tall enough for the action buttons (some styles ignore defaultSectionSize)
+            try:
+                self.search_results_table.setRowHeight(row, 46)
+            except Exception:
+                pass
             
             # Checkbox column (col 0)
             checkbox_item = QTableWidgetItem()
             checkbox_item.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled | Qt.ItemIsSelectable)
             checkbox_item.setCheckState(Qt.Unchecked)
+            # Store file path in checkbox item's data for double-click access
+            checkbox_item.setData(Qt.UserRole, file_path)
             self.search_results_table.setItem(row, 0, checkbox_item)
             
             # File name (col 1)
             name_item = QTableWidgetItem(result['file_name'])
             name_item.setFlags(name_item.flags() & ~Qt.ItemIsEditable)
+            name_item.setData(Qt.UserRole, file_path)  # Store path for double-click
             self.search_results_table.setItem(row, 1, name_item)
             
-            # Category (col 2)
-            category_item = QTableWidgetItem(result['category'])
-            category_item.setFlags(category_item.flags() & ~Qt.ItemIsEditable)
-            self.search_results_table.setItem(row, 2, category_item)
+            # Folder (col 2) - extract parent folder from path
+            import os
+            folder_path = os.path.dirname(file_path) if file_path else ''
+            # Show just the last folder name for cleaner display
+            folder_name = os.path.basename(folder_path) if folder_path else ''
+            folder_item = QTableWidgetItem(folder_name)
+            folder_item.setFlags(folder_item.flags() & ~Qt.ItemIsEditable)
+            folder_item.setToolTip(folder_path)  # Full path on hover
+            folder_item.setData(Qt.UserRole, file_path)
+            self.search_results_table.setItem(row, 2, folder_item)
             
             # Size (col 3)
             size_item = QTableWidgetItem(result.get('size_formatted', 'Unknown'))
             size_item.setFlags(size_item.flags() & ~Qt.ItemIsEditable)
+            size_item.setData(Qt.UserRole, file_path)
             self.search_results_table.setItem(row, 3, size_item)
             
-            # Relevance score (col 4)
-            relevance = result.get('relevance_score', 0)
-            relevance_item = QTableWidgetItem(f"{relevance:.2f}")
-            relevance_item.setFlags(relevance_item.flags() & ~Qt.ItemIsEditable)
-            self.search_results_table.setItem(row, 4, relevance_item)
-            
-            # Label (col 5)
-            label_item = QTableWidgetItem(result.get('label', '') or '')
-            label_item.setFlags(label_item.flags() & ~Qt.ItemIsEditable)
-            self.search_results_table.setItem(row, 5, label_item)
-
-            # Tags (col 6)
-            tags_val = result.get('tags')
-            if isinstance(tags_val, list):
-                tags_text = ", ".join(tags_val)
-            else:
-                tags_text = tags_val or ''
-            tags_item = QTableWidgetItem(tags_text)
-            tags_item.setFlags(tags_item.flags() & ~Qt.ItemIsEditable)
-            self.search_results_table.setItem(row, 6, tags_item)
-
-            # Caption (col 7)
-            caption_item = QTableWidgetItem(result.get('caption', '') or '')
-            caption_item.setFlags((caption_item.flags() | Qt.ItemIsEditable))
-            self.search_results_table.setItem(row, 7, caption_item)
-
-            # OCR preview (col 8)
-            ocr_preview = result.get('ocr_preview', '')
-            if ocr_preview:
-                ocr_item = QTableWidgetItem(ocr_preview)
-            else:
-                ocr_item = QTableWidgetItem("No OCR text")
-            ocr_item.setFlags(ocr_item.flags() & ~Qt.ItemIsEditable)
-            self.search_results_table.setItem(row, 8, ocr_item)
-
-            # AI Source (col 9)
-            ai_source_item = QTableWidgetItem(result.get('ai_source', '') or '')
-            ai_source_item.setFlags(ai_source_item.flags() & ~Qt.ItemIsEditable)
-            self.search_results_table.setItem(row, 9, ai_source_item)
-
-            # Vision score (col 10)
-            vscore = result.get('vision_confidence', None)
-            try:
-                vscore_text = f"{float(vscore):.2f}" if vscore is not None else ''
-            except Exception:
-                vscore_text = ''
-            vscore_item = QTableWidgetItem(vscore_text)
-            vscore_item.setFlags(vscore_item.flags() & ~Qt.ItemIsEditable)
-            self.search_results_table.setItem(row, 10, vscore_item)
-
-            # Purpose & Suggested filename from metadata (col 11, 12)
-            meta = result.get('metadata') or {}
-            purpose_text = meta.get('purpose') or ''
-            sfile_text = meta.get('suggested_filename') or ''
-            purpose_item = QTableWidgetItem(purpose_text)
-            purpose_item.setFlags((purpose_item.flags() | Qt.ItemIsEditable))
-            self.search_results_table.setItem(row, 11, purpose_item)
-            sfile_item = QTableWidgetItem(sfile_text)
-            sfile_item.setFlags((sfile_item.flags() | Qt.ItemIsEditable))
-            self.search_results_table.setItem(row, 12, sfile_item)
-
-            # Path (col 13)
-            path_text = result.get('file_path', '') or ''
-            path_item = QTableWidgetItem(path_text)
-            path_item.setFlags(path_item.flags() & ~Qt.ItemIsEditable)
-            self.search_results_table.setItem(row, 13, path_item)
-
-            # Actions (Copy, Open) (col 14)
+            # Actions column (col 4) - Open and Copy Path buttons
             actions_widget = QWidget()
+            actions_widget.setMinimumHeight(40)
+            actions_widget.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
             actions_layout = QHBoxLayout(actions_widget)
-            actions_layout.setContentsMargins(4, 4, 4, 4)
-            actions_layout.setSpacing(8)
-            btn_copy = QPushButton("Copy Path")
-            btn_open = QPushButton("Open File")
-            btn_copy.setToolTip("Copy file path to clipboard")
+            # Small vertical margins so button text doesn't get clipped by the cell viewport/borders
+            actions_layout.setContentsMargins(4, 2, 4, 2)
+            actions_layout.setSpacing(6)
+            actions_layout.setAlignment(Qt.AlignVCenter)
+            
+            # Purple brand button style
+            action_btn_style = """
+                QPushButton {
+                    background-color: #7C4DFF;
+                    color: white;
+                    font-size: 12px;
+                    font-weight: bold;
+                    border: none;
+                    border-radius: 4px;
+                    padding: 4px 12px;
+                }
+                QPushButton:hover {
+                    background-color: #9575FF;
+                }
+            """
+            
+            btn_open = QPushButton("Open")
             btn_open.setToolTip("Open file with default app")
-            actions_layout.addWidget(btn_copy)
+            btn_open.setFixedHeight(30)
+            btn_open.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+            btn_open.setStyleSheet(action_btn_style)
+            
+            btn_copy = QPushButton("Copy Path")
+            btn_copy.setToolTip("Copy file path to clipboard")
+            btn_copy.setFixedHeight(30)
+            btn_copy.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+            btn_copy.setStyleSheet(action_btn_style)
+            
             actions_layout.addWidget(btn_open)
-            actions_layout.addStretch()
-            self.search_results_table.setCellWidget(row, 14, actions_widget)
+            actions_layout.addWidget(btn_copy)
+            # No addStretch() - let Qt size naturally
+            
+            # Connect buttons to actions
+            btn_open.clicked.connect(lambda _, p=file_path: self.open_file_in_os(p))
+            btn_copy.clicked.connect(lambda _, p=file_path: self.copy_path_to_clipboard(p))
+            
+            self.search_results_table.setCellWidget(row, 4, actions_widget)
 
-            # Connect actions
-            file_path_for_row = path_text
-            btn_copy.clicked.connect(lambda _, p=file_path_for_row: self.copy_path_to_clipboard(p))
-            btn_open.clicked.connect(lambda _, p=file_path_for_row: self.open_file_in_os(p))
+            # Grow Actions column to fully fit the two buttons (QTableWidget won't auto-measure cellWidget()).
+            try:
+                actions_layout.activate()
+                actions_widget.adjustSize()
+                # Extra safety padding: some Windows styles add frame/border pixels that sizeHint under-reports
+                needed = actions_widget.sizeHint().width() + 28
+                if needed > max_actions_width:
+                    max_actions_width = needed
+            except Exception:
+                pass
+
+        # Apply final Actions width once (prevents jitter while populating)
+        try:
+            self.search_results_table.setColumnWidth(actions_col, max_actions_width)
+        except Exception:
+            pass
 
         # Re-enable signals after population is complete
         self.search_results_table.blockSignals(False)
         self._populating_search_table = False
         logger.warning("[DISPLAY] display_search_results END: signals unblocked")
 
+    def _on_search_result_double_click(self, row: int, col: int):
+        """Open file when user double-clicks a search result row."""
+        item = self.search_results_table.item(row, 1)  # Get file name item
+        if item:
+            file_path = item.data(Qt.UserRole)
+            if file_path:
+                self.open_file_in_os(file_path)
+
     def on_search_cell_changed(self, item: QTableWidgetItem) -> None:
-        # DIAGNOSTIC: Log every call to this handler
-        logger.warning(f"[HANDLER] on_search_cell_changed FIRED: row={item.row()}, col={item.column()}, text='{item.text()[:50] if item.text() else ''}'")
-        
+        """Handle cell changes in search results table (simplified - no editable columns)."""
         # Avoid handling during table population
         if getattr(self, '_populating_search_table', False):
-            logger.warning("[HANDLER] on_search_cell_changed BLOCKED by _populating_search_table flag")
             return
-        try:
-            row = item.row()
-            col = item.column()
-            if not hasattr(self, '_last_search_results'):
-                return
-            if row >= len(self._last_search_results):
-                return
-            rec = self._last_search_results[row]
-            file_id = rec.get('id')
-            if not file_id:
-                return
-            # Determine which field is being edited
-            # Column layout: 0=Checkbox, 1=Name, 2=Category, 3=Size, 4=Relevance, 5=Label, 
-            # 6=Tags, 7=Caption, 8=OCR, 9=AI Source, 10=Vision, 11=Purpose, 12=Suggested filename, 13=Path, 14=Actions
-            new_val = item.text()
-            ok = False
-            if col == 7:  # Caption
-                ok = file_index.update_file_field(file_id, 'caption', new_val)
-                if ok:
-                    rec['caption'] = new_val
-            elif col == 11:  # Purpose (metadata)
-                meta = rec.get('metadata') or {}
-                meta['purpose'] = new_val
-                ok = file_index.update_file_field(file_id, 'metadata', meta)
-                if ok:
-                    rec.setdefault('metadata', {})
-                    rec['metadata']['purpose'] = new_val
-            elif col == 12:  # Suggested filename (metadata)
-                meta = rec.get('metadata') or {}
-                meta['suggested_filename'] = new_val
-                ok = file_index.update_file_field(file_id, 'metadata', meta)
-                if ok:
-                    rec.setdefault('metadata', {})
-                    rec['metadata']['suggested_filename'] = new_val
-            else:
-                # Non-editable column, ignore
-                return
-            if ok:
-                self.status_bar.showMessage("Saved edit")
-            else:
-                QMessageBox.critical(self, "Save Error", "Failed to save your edit.")
-        except Exception as e:
-            QMessageBox.critical(self, "Edit Error", f"Failed to apply edit:\n{e}")
+        # Simplified table has no editable columns - ignore all changes
+        pass
 
     def copy_path_to_clipboard(self, file_path: str) -> None:
         try:
@@ -4203,22 +4842,18 @@ Move Plan Summary:
         """Handle drag enter - show visual feedback."""
         if event.mimeData().hasUrls():
             event.acceptProposedAction()
-            # Update drop zone styling to show it's active
+            # Update drop zone styling to show it's active (works with both old and new object names)
             self.drop_zone.setStyleSheet("""
-                QLabel {
-                    border: 3px solid #00E5FF;
-                    border-radius: 8px;
-                    background-color: rgba(0, 229, 255, 0.15);
-                    color: #00E5FF;
-                    font-size: 14px;
-                    font-weight: bold;
-                    padding: 10px;
+                QWidget#dropZoneLarge, QWidget#dropZone {
+                    border: 3px solid #7C4DFF;
+                    border-radius: 24px;
+                    background-color: rgba(124, 77, 255, 0.15);
                 }
             """)
             # Count files/folders being dragged
             urls = event.mimeData().urls()
             count = len(urls)
-            self.drop_zone.setText(f"📥 Drop to index {count} item{'s' if count > 1 else ''}")
+            self._update_drop_zone(f"📥 Drop to index {count} item{'s' if count > 1 else ''}", "Release to start indexing")
         else:
             event.ignore()
     
@@ -4246,19 +4881,46 @@ Move Plan Summary:
         else:
             event.ignore()
     
+    def _update_drop_zone(self, title: str, subtitle: str):
+        """Update drop zone text labels."""
+        if hasattr(self, 'drop_title') and self.drop_title:
+            self.drop_title.setText(title)
+        if hasattr(self, 'drop_subtitle') and self.drop_subtitle:
+            self.drop_subtitle.setText(subtitle)
+    
+    def _on_drop_zone_clicked(self, event):
+        """Handle click on drop zone to open folder dialog."""
+        folder = QFileDialog.getExistingDirectory(
+            self,
+            "Select Folder to Index",
+            str(Path.home())
+        )
+        if folder:
+            self._handle_dropped_paths([folder])
+    
+    def _clear_all_indexed_paths(self):
+        """Clear all indexed files from the database."""
+        reply = QMessageBox.question(
+            self,
+            "Clear All Indexed Files",
+            "Are you sure you want to remove all files from the index?\n\n"
+            "This will not delete your actual files, only the search index.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        if reply == QMessageBox.Yes:
+            self.clear_index()
+    
+    def _update_indexed_paths_list(self):
+        """Update indexed paths - simplified, just refreshes the debug table."""
+        # Section removed for simpler UI - just refresh the files table
+        pass
+    
     def _reset_drop_zone_style(self):
         """Reset drop zone to default styling."""
-        self.drop_zone.setStyleSheet("""
-            QLabel {
-                border: 2px dashed #00B8D4;
-                border-radius: 8px;
-                background-color: rgba(0, 184, 212, 0.05);
-                color: #00B8D4;
-                font-size: 13px;
-                padding: 10px;
-            }
-        """)
-        self.drop_zone.setText("📁 Drag & drop files or folders here to index them")
+        # Use object name selector for consistency with QSS
+        self.drop_zone.setStyleSheet("")  # Let QSS handle styling
+        self._update_drop_zone("Add folder to index", "Drag and drop or click to browse")
     
     def _handle_dropped_paths(self, paths: list):
         """Handle dropped file/folder paths and start indexing."""
@@ -4318,7 +4980,14 @@ Move Plan Summary:
         from app.core.search import search_service
         
         total = len(files)
-        self.drop_zone.setVisible(False)  # Hide drop zone during indexing
+        
+        # Show progress container
+        if hasattr(self, 'index_progress_container'):
+            self.index_progress_container.setVisible(True)
+        
+        # Update drop zone to show status
+        self._update_drop_zone(f"Indexing {total} files...", "Drop more files to add to queue")
+        
         self.progress_bar.setVisible(True)
         self.progress_bar.setRange(0, total)
         self.index_percent_label.setVisible(True)
@@ -4338,11 +5007,16 @@ Move Plan Summary:
             except Exception as e:
                 logger.error(f"Error indexing {file_path}: {e}")
         
-        # Done
+        # Done - hide progress
+        if hasattr(self, 'index_progress_container'):
+            self.index_progress_container.setVisible(False)
+        
         self.progress_bar.setVisible(False)
         self.index_percent_label.setVisible(False)
         self.index_progress_label.setVisible(False)
-        self.drop_zone.setVisible(True)  # Show drop zone again
+        
+        # Reset drop zone
+        self._update_drop_zone("Add folder to index", "Drag and drop or click to browse")
         
         QMessageBox.information(
             self,
@@ -4350,8 +5024,9 @@ Move Plan Summary:
             f"Successfully indexed {indexed} of {total} files."
         )
         
-        # Refresh views
+        # Refresh views and update paths list
         self.refresh_debug_view()
+        self._update_indexed_paths_list()
         stats = search_service.get_index_statistics()
         self.update_search_statistics(stats)
         self.search_button.setEnabled(True)
@@ -4361,7 +5036,7 @@ Move Plan Summary:
     def update_search_statistics(self, stats: Dict[str, Any]):
         """Update search statistics display."""
         if not stats:
-            self.search_stats_label.setText("No files indexed yet")
+            self.search_stats_label.setText("No files added yet")
             return
         
         total_files = stats.get('total_files', 0)
@@ -4376,6 +5051,11 @@ Move Plan Summary:
         """Refresh the debug view with current database contents."""
         # Skip if debug table doesn't exist (hidden in MVP mode)
         if not hasattr(self, 'debug_table'):
+            logger.warning("refresh_debug_view: debug_table not found")
+            return
+        
+        if self.debug_table is None:
+            logger.warning("refresh_debug_view: debug_table is None")
             return
             
         try:
@@ -4383,11 +5063,15 @@ Move Plan Summary:
             import sqlite3
             from app.core.database import file_index
             
+            logger.info(f"refresh_debug_view: Querying database at {file_index.db_path}")
+            
             with sqlite3.connect(file_index.db_path) as conn:
                 conn.row_factory = sqlite3.Row
                 cursor = conn.cursor()
                 cursor.execute("SELECT * FROM files ORDER BY file_name")
                 rows = cursor.fetchall()
+            
+            logger.info(f"refresh_debug_view: Found {len(rows)} files in database")
             
             # Store file data for Quick Actions
             self._last_debug_files = []
@@ -4537,7 +5221,7 @@ Move Plan Summary:
                 
                 btn_style = """
                     QPushButton {
-                        background-color: #00B8D4;
+                        background-color: #7C4DFF;
                         color: white;
                         font-size: 11px;
                         font-weight: bold;
@@ -4548,7 +5232,7 @@ Move Plan Summary:
                         max-height: 24px;
                     }
                     QPushButton:hover {
-                        background-color: #00ACC1;
+                        background-color: #9575FF;
                     }
                 """
                 
@@ -4576,7 +5260,20 @@ Move Plan Summary:
             self.debug_table.blockSignals(False)
             self._populating_debug_table = False
             self.debug_info_label.setText(f"Showing {len(rows)} indexed files")
-            self.status_bar.showMessage(f"Debug view refreshed - {len(rows)} files shown")
+            self.status_bar.showMessage(f"Files view refreshed - {len(rows)} files shown")
+            
+            # Force table to update and scroll to top
+            self.debug_table.scrollToTop()
+            self.debug_table.viewport().update()
+            
+            logger.info(f"refresh_debug_view: Table updated with {len(rows)} rows")
+            
+            # Update indexed paths list in sidebar
+            self._update_indexed_paths_list()
+            
+            # Update the View Files button count
+            if hasattr(self, 'view_files_btn'):
+                self.view_files_btn.setText(f"View Indexed Files ({len(rows)})")
             
         except Exception as e:
             QMessageBox.critical(self, "Debug Error", f"Error refreshing debug view:\n{e}")

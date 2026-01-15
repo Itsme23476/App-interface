@@ -80,12 +80,10 @@ class FileOperations:
         Returns:
             Dict with 'updated', 'not_found', 'errors' counts
         """
-        import hashlib
-        from app.core.categorize import get_file_metadata
-        from app.core.settings import settings
-        
         stats = {'updated': 0, 'not_found': 0, 'errors': 0}
         total = len(file_paths)
+        from app.core.search import SearchService
+        svc = SearchService()
         
         for i, file_path in enumerate(file_paths):
             try:
@@ -95,50 +93,18 @@ class FileOperations:
                     stats['not_found'] += 1
                     logger.debug(f"File not found for reindex: {file_path}")
                     continue
-                
-                # Get fresh metadata
-                metadata = get_file_metadata(path_obj)
-                metadata['source_path'] = str(path_obj)
-                
-                # Compute content hash
-                try:
-                    h = hashlib.sha256()
-                    with open(path_obj, 'rb') as fh:
-                        for chunk in iter(lambda: fh.read(1024 * 1024), b''):
-                            h.update(chunk)
-                    metadata['content_hash'] = h.hexdigest()
-                except Exception:
-                    pass
-                
-                metadata['last_indexed_at'] = datetime.now().isoformat()
-                
-                # Try to get AI analysis if it's an image
-                if metadata.get('category') == 'Images':
-                    try:
-                        from app.core.vision import analyze_image, gpt_vision_fallback, _file_to_b64
-                        
-                        vision_provider = settings.get_setting('ai', 'vision_provider', 'ollama')
-                        
-                        if vision_provider == 'ollama':
-                            vision_result = analyze_image(path_obj)
-                        else:
-                            b64 = _file_to_b64(str(path_obj))
-                            if b64:
-                                vision_result = gpt_vision_fallback(b64, str(path_obj))
-                            else:
-                                vision_result = None
-                        
-                        if vision_result:
-                            metadata['label'] = vision_result.get('label')
-                            metadata['tags'] = vision_result.get('tags', [])
-                            metadata['caption'] = vision_result.get('caption')
-                            metadata['vision_confidence'] = vision_result.get('confidence')
-                            metadata['ai_source'] = vision_provider
-                    except Exception as e:
-                        logger.debug(f"Vision analysis failed for {file_path}: {e}")
-                
-                # Update in database
-                if self.file_index.add_file(metadata):
+
+                # Force AI re-index using the same pipeline as normal indexing
+                result = svc._process_single_file({'source_path': str(path_obj)}, path_obj.parent, force_ai=True)
+                err = result.pop('_error', None)
+                result.pop('_skipped', None)
+                result.pop('_cancelled', None)
+                result.pop('_file_path', None)
+                if err:
+                    raise RuntimeError(err)
+
+                # Update in database (preserves existing fields if AI returns empty)
+                if self.file_index.add_file(result):
                     stats['updated'] += 1
                 else:
                     stats['errors'] += 1
@@ -187,9 +153,9 @@ class FileOperations:
                             current_tags = []
                             if row['tags']:
                                 try:
-                            # tags may be stored as JSON list or comma-separated string
-                            from app.core.database import _parse_tags_value
-                            current_tags = _parse_tags_value(row['tags']) or []
+                                    # tags may be stored as JSON list or comma-separated string
+                                    from app.core.database import _parse_tags_value
+                                    current_tags = _parse_tags_value(row['tags']) or []
                                     if not isinstance(current_tags, list):
                                         current_tags = [current_tags] if current_tags else []
                                 except:

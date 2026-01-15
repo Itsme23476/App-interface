@@ -36,7 +36,7 @@ class SearchService:
         self._cancel_flag.set()
         logger.info("Indexing cancellation requested")
     
-    def _process_single_file(self, file_data: Dict, directory_path: Path) -> Dict[str, Any]:
+    def _process_single_file(self, file_data: Dict, directory_path: Path, force_ai: bool = False) -> Dict[str, Any]:
         """
         Process a single file with AI analysis. Called in parallel.
         
@@ -66,14 +66,16 @@ class SearchService:
             full_metadata['last_indexed_at'] = datetime.utcnow().isoformat()
             full_metadata['source_path'] = str(file_path)
             
-            # Check if file already indexed with same content hash - skip AI analysis
+            # Check if file already indexed with same content hash - skip AI analysis (unless forced)
             existing = self.index.get_file_by_path(str(file_path))
-            if existing and existing.get('content_hash') == full_metadata.get('content_hash'):
+            if (not force_ai) and existing and existing.get('content_hash') == full_metadata.get('content_hash'):
                 # File unchanged - skip expensive AI analysis, return existing data
                 logger.debug(f"Skipping unchanged file: {file_path.name}")
                 existing['_file_path'] = file_path
                 existing['_skipped'] = True
                 return existing
+            if force_ai:
+                logger.info(f"Forcing re-index (AI) for: {file_path}")
             
             # Check for cancellation before AI call
             if self._cancel_flag.is_set():
