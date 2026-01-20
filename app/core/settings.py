@@ -33,8 +33,12 @@ class Settings:
         self.quick_search_geometry: Dict[str, int] = {}
         # Theme: 'dark' or 'light'
         self.theme: str = 'dark'
-        # Auto-index downloads folder
+        # Auto-index downloads folder (legacy - kept for compatibility)
         self.auto_index_downloads: bool = False
+        # Watch for new downloads - common folders (Downloads, Desktop, Documents, etc.)
+        self.watch_common_folders: bool = False
+        # Watch for new downloads - custom folders list
+        self.watch_custom_folders: List[str] = []
         # OCR during indexing (slow - disable for faster indexing)
         self.enable_ocr_indexing: bool = False
         # Search enhancements
@@ -207,8 +211,12 @@ class Settings:
         theme = data.get('theme')
         if theme in ('dark', 'light'):
             self.theme = theme
-        # Auto-index downloads
+        # Auto-index downloads (legacy)
         self.auto_index_downloads = bool(data.get('auto_index_downloads', False))
+        # Watch for new downloads - common folders
+        self.watch_common_folders = bool(data.get('watch_common_folders', False))
+        # Watch for new downloads - custom folders
+        self.watch_custom_folders = list(data.get('watch_custom_folders', []))
         # OCR during indexing (disabled by default for speed)
         self.enable_ocr_indexing = bool(data.get('enable_ocr_indexing', False))
         # Search enhancements
@@ -242,6 +250,8 @@ class Settings:
             'quick_search_geometry': self.quick_search_geometry,
             'theme': self.theme,
             'auto_index_downloads': self.auto_index_downloads,
+            'watch_common_folders': self.watch_common_folders,
+            'watch_custom_folders': self.watch_custom_folders,
             'enable_ocr_indexing': self.enable_ocr_indexing,
             'enable_spell_check': self.enable_spell_check,
             'auth_access_token': self.auth_access_token,
@@ -283,6 +293,23 @@ class Settings:
         """Enable or disable auto-indexing of Downloads folder."""
         self.auto_index_downloads = bool(enabled)
         self._save_config()
+    
+    def set_watch_common_folders(self, enabled: bool) -> None:
+        """Enable or disable watching common folders for new downloads."""
+        self.watch_common_folders = bool(enabled)
+        self._save_config()
+    
+    def add_watch_custom_folder(self, folder_path: str) -> None:
+        """Add a custom folder to watch for new downloads."""
+        if folder_path and folder_path not in self.watch_custom_folders:
+            self.watch_custom_folders.append(folder_path)
+            self._save_config()
+    
+    def remove_watch_custom_folder(self, folder_path: str) -> None:
+        """Remove a custom folder from the watch list."""
+        if folder_path in self.watch_custom_folders:
+            self.watch_custom_folders.remove(folder_path)
+            self._save_config()
 
     def set_auth_tokens(self, access_token: str, refresh_token: str, email: str = '') -> None:
         """Store authentication tokens securely."""

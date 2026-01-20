@@ -12,6 +12,7 @@ from .database import file_index
 from .scan import scan_directory
 from .categorize import get_file_metadata
 from .vision import analyze_image, analyze_text, gpt_vision_fallback, describe_image_detailed
+from .video_analyzer import is_video_file, is_audio_file, analyze_video, analyze_audio
 from .settings import settings
 from .text_extract import extract_file_text, get_supported_text_formats
 import os
@@ -22,7 +23,9 @@ from datetime import datetime
 logger = logging.getLogger(__name__)
 
 # Parallel processing settings
-MAX_CONCURRENT_AI_REQUESTS = 50  # Tier 2: 5,000 RPM allows 50-80 safely
+# Reduced from 50 to 10 to prevent API overload, especially for video processing
+# Each video sends 5 frame analyses + 1 audio transcription = 6 API calls
+MAX_CONCURRENT_AI_REQUESTS = 10
 
 class SearchService:
     """High-level search service for file discovery."""
@@ -30,11 +33,36 @@ class SearchService:
     def __init__(self):
         self.index = file_index
         self._cancel_flag = threading.Event()
+        self._pause_flag = threading.Event()
     
     def cancel_indexing(self):
         """Signal to cancel ongoing indexing operation."""
         self._cancel_flag.set()
+        self._pause_flag.clear()  # Unpause so it can exit
         logger.info("Indexing cancellation requested")
+    
+    def pause_indexing(self):
+        """Signal to pause ongoing indexing operation."""
+        self._pause_flag.set()
+        logger.info("Indexing paused")
+    
+    def resume_indexing(self):
+        """Signal to resume a paused indexing operation."""
+        self._pause_flag.clear()
+        logger.info("Indexing resumed")
+    
+    def is_paused(self) -> bool:
+        """Check if indexing is currently paused."""
+        return self._pause_flag.is_set()
+    
+    def _wait_if_paused(self):
+        """Block while paused, checking every 100ms. Returns True if should continue, False if cancelled."""
+        while self._pause_flag.is_set():
+            if self._cancel_flag.is_set():
+                return False
+            import time
+            time.sleep(0.1)
+        return not self._cancel_flag.is_set()
     
     def _process_single_file(self, file_data: Dict, directory_path: Path, force_ai: bool = False) -> Dict[str, Any]:
         """
@@ -77,15 +105,45 @@ class SearchService:
             if force_ai:
                 logger.info(f"Forcing re-index (AI) for: {file_path}")
             
-            # Check for cancellation before AI call
-            if self._cancel_flag.is_set():
+            # Check for pause/cancellation before AI call
+            if not self._wait_if_paused():
                 return {'_file_path': file_path, '_cancelled': True, **full_metadata}
             
-            # AI Analysis - Vision for images/PDFs; Text LLM for others
+            # AI Analysis - Different providers for different file types:
+            # - Images/PDFs: OpenAI GPT-4o-mini (most cost-effective for vision)
+            # - Video/Audio: OpenAI (keyframe extraction + Whisper transcription)
+            # - Other files: OpenAI GPT-4o-mini for text analysis
             ext = file_path.suffix.lower()
             image_extensions = {'.png', '.jpg', '.jpeg', '.bmp', '.tiff', '.tif', '.gif', '.webp', '.avif', '.heic', '.heif', '.ico', '.raw', '.cr2', '.nef', '.arw', '.pdf'}
             
-            if ext in image_extensions:
+            # Handle video files with OpenAI (keyframe extraction + audio transcription)
+            if is_video_file(file_path):
+                video_result = analyze_video(file_path)
+                if video_result:
+                    full_metadata.update(video_result)
+                    logger.info(f"OpenAI video analysis complete: {file_path.name}")
+                else:
+                    # Fallback: just categorize by extension without AI
+                    full_metadata['label'] = 'video'
+                    full_metadata['tags'] = ['video', ext.replace('.', '')]
+                    full_metadata['caption'] = f'Video file: {file_path.name}'
+                    logger.warning(f"Video analysis failed, using basic metadata: {file_path.name}")
+            
+            # Handle audio files with OpenAI Whisper
+            elif is_audio_file(file_path):
+                audio_result = analyze_audio(file_path)
+                if audio_result:
+                    full_metadata.update(audio_result)
+                    logger.info(f"OpenAI audio analysis complete: {file_path.name}")
+                else:
+                    # Fallback: just categorize by extension without AI
+                    full_metadata['label'] = 'audio'
+                    full_metadata['tags'] = ['audio', ext.replace('.', '')]
+                    full_metadata['caption'] = f'Audio file: {file_path.name}'
+                    logger.warning(f"Audio analysis failed, using basic metadata: {file_path.name}")
+            
+            # Handle images/PDFs with OpenAI
+            elif ext in image_extensions:
                 # Image/PDF: Use vision model
                 if settings.ai_provider == 'openai':
                     from .vision import _file_to_b64
@@ -153,6 +211,78 @@ class SearchService:
                 'source_path': file_data.get('source_path', ''),
             }
     
+    def index_single_file(self, file_path: Path, force_ai: bool = False) -> Dict[str, Any]:
+        """
+        Index a single file with AI analysis.
+        
+        Args:
+            file_path: Path to the file to index
+            force_ai: Force re-analysis even if file hasn't changed
+            
+        Returns:
+            Dictionary with result info (or 'error' key on failure)
+        """
+        try:
+            file_path = Path(file_path)
+            if not file_path.exists():
+                return {'error': f'File not found: {file_path}'}
+            
+            if not file_path.is_file():
+                return {'error': f'Not a file: {file_path}'}
+            
+            # Create file_data dict that _process_single_file expects
+            file_data = {
+                'source_path': str(file_path),
+                'name': file_path.name
+            }
+            
+            # Process the file with AI
+            result = self._process_single_file(file_data, file_path.parent, force_ai=force_ai)
+            
+            # Handle errors
+            file_path_result = result.pop('_file_path', None)
+            error = result.pop('_error', None)
+            was_cancelled = result.pop('_cancelled', False)
+            was_skipped = result.pop('_skipped', False)
+            
+            if error:
+                return {'error': error}
+            
+            if was_cancelled:
+                return {'error': 'Indexing cancelled', 'cancelled': True}
+            
+            if was_skipped:
+                return {'skipped': True, 'path': str(file_path)}
+            
+            # Add to index
+            if self.index.add_file(result):
+                # Create embedding
+                try:
+                    rec = self.index.get_file_by_path(str(file_path))
+                    if rec:
+                        text_parts = [rec.get('file_name') or '']
+                        if rec.get('label'):
+                            text_parts.append(rec['label'])
+                        if rec.get('tags'):
+                            text_parts.append(' '.join(rec['tags']))
+                        if rec.get('caption'):
+                            text_parts.append(rec['caption'])
+                        if rec.get('ocr_text'):
+                            text_parts.append(rec['ocr_text'])
+                        text_blob = ' '.join([t for t in text_parts if t])[:5000]
+                        if text_blob and rec.get('id'):
+                            self.index.store_embedding(rec['id'], text_blob)
+                except Exception as emb_err:
+                    logger.warning(f"Embedding error for {file_path}: {emb_err}")
+                
+                return {'success': True, 'path': str(file_path)}
+            else:
+                return {'error': 'Failed to add file to index'}
+                
+        except Exception as e:
+            logger.error(f"Error indexing single file {file_path}: {e}")
+            return {'error': str(e)}
+    
     def index_directory(
         self,
         directory_path: Path,
@@ -173,6 +303,7 @@ class SearchService:
         try:
             logger.info(f"Starting to index directory: {directory_path}")
             self._cancel_flag.clear()
+            self._pause_flag.clear()
             
             # Scan directory for files
             files = scan_directory(directory_path)
@@ -207,6 +338,13 @@ class SearchService:
                 
                 # Process results as they complete
                 for future in as_completed(future_to_idx):
+                    # Check for pause - wait until resumed
+                    if not self._wait_if_paused():
+                        cancelled = True
+                        for f in future_to_idx:
+                            f.cancel()
+                        break
+                    
                     if self._cancel_flag.is_set():
                         cancelled = True
                         # Cancel remaining futures

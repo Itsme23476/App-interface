@@ -203,7 +203,7 @@ def _ensure_model(model: str = None) -> None:
 
 def analyze_image(image_path: Path, model: str = None) -> Optional[Dict[str, Any]]:
     """Return label/tags/caption/confidence using configured AI provider.
-    
+
     Uses OpenAI by default (recommended). Falls back to local Ollama if configured.
     Returns None if no AI provider is available.
     """
@@ -232,7 +232,7 @@ def analyze_image(image_path: Path, model: str = None) -> Optional[Dict[str, Any
             if not _model_is_available(model):
                 logger.info(f"Model '{model}' not available locally. Skipping analyze_image.")
                 return None
-            
+
             # Build image b64 and gather context (dimensions, aspect)
             width = height = None
             try:

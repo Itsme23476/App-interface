@@ -324,6 +324,9 @@ class MainWindow(QMainWindow):
         self.status_bar.setObjectName("statusBar")
         self.setStatusBar(self.status_bar)
         self.status_bar.showMessage("Ready")
+        
+        # Refresh account info after all UI is built
+        self._refresh_account_info()
     
     def setup_sidebar(self):
         """Setup the left sidebar with navigation and account section."""
@@ -562,42 +565,20 @@ class MainWindow(QMainWindow):
         search_row.addStretch()
         page_layout.addLayout(search_row)
         
-        page_layout.addSpacing(24)
-        
-        # Quick filter chips - always visible
-        self.chips_container = QWidget()
-        chips_layout = QHBoxLayout(self.chips_container)
-        chips_layout.setContentsMargins(0, 0, 0, 0)
-        chips_layout.setSpacing(12)
-        chips_layout.addStretch()
-        
-        self.filter_chips = {}
-        chip_items = ["Recent Files", "Images", "Documents", "Videos", "Projects", "Archives"]
-        for chip_text in chip_items:
-            chip = QPushButton(chip_text)
-            chip.setObjectName("filterChip")
-            chip.setCursor(Qt.PointingHandCursor)
-            chip.setCheckable(True)
-            chip.clicked.connect(lambda checked, t=chip_text: self._on_filter_chip_clicked(t, checked))
-            chips_layout.addWidget(chip)
-            self.filter_chips[chip_text] = chip
-        
-        chips_layout.addStretch()
-        page_layout.addWidget(self.chips_container)
-        
-        page_layout.addSpacing(20)
+        page_layout.addSpacing(40)
         
         # Bottom spacer for landing mode (hidden after search)
         self.hero_bottom_spacer = QWidget()
         self.hero_bottom_spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         page_layout.addWidget(self.hero_bottom_spacer, 50)
         
-        # Search Results section (shown after searching)
-        results_container = QWidget()
-        results_container.setObjectName("resultsContainer")
-        results_layout = QVBoxLayout(results_container)
+        # Search Results section (hidden until a search is made)
+        self.results_container = QWidget()
+        self.results_container.setObjectName("resultsContainer")
+        results_layout = QVBoxLayout(self.results_container)
         results_layout.setContentsMargins(0, 0, 0, 0)
         results_layout.setSpacing(8)
+        self.results_container.setVisible(False)  # Hide until search
         
         # Quick Actions bar (hidden by default, shown when files selected)
         self.quick_actions_widget = QWidget()
@@ -681,7 +662,7 @@ class MainWindow(QMainWindow):
         self.search_stats_label.setObjectName("searchStatsLabel")
         results_layout.addWidget(self.search_stats_label)
         
-        page_layout.addWidget(results_container, 1)
+        page_layout.addWidget(self.results_container, 1)
         
         # Hidden filter controls (used internally)
         self.type_filter = QComboBox()
@@ -705,39 +686,30 @@ class MainWindow(QMainWindow):
         # Add page to stack
         self.page_stack.addWidget(search_page)
     
-    def _on_filter_chip_clicked(self, chip_text: str, checked: bool):
-        """Handle filter chip clicks to filter search results."""
-        # Map chip text to type filter
-        type_map = {
-            "Recent Files": 0,  # All Types
-            "Images": 1,
-            "Documents": 2,
-            "Videos": 4,
-            "Projects": 0,  # All Types (custom handling needed)
-            "Archives": 0,  # All Types (custom handling needed)
-        }
-        
-        # Uncheck other chips
-        for name, chip in self.filter_chips.items():
-            if name != chip_text:
-                chip.setChecked(False)
-        
-        if checked and chip_text in type_map:
-            self.type_filter.setCurrentIndex(type_map[chip_text])
-            # Trigger search with the new filter
-            if self.search_input.text().strip():
-                self.perform_search()
-            else:
-                # Just filter existing results
-                self.perform_search()
-    
     def setup_index_page(self):
         """Setup the Index Management page with clean drop zone and View Files button."""
+        from PySide6.QtWidgets import QScrollArea
+        
         index_page = QWidget()
         index_page.setObjectName("indexPage")
         page_layout = QVBoxLayout(index_page)
-        page_layout.setContentsMargins(60, 50, 60, 40)
-        page_layout.setSpacing(24)
+        page_layout.setContentsMargins(0, 0, 0, 0)
+        page_layout.setSpacing(0)
+        
+        # Scroll area for the entire index page content
+        scroll_area = QScrollArea()
+        scroll_area.setObjectName("indexScrollArea")
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll_area.setFrameShape(QFrame.NoFrame)
+        scroll_area.setStyleSheet("QScrollArea { background: transparent; border: none; }")
+        
+        # Scrollable content widget
+        scroll_content = QWidget()
+        scroll_content.setObjectName("indexScrollContent")
+        scroll_content_layout = QVBoxLayout(scroll_content)
+        scroll_content_layout.setContentsMargins(60, 50, 60, 40)
+        scroll_content_layout.setSpacing(24)
         
         # Centered content container
         content_container = QWidget()
@@ -777,16 +749,16 @@ class MainWindow(QMainWindow):
         
         # Make the entire widget clickable
         self.drop_zone.mousePressEvent = self._on_drop_zone_clicked
-        content_layout.addWidget(self.drop_zone, 1)
+        content_layout.addWidget(self.drop_zone)
         
-        # Progress section (hidden until indexing)
+        # Progress section (hidden until indexing) - OUTSIDE the drop zone
         self.index_progress_container = QWidget()
         self.index_progress_container.setObjectName("progressContainer")
         progress_layout = QVBoxLayout(self.index_progress_container)
         progress_layout.setContentsMargins(0, 0, 0, 0)
         progress_layout.setSpacing(8)
         
-        # Progress bar
+        # Progress bar (original format)
         self.progress_bar = QProgressBar()
         self.progress_bar.setObjectName("indexProgressBar")
         self.progress_bar.setTextVisible(True)
@@ -821,6 +793,56 @@ class MainWindow(QMainWindow):
         self.index_progress_container.setVisible(False)
         content_layout.addWidget(self.index_progress_container)
         
+        # === More Options (collapsible) ===
+        self.more_options_header = QPushButton("▶ More Options")
+        self.more_options_header.setObjectName("moreOptionsHeader")
+        self.more_options_header.setCursor(Qt.PointingHandCursor)
+        self.more_options_header.setMinimumHeight(36)
+        content_layout.addWidget(self.more_options_header, 0, Qt.AlignCenter)
+        
+        # More options content (hidden by default)
+        self.more_options_content = QWidget()
+        self.more_options_content.setObjectName("moreOptionsContent")
+        self.more_options_content.setVisible(False)
+        options_layout = QVBoxLayout(self.more_options_content)
+        options_layout.setContentsMargins(0, 8, 0, 8)
+        options_layout.setSpacing(12)
+        
+        # Watch for New Downloads - opens popup
+        self.watch_header_btn = QPushButton("👁️ Watch for New Downloads")
+        self.watch_header_btn.setObjectName("watchHeaderButton")
+        self.watch_header_btn.setCursor(Qt.PointingHandCursor)
+        self.watch_header_btn.setMinimumHeight(44)
+        options_layout.addWidget(self.watch_header_btn, 0, Qt.AlignCenter)
+        
+        # Watch status indicator (shown inline)
+        self.watch_status_label = QLabel("")
+        self.watch_status_label.setObjectName("watchStatusLabel")
+        self.watch_status_label.setAlignment(Qt.AlignCenter)
+        options_layout.addWidget(self.watch_status_label)
+        
+        # Index Entire PC Now button
+        self.index_pc_now_btn = QPushButton("⚡ Index Entire PC Now")
+        self.index_pc_now_btn.setObjectName("indexPcButton")
+        self.index_pc_now_btn.setCursor(Qt.PointingHandCursor)
+        self.index_pc_now_btn.setMinimumHeight(44)
+        self.index_pc_now_btn.setToolTip("Scan all files on your computer (one-time)")
+        options_layout.addWidget(self.index_pc_now_btn, 0, Qt.AlignCenter)
+        
+        content_layout.addWidget(self.more_options_content)
+        
+        # Hidden widgets for compatibility
+        self.watch_common_toggle = QPushButton()
+        self.watch_common_toggle.setCheckable(True)
+        self.watch_common_toggle.setVisible(False)
+        self.watch_custom_toggle = QPushButton()
+        self.watch_custom_toggle.setCheckable(True)
+        self.watch_custom_toggle.setVisible(False)
+        self.add_custom_folder_btn = QPushButton()
+        self.add_custom_folder_btn.setVisible(False)
+        self.custom_folders_list = QWidget()
+        self.custom_folders_list_layout = QVBoxLayout(self.custom_folders_list)
+        
         # View Indexed Files button - prominent and centered
         self.view_files_btn = QPushButton("View Indexed Files (0)")
         self.view_files_btn.setObjectName("viewFilesButton")
@@ -830,7 +852,12 @@ class MainWindow(QMainWindow):
         self.view_files_btn.clicked.connect(self._show_files_overlay)
         content_layout.addWidget(self.view_files_btn, 0, Qt.AlignCenter)
         
-        page_layout.addWidget(content_container, 1)
+        # Add content container to scroll layout
+        scroll_content_layout.addWidget(content_container, 1)
+        
+        # Set scroll content and add scroll area to page
+        scroll_area.setWidget(scroll_content)
+        page_layout.addWidget(scroll_area, 1)
         
         # Hidden compatibility stubs
         self.indexed_paths_list = None
@@ -1205,29 +1232,35 @@ class MainWindow(QMainWindow):
         # The widgets are still valid, just not displayed
     
     def _clear_all_indexed(self, dialog=None):
-        """Clear all indexed files."""
+        """Clear all indexed files from the database."""
         from PySide6.QtWidgets import QMessageBox
+        from app.core.database import file_index
+        
         reply = QMessageBox.question(
             self, "Clear Index",
-            "Are you sure you want to remove all indexed files?",
-            QMessageBox.Yes | QMessageBox.No
+            "Are you sure you want to remove all indexed files?\n\n"
+            "This will not delete your actual files, only the search index.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
         )
         if reply == QMessageBox.Yes:
             try:
-                from app.core.indexer import FileIndexer
-                indexer = FileIndexer()
-                conn = indexer._get_connection()
-                cursor = conn.cursor()
-                cursor.execute("DELETE FROM files")
-                cursor.execute("DELETE FROM file_fts")
-                conn.commit()
-                conn.close()
+                # Use the proper file_index to clear
+                file_index.clear_index()
+                
+                # Refresh UI
                 self.refresh_debug_view()
                 self._update_view_files_button_count()
+                
+                # Close dialog if provided
                 if dialog:
                     dialog.close()
+                
+                self.status_bar.showMessage("Index cleared successfully", 3000)
+                logger.info("Index cleared by user")
             except Exception as e:
                 logger.error(f"Error clearing index: {e}")
+                QMessageBox.warning(self, "Error", f"Failed to clear index: {e}")
     
     def _update_view_files_button_count(self):
         """Update the View Files button with the current file count."""
@@ -1243,9 +1276,20 @@ class MainWindow(QMainWindow):
 
     def setup_settings_page(self):
         """Setup the Settings page with AI and app configuration."""
+        # Create scroll area for settings
+        from PySide6.QtWidgets import QScrollArea
+        
+        scroll_area = QScrollArea()
+        scroll_area.setObjectName("settingsPage")
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll_area.setFrameShape(QScrollArea.NoFrame)
+        
         settings_widget = QWidget()
-        settings_widget.setObjectName("settingsPage")
+        settings_widget.setObjectName("settingsContent")
         layout = QVBoxLayout(settings_widget)
+        layout.setContentsMargins(40, 30, 40, 30)
+        layout.setSpacing(20)
 
         # Appearance / Theme
         appearance_group = QGroupBox("Appearance")
@@ -1433,21 +1477,29 @@ class MainWindow(QMainWindow):
 
         qs_row1 = QHBoxLayout()
         self.qs_autopaste_btn = QPushButton("Auto-Paste: ON" if settings.quick_search_autopaste else "Auto-Paste: OFF")
+        self.qs_autopaste_btn.setObjectName("settingsToggle")
         self.qs_autopaste_btn.setCheckable(True)
         self.qs_autopaste_btn.setChecked(settings.quick_search_autopaste)
+        self.qs_autopaste_btn.setMinimumWidth(160)
         qs_row1.addWidget(self.qs_autopaste_btn)
         self.qs_autoconfirm_btn = QPushButton("Auto-Confirm: ON" if settings.quick_search_auto_confirm else "Auto-Confirm: OFF")
+        self.qs_autoconfirm_btn.setObjectName("settingsToggle")
         self.qs_autoconfirm_btn.setCheckable(True)
         self.qs_autoconfirm_btn.setChecked(settings.quick_search_auto_confirm)
+        self.qs_autoconfirm_btn.setMinimumWidth(160)
         qs_row1.addWidget(self.qs_autoconfirm_btn)
+        qs_row1.addStretch()
         qs_layout.addLayout(qs_row1)
 
         qs_row2 = QHBoxLayout()
         qs_row2.addWidget(QLabel("Shortcut:"))
         self.qs_shortcut_input = QLineEdit(settings.quick_search_shortcut)
+        self.qs_shortcut_input.setMaximumWidth(200)
         qs_row2.addWidget(self.qs_shortcut_input)
         self.qs_shortcut_save = QPushButton("Save Shortcut")
+        self.qs_shortcut_save.setMinimumWidth(120)
         qs_row2.addWidget(self.qs_shortcut_save)
+        qs_row2.addStretch()
         qs_layout.addLayout(qs_row2)
 
         layout.addWidget(qs_group)
@@ -1461,8 +1513,10 @@ class MainWindow(QMainWindow):
         self.gpt_rerank_button = QPushButton(
             "Smart Rerank: ON" if settings.use_openai_search_rerank else "Smart Rerank: OFF"
         )
+        self.gpt_rerank_button.setObjectName("settingsToggle")
         self.gpt_rerank_button.setCheckable(True)
         self.gpt_rerank_button.setChecked(settings.use_openai_search_rerank)
+        self.gpt_rerank_button.setMinimumWidth(180)
         self.gpt_rerank_button.setToolTip(
             "When ON, uses GPT to re-rank search results for better relevance.\n"
             "Requires OpenAI API key. Adds a small cost per search."
@@ -1476,8 +1530,10 @@ class MainWindow(QMainWindow):
         self.spell_check_btn = QPushButton(
             "Spell Check: ON" if settings.enable_spell_check else "Spell Check: OFF"
         )
+        self.spell_check_btn.setObjectName("settingsToggle")
         self.spell_check_btn.setCheckable(True)
         self.spell_check_btn.setChecked(settings.enable_spell_check)
+        self.spell_check_btn.setMinimumWidth(180)
         self.spell_check_btn.setToolTip(
             "When ON, the app fixes typos automatically:\n"
             "• Fuzzy matching for dates/types (e.g., 'yestarday' → 'yesterday')\n"
@@ -1494,31 +1550,6 @@ class MainWindow(QMainWindow):
         search_layout.addWidget(search_info)
         
         layout.addWidget(search_group)
-        
-        # Database Maintenance section
-        db_group = QGroupBox("Database Maintenance")
-        db_layout = QVBoxLayout(db_group)
-        
-        # Resync file dates button
-        resync_row = QHBoxLayout()
-        self.resync_dates_btn = QPushButton("🔄 Extract File Dates from Metadata")
-        self.resync_dates_btn.setToolTip(
-            "Extract original dates from file metadata:\n"
-            "• EXIF dates from photos (JPEG, etc.)\n"
-            "• Creation dates from Office docs (Word, Excel, PowerPoint)\n"
-            "• Creation dates from PDFs\n"
-            "• Dates from filenames (screenshots)\n"
-            "• Modified dates as fallback"
-        )
-        self.resync_dates_btn.clicked.connect(self._resync_file_dates)
-        resync_row.addWidget(self.resync_dates_btn)
-        self.resync_status_label = QLabel("")
-        self.resync_status_label.setObjectName("secondaryLabel")
-        resync_row.addWidget(self.resync_status_label)
-        resync_row.addStretch()
-        db_layout.addLayout(resync_row)
-        
-        layout.addWidget(db_group)
         
         # Account Management section
         account_group = QGroupBox("Account")
@@ -1545,10 +1576,12 @@ class MainWindow(QMainWindow):
         # Buttons row
         button_row = QHBoxLayout()
         self.refresh_account_btn = QPushButton("Refresh Account Info")
+        self.refresh_account_btn.setMinimumWidth(160)
         self.refresh_account_btn.clicked.connect(self._refresh_account_info)
         button_row.addWidget(self.refresh_account_btn)
         
         self.signout_btn = QPushButton("Sign Out")
+        self.signout_btn.setMinimumWidth(100)
         self.signout_btn.clicked.connect(self._sign_out)
         button_row.addWidget(self.signout_btn)
         button_row.addStretch()
@@ -1561,8 +1594,9 @@ class MainWindow(QMainWindow):
         
         layout.addStretch()
 
-        # Add page to stack
-        self.page_stack.addWidget(settings_widget)
+        # Set widget in scroll area and add to stack
+        scroll_area.setWidget(settings_widget)
+        self.page_stack.addWidget(scroll_area)
     
     def _update_theme_button(self):
         """Update the theme toggle button text and state."""
@@ -1582,50 +1616,62 @@ class MainWindow(QMainWindow):
     
     def _refresh_account_info(self):
         """Refresh and display account information in sidebar and settings."""
-        if supabase_auth.is_authenticated:
-            # Display email
-            email = supabase_auth.user_email or "Unknown"
-            self.account_email_label.setText(email)
+        try:
+            logger.info(f"[ACCOUNT] Refreshing account info. is_authenticated={supabase_auth.is_authenticated}")
             
-            # Update sidebar
-            name = email.split('@')[0].title() if '@' in email else email
-            self.account_name_label.setText(name)
-            initials = name[:2].upper() if name else "?"
-            self.avatar_label.setText(initials)
-            
-            # Check subscription status
-            result = supabase_auth.check_subscription()
-            if result.get('has_subscription'):
-                status = result.get('status', 'active')
-                expires_at = result.get('expires_at', 'N/A')
-                if expires_at and expires_at != 'N/A':
-                    try:
-                        # Format the date nicely
-                        dt = datetime.fromisoformat(expires_at.replace('Z', '+00:00'))
-                        expires_str = dt.strftime('%Y-%m-%d')
-                        self.account_sub_label.setText(f"✓ Active (until {expires_str})")
-                    except Exception:
+            if supabase_auth.is_authenticated:
+                # Display email
+                email = supabase_auth.user_email or "Unknown"
+                logger.info(f"[ACCOUNT] User email: {email}")
+                self.account_email_label.setText(email)
+                
+                # Update sidebar
+                name = email.split('@')[0].title() if '@' in email else email
+                self.account_name_label.setText(name)
+                initials = name[:2].upper() if name else "?"
+                self.avatar_label.setText(initials)
+                
+                # Check subscription status
+                result = supabase_auth.check_subscription()
+                logger.info(f"[ACCOUNT] Subscription check result: {result}")
+                
+                if result.get('has_subscription'):
+                    status = result.get('status', 'active')
+                    expires_at = result.get('expires_at', 'N/A')
+                    if expires_at and expires_at != 'N/A':
+                        try:
+                            # Format the date nicely
+                            dt = datetime.fromisoformat(expires_at.replace('Z', '+00:00'))
+                            expires_str = dt.strftime('%Y-%m-%d')
+                            self.account_sub_label.setText(f"✓ Active (until {expires_str})")
+                        except Exception:
+                            self.account_sub_label.setText(f"✓ Active ({status})")
+                    else:
                         self.account_sub_label.setText(f"✓ Active ({status})")
+                    self.account_sub_label.setStyleSheet("color: #7C4DFF;")
+                    self.account_plan_label.setText("Pro Plan ✓")
+                    self.account_plan_label.setStyleSheet("color: #7C4DFF; font-weight: 500;")
                 else:
-                    self.account_sub_label.setText(f"✓ Active ({status})")
-                self.account_sub_label.setStyleSheet("color: #7C4DFF;")
-                self.account_plan_label.setText("Pro Plan")
+                    status = result.get('status')
+                    if status:
+                        self.account_sub_label.setText(f"⚠ {status}")
+                    else:
+                        self.account_sub_label.setText("No subscription")
+                    self.account_sub_label.setStyleSheet("color: #FF6B6B;")
+                    self.account_plan_label.setText("Free Plan")
+                    self.account_plan_label.setStyleSheet("")
             else:
-                status = result.get('status')
-                if status:
-                    self.account_sub_label.setText(f"⚠ {status}")
-                else:
-                    self.account_sub_label.setText("No subscription")
-                self.account_sub_label.setStyleSheet("color: #FF6B6B;")
-                self.account_plan_label.setText("Free Plan")
-        else:
-            self.account_email_label.setText("Not logged in")
-            self.account_sub_label.setText("No subscription")
-            self.account_sub_label.setStyleSheet("")
-            # Update sidebar
-            self.account_name_label.setText("Not logged in")
-            self.account_plan_label.setText("Free Plan")
-            self.avatar_label.setText("?")
+                logger.info("[ACCOUNT] User not authenticated")
+                self.account_email_label.setText("Not logged in")
+                self.account_sub_label.setText("No subscription")
+                self.account_sub_label.setStyleSheet("")
+                # Update sidebar
+                self.account_name_label.setText("Guest")
+                self.account_plan_label.setText("Sign in to continue")
+                self.account_plan_label.setStyleSheet("color: #888;")
+                self.avatar_label.setText("?")
+        except Exception as e:
+            logger.error(f"[ACCOUNT] Error refreshing account info: {e}")
     
     def _sign_out(self):
         """Sign out the current user and show login dialog."""
@@ -1758,9 +1804,25 @@ class MainWindow(QMainWindow):
         self.debug_action_select_all_btn.clicked.connect(lambda: self._action_select_all(source='debug'))
         self.debug_action_clear_selection_btn.clicked.connect(lambda: self._action_clear_selection(source='debug'))
         
-        # Quick index options
+        # Quick index options (legacy stubs)
         self.index_pc_button.clicked.connect(self.on_index_entire_pc)
         self.auto_index_downloads_btn.toggled.connect(self.on_toggle_auto_index_downloads)
+        
+        # New indexing options
+        self.more_options_header.clicked.connect(self._toggle_more_options)
+        self.index_pc_now_btn.clicked.connect(self.on_index_entire_pc)
+        self.watch_header_btn.clicked.connect(self._toggle_watch_options)
+        self.watch_common_toggle.toggled.connect(self._on_watch_common_toggled)
+        self.watch_custom_toggle.toggled.connect(self._on_watch_custom_toggled)
+        self.add_custom_folder_btn.clicked.connect(self._on_add_custom_folder)
+        
+        # Initialize custom folders list
+        self._refresh_custom_folders_list()
+        self._update_watch_status()
+        
+        # Start watching if enabled
+        if settings.watch_common_folders or settings.watch_custom_folders:
+            self._start_folder_watching()
         
         # Index page connections
         self.refresh_debug_button.clicked.connect(self.refresh_debug_view)
@@ -1892,6 +1954,29 @@ class MainWindow(QMainWindow):
             path = payload[:-6]
             do_open = True
         
+        # If opening file, just open it - don't copy to clipboard or autofill
+        if do_open:
+            logger.info(f"[QS] Opening file: {path}")
+            self.open_file_in_os(path)
+            # Re-activate popup so it stays focused and on top for rapid multi-file opening
+            # User can click outside the popup to focus on opened files
+            # Use delayed re-activation to combat apps that aggressively steal focus
+            if hasattr(self, 'quick_overlay') and self.quick_overlay:
+                overlay = self.quick_overlay
+                overlay._allow_reactivation = True  # Enable reactivation for this open
+                def reactivate():
+                    # Only reactivate if user hasn't clicked outside the popup
+                    if overlay.isVisible() and overlay._allow_reactivation:
+                        overlay.raise_()
+                        overlay.activateWindow()
+                # Immediate activation
+                overlay.raise_()
+                overlay.activateWindow()
+                # Delayed re-activation to reclaim focus if an app steals it
+                QTimer.singleShot(100, reactivate)
+                QTimer.singleShot(300, reactivate)
+            return
+        
         # Copy to clipboard
         try:
             cb = QApplication.clipboard()
@@ -1913,9 +1998,6 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(200, _run_enhanced_autofill)
         else:
             logger.info("[QS] Autopaste is DISABLED - skipping autofill")
-        
-        if do_open:
-            self.open_file_in_os(path)
 
     def try_autofill_file_dialog(self, path: str) -> None:
         """
@@ -1977,11 +2059,12 @@ class MainWindow(QMainWindow):
             logger.info("[QS] Dialog verified, attempting targeted autofill")
             
             # Try multiple autofill strategies with increasing robustness
+            # Note: Removed cursor-click strategies (modern_directui, stealth_click_paste) 
+            # because clicking at saved cursor position can select wrong files if cursor was over file list
             strategies = [
                 ("targeted_uia", self._autofill_targeted_uia),
                 ("targeted_win32", self._autofill_targeted_win32),
-                ("modern_directui", self._autofill_modern_directui),
-                ("stealth_click_paste", self._autofill_stealth_click_paste)
+                ("keyboard_altn", self._autofill_keyboard_altn),  # Uses Alt+N to focus filename field
             ]
             
             for i, (strategy_name, strategy_func) in enumerate(strategies):
@@ -2326,6 +2409,74 @@ class MainWindow(QMainWindow):
         except Exception as e:
             elapsed = time.time() - start_time if 'start_time' in locals() else 0
             logger.error(f"[QS] Stealth Strategy: EXCEPTION after {elapsed:.2f}s: {e}")
+            return False
+
+    def _autofill_keyboard_altn(self, path: str, hwnd: int, overlay) -> bool:
+        """Strategy 3: Use Alt+N keyboard shortcut to focus filename field (no clicking).
+        
+        Alt+N is a standard Windows shortcut that focuses the filename field in file dialogs.
+        This is safer than clicking at cursor position because it doesn't depend on where
+        the cursor was when the popup opened.
+        """
+        try:
+            import time
+            from app.ui.win_hotkey import set_foreground_hwnd_robust
+            
+            start_time = time.time()
+            logger.info("[QS] Alt+N Strategy: Starting keyboard-based autofill")
+            
+            # Ensure the dialog is focused
+            if not set_foreground_hwnd_robust(hwnd):
+                logger.warning("[QS] Alt+N: Failed to focus dialog")
+                return False
+            
+            time.sleep(0.3)  # Let focus settle
+            
+            # Set clipboard content first
+            try:
+                cb = QApplication.clipboard()
+                cb.setText(path)
+            except Exception as e:
+                logger.error(f"[QS] Alt+N: Failed to set clipboard: {e}")
+                return False
+            
+            try:
+                import keyboard
+                
+                # Use Alt+N to focus filename field (standard Windows shortcut)
+                logger.info("[QS] Alt+N: Sending Alt+N to focus filename field")
+                keyboard.send('alt+n')
+                time.sleep(0.2)
+                
+                # Select all text in filename field and paste
+                keyboard.send('home')
+                time.sleep(0.03)
+                keyboard.send('shift+end')
+                time.sleep(0.03)
+                keyboard.send('ctrl+v')
+                time.sleep(0.15)
+                
+                logger.info("[QS] Alt+N: Path pasted successfully")
+                
+                # Auto-confirm if enabled
+                if settings.quick_search_auto_confirm:
+                    time.sleep(0.2)
+                    keyboard.send('enter')
+                    logger.info("[QS] Alt+N: Auto-confirmed via Enter")
+                
+                elapsed = time.time() - start_time
+                logger.info(f"[QS] Alt+N Strategy: SUCCESS in {elapsed:.2f}s")
+                self.status_bar.showMessage("QuickSearch: path filled via Alt+N" + (" and confirmed" if settings.quick_search_auto_confirm else ""))
+                return True
+                
+            except Exception as e:
+                elapsed = time.time() - start_time
+                logger.error(f"[QS] Alt+N Strategy: Failed after {elapsed:.2f}s: {e}")
+                return False
+            
+        except Exception as e:
+            elapsed = time.time() - start_time if 'start_time' in locals() else 0
+            logger.error(f"[QS] Alt+N Strategy: EXCEPTION after {elapsed:.2f}s: {e}")
             return False
 
     def _insert_path_uia(self, target, path: str, win) -> bool:
@@ -3523,12 +3674,10 @@ Move Plan Summary:
     
     def _toggle_index_pause(self):
         """Toggle pause/resume for indexing - IMMEDIATE UI response."""
-        if not hasattr(self, 'index_worker') or not self.index_worker:
-            return
-        
-        if self.index_worker.is_paused():
-            # Resume - restart progress bar animation
-            self.index_worker.resume()
+        # Use search_service pause directly for real control
+        if search_service.is_paused():
+            # Resume
+            search_service.resume_indexing()
             self.index_pause_btn.setText("⏸ Pause")
             self.status_bar.showMessage("Indexing resumed...")
             self.index_progress_label.setStyleSheet("")  # Normal color
@@ -3538,8 +3687,8 @@ Move Plan Summary:
             self.progress_bar.style().unpolish(self.progress_bar)
             self.progress_bar.style().polish(self.progress_bar)
         else:
-            # Pause - IMMEDIATELY freeze the UI
-            self.index_worker.pause()
+            # Pause - IMMEDIATELY freeze the indexing
+            search_service.pause_indexing()
             self.index_pause_btn.setText("▶ Resume")
             self.status_bar.showMessage("⏸ PAUSED - Click Resume to continue")
             self.index_progress_label.setText("⏸ PAUSED")
@@ -3552,9 +3701,6 @@ Move Plan Summary:
     
     def _cancel_indexing(self):
         """Cancel the current indexing operation - IMMEDIATE UI response."""
-        if not hasattr(self, 'index_worker') or not self.index_worker:
-            return
-        
         reply = QMessageBox.question(
             self,
             "Cancel Indexing",
@@ -3564,8 +3710,17 @@ Move Plan Summary:
         )
         
         if reply == QMessageBox.Yes:
-            # IMMEDIATELY update UI before background thread stops
-            self.index_worker.cancel()
+            # Cancel via search_service for REAL cancellation
+            search_service.cancel_indexing()
+            
+            # Also cancel worker if it exists
+            if hasattr(self, 'index_worker') and self.index_worker:
+                self.index_worker.cancel()
+            
+            # Clear PC indexing queue if active
+            if hasattr(self, '_pc_index_queue'):
+                self._pc_index_queue = []
+            
             self._hide_index_controls()
             self.status_bar.showMessage("Indexing cancelled. Files already indexed have been saved.")
             
@@ -3615,6 +3770,11 @@ Move Plan Summary:
         self.index_cancel_btn.setVisible(False)
         self.index_progress_label.setVisible(False)
         self.index_percent_label.setVisible(False)
+        
+        # Restore drop zone and options
+        self.drop_zone.setVisible(True)
+        if hasattr(self, 'more_options_header'):
+            self.more_options_header.setVisible(True)
         
         # Reset drop zone text
         self._update_drop_zone("Add folder to index", "Drag and drop or click to browse")
@@ -3692,46 +3852,23 @@ Move Plan Summary:
         self.status_bar.showMessage("Indexing failed")
     
     def on_index_entire_pc(self):
-        """Handle 'Search Entire PC' button click with warning."""
-        # Show warning dialog
-        reply = QMessageBox.warning(
-            self,
-            "Search Entire PC",
-            "⚠️ This will scan ALL files on your computer.\n\n"
-            "This can take a very long time (hours) depending on:\n"
-            "• Number of files on your PC\n"
-            "• Disk speed\n"
-            "• AI analysis settings\n\n"
-            "The app will remain usable during this process.\n\n"
-            "Do you want to continue?",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No
-        )
-        
-        if reply == QMessageBox.Yes:
-            self._start_pc_indexing()
-    
-    def _start_pc_indexing(self):
-        """Start indexing all user folders on the PC."""
+        """Handle 'Search Entire PC' button click with styled warning dialog."""
+        from PySide6.QtWidgets import QDialog, QFrame, QScrollArea
         import os
-        from pathlib import Path
         
-        # Get common user directories to index
+        # Get folders that will be indexed
         home = Path.home()
         user_folders = []
         
-        # Windows common folders
         if os.name == 'nt':
             for folder_name in ['Desktop', 'Documents', 'Downloads', 'Pictures', 'Videos', 'Music']:
                 folder = home / folder_name
                 if folder.exists():
                     user_folders.append(folder)
-            # Also check OneDrive folders
             for item in home.iterdir():
                 if item.is_dir() and 'OneDrive' in item.name:
                     user_folders.append(item)
         else:
-            # macOS/Linux
             for folder_name in ['Desktop', 'Documents', 'Downloads', 'Pictures', 'Videos', 'Music']:
                 folder = home / folder_name
                 if folder.exists():
@@ -3741,46 +3878,156 @@ Move Plan Summary:
             QMessageBox.information(self, "No Folders Found", "Could not find any standard user folders to index.")
             return
         
-        # Show what will be indexed
-        folder_list = "\n".join([f"• {f}" for f in user_folders])
-        confirm = QMessageBox.information(
-            self,
-            "Indexing Started",
-            f"Starting to index the following folders:\n\n{folder_list}\n\n"
-            "This will run in the background. You can continue using the app.",
-            QMessageBox.Ok
+        # Create custom styled dialog
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Index Entire PC")
+        dialog.setObjectName("styledWarningDialog")
+        dialog.setFixedSize(460, 420)
+        dialog.setWindowFlags(Qt.Dialog | Qt.FramelessWindowHint)
+        dialog.setAttribute(Qt.WA_TranslucentBackground)
+        
+        # Main container with styling
+        container = QFrame(dialog)
+        container.setObjectName("warningDialogContainer")
+        container.setGeometry(0, 0, 460, 420)
+        
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(28, 24, 28, 24)
+        layout.setSpacing(12)
+        
+        # Header with icon
+        header = QLabel("⚡ Index Entire PC")
+        header.setObjectName("warningDialogTitle")
+        header.setAlignment(Qt.AlignCenter)
+        layout.addWidget(header)
+        
+        # Subtitle
+        subtitle = QLabel("Scan all your files for AI-powered search")
+        subtitle.setObjectName("warningDialogSubtitle")
+        subtitle.setAlignment(Qt.AlignCenter)
+        layout.addWidget(subtitle)
+        
+        # Folders list
+        folders_label = QLabel("Folders to index:")
+        folders_label.setObjectName("warningDialogSectionLabel")
+        layout.addWidget(folders_label)
+        
+        folder_list_text = "\n".join([f"📁 {f.name}" for f in user_folders])
+        folders_content = QLabel(folder_list_text)
+        folders_content.setObjectName("warningDialogFolderList")
+        folders_content.setWordWrap(True)
+        layout.addWidget(folders_content)
+        
+        # Info note
+        info_note = QLabel(
+            "ℹ️ This may take a while depending on the number of files.\n"
+            "You can pause or cancel at any time."
+        )
+        info_note.setObjectName("warningDialogNote")
+        info_note.setWordWrap(True)
+        layout.addWidget(info_note)
+        
+        layout.addStretch()
+        
+        # Buttons
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(12)
+        
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.setObjectName("warningDialogCancelBtn")
+        cancel_btn.setCursor(Qt.PointingHandCursor)
+        cancel_btn.setMinimumHeight(44)
+        cancel_btn.setMinimumWidth(130)
+        cancel_btn.clicked.connect(dialog.reject)
+        btn_row.addWidget(cancel_btn)
+        
+        confirm_btn = QPushButton("Start Indexing")
+        confirm_btn.setObjectName("warningDialogConfirmBtn")
+        confirm_btn.setCursor(Qt.PointingHandCursor)
+        confirm_btn.setMinimumHeight(44)
+        confirm_btn.setMinimumWidth(150)
+        confirm_btn.clicked.connect(dialog.accept)
+        btn_row.addWidget(confirm_btn)
+        
+        layout.addLayout(btn_row)
+        
+        # Center on parent
+        dialog.move(
+            self.x() + (self.width() - dialog.width()) // 2,
+            self.y() + (self.height() - dialog.height()) // 2
         )
         
-        # Index each folder sequentially (in background)
-        self._pc_index_queue = list(user_folders)
-        self._index_next_pc_folder()
+        if dialog.exec() == QDialog.Accepted:
+            # Start indexing with the existing progress UI
+            self._pc_index_queue = list(user_folders)
+            self._pc_total_indexed = 0  # Reset counter
+            self._index_next_pc_folder()
+    
     
     def _index_next_pc_folder(self):
         """Index the next folder in the PC indexing queue."""
         if not hasattr(self, '_pc_index_queue') or not self._pc_index_queue:
+            # All folders done - hide progress UI and show drop zone
+            if hasattr(self, 'index_progress_container'):
+                self.index_progress_container.setVisible(False)
+            self.progress_bar.setVisible(False)
+            self.index_progress_label.setVisible(False)
+            self.index_percent_label.setVisible(False)
+            
+            # Restore drop zone and options
+            self.drop_zone.setVisible(True)
+            self.more_options_header.setVisible(True)
+            self._update_drop_zone("Add folder to index", "Drag and drop or click to browse")
             self.status_bar.showMessage("PC indexing complete!", 5000)
+            
+            # Refresh file count
+            self.refresh_debug_view()
+            
+            # Show completion dialog
+            total_indexed = getattr(self, '_pc_total_indexed', 0)
+            QMessageBox.information(
+                self, "Indexing Complete",
+                f"Successfully indexed {total_indexed} files from your PC."
+            )
             return
         
         folder = self._pc_index_queue.pop(0)
+        remaining = len(self._pc_index_queue)
         self.index_path = folder
-        self.index_label.setText(f"Index folder: {folder}")
+        
+        # Hide drop zone and show progress container
+        self.drop_zone.setVisible(False)
+        self.more_options_header.setVisible(False)
+        self.more_options_content.setVisible(False)
+        
         self.status_bar.showMessage(f"Indexing: {folder}")
         
-        # Start indexing this folder
+        # Show progress container with pause/cancel buttons
+        if hasattr(self, 'index_progress_container'):
+            self.index_progress_container.setVisible(True)
+        
         self.progress_bar.setVisible(True)
         self.progress_bar.setRange(0, 0)
-        self.index_button_action.setEnabled(False)
+        self.index_progress_label.setVisible(True)
+        self.index_progress_label.setText(f"Indexing: {folder.name} ({remaining} folder(s) remaining)")
+        self.index_percent_label.setVisible(True)
+        self.index_percent_label.setText("0%")
+        self.index_pause_btn.setVisible(True)
+        self.index_cancel_btn.setVisible(True)
         
         def progress_cb(done: int, total: int, message: str):
             def update_ui():
                 try:
-                    self.progress_bar.setVisible(True)
                     if total > 0:
                         self.progress_bar.setRange(0, total)
                         self.progress_bar.setValue(done)
+                        percent = int((done / total) * 100)
+                        self.index_percent_label.setText(f"{percent}%")
                     else:
                         self.progress_bar.setRange(0, 0)
-                    self.status_bar.showMessage(f"{folder.name}: {message}")
+                    self.index_progress_label.setText(message)
+                    # Force immediate UI refresh
+                    QApplication.processEvents()
                 except Exception:
                     pass
             QTimer.singleShot(0, update_ui)
@@ -3788,10 +4035,15 @@ Move Plan Summary:
         self.index_worker = IndexWorker(folder)
         
         def on_complete(result):
-            self.progress_bar.setVisible(False)
-            self.index_button_action.setEnabled(True)
+            # Track total indexed files
+            if not hasattr(self, '_pc_total_indexed'):
+                self._pc_total_indexed = 0
+            self._pc_total_indexed += result.get('indexed_files', 0)
+            
             stats = search_service.get_index_statistics()
             self.update_search_statistics(stats)
+            self.refresh_debug_view()
+            
             # Continue with next folder
             QTimer.singleShot(100, self._index_next_pc_folder)
         
@@ -3848,6 +4100,407 @@ Move Plan Summary:
             self.auto_index_downloads_btn.setText("📥 Auto-Add New Files: OFF")
             self._stop_downloads_watcher()
             self.auto_index_status.setText("")
+    
+    def _toggle_more_options(self):
+        """Toggle visibility of More Options section."""
+        visible = not self.more_options_content.isVisible()
+        self.more_options_content.setVisible(visible)
+        arrow = "▼" if visible else "▶"
+        self.more_options_header.setText(f"{arrow} More Options")
+    
+    def _toggle_watch_options(self):
+        """Open the Watch for New Downloads popup dialog."""
+        self._show_watch_popup()
+    
+    def _show_watch_popup(self):
+        """Show the Watch for New Downloads popup dialog."""
+        from PySide6.QtWidgets import QDialog, QFrame, QScrollArea
+        
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Watch for New Downloads")
+        dialog.setObjectName("watchPopupDialog")
+        dialog.setFixedSize(480, 520)
+        dialog.setWindowFlags(Qt.Dialog | Qt.FramelessWindowHint)
+        dialog.setAttribute(Qt.WA_TranslucentBackground)
+        
+        # Main container
+        container = QFrame(dialog)
+        container.setObjectName("warningDialogContainer")
+        container.setGeometry(0, 0, 480, 520)
+        
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(28, 24, 28, 24)
+        layout.setSpacing(16)
+        
+        # Header row with title and close button
+        header_row = QHBoxLayout()
+        header = QLabel("👁️ Watch for New Downloads")
+        header.setObjectName("warningDialogTitle")
+        header_row.addWidget(header)
+        header_row.addStretch()
+        
+        close_btn = QPushButton("✕")
+        close_btn.setObjectName("watchPopupCloseBtn")
+        close_btn.setFixedSize(32, 32)
+        close_btn.setCursor(Qt.PointingHandCursor)
+        close_btn.clicked.connect(dialog.accept)
+        header_row.addWidget(close_btn)
+        layout.addLayout(header_row)
+        
+        # Subtitle
+        subtitle = QLabel("Automatically index new files as they're added")
+        subtitle.setObjectName("warningDialogSubtitle")
+        layout.addWidget(subtitle)
+        
+        # === Common Folders Section ===
+        common_section = QFrame()
+        common_section.setObjectName("watchSectionFrame")
+        common_layout = QVBoxLayout(common_section)
+        common_layout.setContentsMargins(16, 12, 16, 12)
+        common_layout.setSpacing(8)
+        
+        common_header = QHBoxLayout()
+        common_label = QLabel("📁 Common Folders")
+        common_label.setObjectName("watchSectionTitle")
+        common_header.addWidget(common_label)
+        common_header.addStretch()
+        
+        common_toggle = QPushButton("OFF")
+        common_toggle.setObjectName("watchTogglePill")
+        common_toggle.setCheckable(True)
+        common_toggle.setChecked(settings.watch_common_folders)
+        common_toggle.setFixedSize(60, 28)
+        common_toggle.setCursor(Qt.PointingHandCursor)
+        if settings.watch_common_folders:
+            common_toggle.setText("ON")
+        common_header.addWidget(common_toggle)
+        common_layout.addLayout(common_header)
+        
+        common_desc = QLabel("Downloads, Desktop, Documents, Pictures, Videos, Music")
+        common_desc.setObjectName("watchSectionDesc")
+        common_desc.setWordWrap(True)
+        common_layout.addWidget(common_desc)
+        
+        layout.addWidget(common_section)
+        
+        # === Custom Folders Section ===
+        custom_section = QFrame()
+        custom_section.setObjectName("watchSectionFrame")
+        custom_layout = QVBoxLayout(custom_section)
+        custom_layout.setContentsMargins(16, 12, 16, 12)
+        custom_layout.setSpacing(8)
+        
+        custom_header = QHBoxLayout()
+        custom_label = QLabel("📂 Custom Folders")
+        custom_label.setObjectName("watchSectionTitle")
+        custom_header.addWidget(custom_label)
+        custom_header.addStretch()
+        
+        add_folder_btn = QPushButton("+ Add")
+        add_folder_btn.setObjectName("watchAddFolderBtn")
+        add_folder_btn.setCursor(Qt.PointingHandCursor)
+        add_folder_btn.setFixedHeight(28)
+        custom_header.addWidget(add_folder_btn)
+        custom_layout.addLayout(custom_header)
+        
+        # Custom folders list
+        folders_list_widget = QWidget()
+        folders_list_layout = QVBoxLayout(folders_list_widget)
+        folders_list_layout.setContentsMargins(0, 4, 0, 0)
+        folders_list_layout.setSpacing(4)
+        
+        def refresh_folder_list():
+            # Clear existing
+            while folders_list_layout.count():
+                item = folders_list_layout.takeAt(0)
+                if item.widget():
+                    item.widget().deleteLater()
+            
+            if not settings.watch_custom_folders:
+                empty_label = QLabel("No custom folders added")
+                empty_label.setObjectName("watchEmptyLabel")
+                folders_list_layout.addWidget(empty_label)
+            else:
+                for folder_path in settings.watch_custom_folders:
+                    folder_row = QWidget()
+                    row_layout = QHBoxLayout(folder_row)
+                    row_layout.setContentsMargins(0, 2, 0, 2)
+                    row_layout.setSpacing(8)
+                    
+                    # Folder icon and name
+                    folder_name = Path(folder_path).name
+                    folder_label = QLabel(f"📁 {folder_name}")
+                    folder_label.setObjectName("watchFolderItem")
+                    folder_label.setToolTip(folder_path)
+                    row_layout.addWidget(folder_label, 1)
+                    
+                    # Remove button
+                    remove_btn = QPushButton("✕")
+                    remove_btn.setObjectName("watchRemoveFolderBtn")
+                    remove_btn.setFixedSize(22, 22)
+                    remove_btn.setCursor(Qt.PointingHandCursor)
+                    remove_btn.setToolTip("Remove")
+                    remove_btn.clicked.connect(lambda checked, fp=folder_path: remove_folder(fp))
+                    row_layout.addWidget(remove_btn)
+                    
+                    folders_list_layout.addWidget(folder_row)
+        
+        def remove_folder(folder_path):
+            settings.remove_watch_custom_folder(folder_path)
+            refresh_folder_list()
+            self._restart_folder_watching()
+            self._update_watch_status()
+        
+        def add_folder():
+            folder = QFileDialog.getExistingDirectory(dialog, "Select Folder to Watch", str(Path.home()))
+            if folder:
+                settings.add_watch_custom_folder(folder)
+                refresh_folder_list()
+                self._restart_folder_watching()
+                self._update_watch_status()
+        
+        add_folder_btn.clicked.connect(add_folder)
+        refresh_folder_list()
+        
+        custom_layout.addWidget(folders_list_widget)
+        layout.addWidget(custom_section)
+        
+        layout.addStretch()
+        
+        # Status
+        status_label = QLabel("")
+        status_label.setObjectName("watchPopupStatus")
+        status_label.setAlignment(Qt.AlignCenter)
+        
+        def update_status():
+            watching = []
+            if settings.watch_common_folders:
+                watching.append("common folders")
+            if settings.watch_custom_folders:
+                watching.append(f"{len(settings.watch_custom_folders)} custom folder(s)")
+            if watching:
+                status_label.setText(f"✓ Watching: {', '.join(watching)}")
+                status_label.setStyleSheet("color: #4CAF50; font-size: 13px;")
+            else:
+                status_label.setText("Not watching any folders")
+                status_label.setStyleSheet("color: #888; font-size: 13px;")
+        
+        update_status()
+        layout.addWidget(status_label)
+        
+        # Done button
+        done_btn = QPushButton("Done")
+        done_btn.setObjectName("warningDialogConfirmBtn")
+        done_btn.setCursor(Qt.PointingHandCursor)
+        done_btn.setMinimumHeight(44)
+        done_btn.setMinimumWidth(120)
+        done_btn.clicked.connect(dialog.accept)
+        layout.addWidget(done_btn, 0, Qt.AlignCenter)
+        
+        # Connect toggle
+        def on_common_toggle(checked):
+            if checked:
+                settings.set_watch_common_folders(True)
+                common_toggle.setText("ON")
+            else:
+                settings.set_watch_common_folders(False)
+                common_toggle.setText("OFF")
+            self._restart_folder_watching()
+            self._update_watch_status()
+            update_status()
+        
+        common_toggle.toggled.connect(on_common_toggle)
+        
+        # Center on parent
+        dialog.move(
+            self.x() + (self.width() - dialog.width()) // 2,
+            self.y() + (self.height() - dialog.height()) // 2
+        )
+        
+        dialog.exec()
+    
+    def _on_watch_common_toggled(self, checked: bool):
+        """Handle common folders watch toggle."""
+        if checked:
+            reply = QMessageBox.question(
+                self,
+                "Watch Common Folders",
+                "This will monitor these folders for new files:\n\n"
+                "• Downloads\n"
+                "• Desktop\n"
+                "• Documents\n"
+                "• Pictures\n"
+                "• Videos\n"
+                "• Music\n\n"
+                "Only NEW files will be indexed automatically.\n"
+                "Enable watching?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes
+            )
+            if reply == QMessageBox.Yes:
+                settings.set_watch_common_folders(True)
+                self._start_folder_watching()
+                self._update_watch_status()
+            else:
+                self.watch_common_toggle.setChecked(False)
+        else:
+            settings.set_watch_common_folders(False)
+            self._restart_folder_watching()
+            self._update_watch_status()
+    
+    def _on_watch_custom_toggled(self, checked: bool):
+        """Handle custom folders watch toggle."""
+        if checked and not settings.watch_custom_folders:
+            # No custom folders yet - prompt to add one
+            self._on_add_custom_folder()
+            if not settings.watch_custom_folders:
+                # User cancelled - uncheck
+                self.watch_custom_toggle.setChecked(False)
+        elif not checked:
+            # Disable custom watching but keep the folder list
+            self._restart_folder_watching()
+            self._update_watch_status()
+    
+    def _on_add_custom_folder(self):
+        """Add a custom folder to watch."""
+        folder = QFileDialog.getExistingDirectory(
+            self,
+            "Select Folder to Watch",
+            str(Path.home())
+        )
+        if folder:
+            settings.add_watch_custom_folder(folder)
+            self._refresh_custom_folders_list()
+            self.watch_custom_toggle.setChecked(True)
+            self._restart_folder_watching()
+            self._update_watch_status()
+    
+    def _remove_custom_folder(self, folder_path: str):
+        """Remove a custom folder from the watch list."""
+        settings.remove_watch_custom_folder(folder_path)
+        self._refresh_custom_folders_list()
+        if not settings.watch_custom_folders:
+            self.watch_custom_toggle.setChecked(False)
+        self._restart_folder_watching()
+        self._update_watch_status()
+    
+    def _refresh_custom_folders_list(self):
+        """Refresh the custom folders list UI."""
+        # Clear existing items
+        while self.custom_folders_list_layout.count():
+            item = self.custom_folders_list_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        
+        # Add folder items
+        for folder_path in settings.watch_custom_folders:
+            folder_row = QWidget()
+            row_layout = QHBoxLayout(folder_row)
+            row_layout.setContentsMargins(0, 2, 0, 2)
+            row_layout.setSpacing(8)
+            
+            folder_label = QLabel(f"📁 {folder_path}")
+            folder_label.setObjectName("customFolderLabel")
+            row_layout.addWidget(folder_label, 1)
+            
+            remove_btn = QPushButton("✕")
+            remove_btn.setObjectName("removeFolderBtn")
+            remove_btn.setFixedSize(24, 24)
+            remove_btn.setCursor(Qt.PointingHandCursor)
+            remove_btn.setToolTip("Remove this folder")
+            remove_btn.clicked.connect(lambda checked, fp=folder_path: self._remove_custom_folder(fp))
+            row_layout.addWidget(remove_btn)
+            
+            self.custom_folders_list_layout.addWidget(folder_row)
+    
+    def _update_watch_status(self):
+        """Update the watch status label."""
+        watching = []
+        if settings.watch_common_folders:
+            watching.append("common folders")
+        if settings.watch_custom_folders and self.watch_custom_toggle.isChecked():
+            watching.append(f"{len(settings.watch_custom_folders)} custom folder(s)")
+        
+        if watching:
+            self.watch_status_label.setText(f"✓ Watching: {', '.join(watching)}")
+            self.watch_status_label.setStyleSheet("color: #4CAF50;")
+        else:
+            self.watch_status_label.setText("Not watching any folders")
+            self.watch_status_label.setStyleSheet("color: #888;")
+    
+    def _start_folder_watching(self):
+        """Start watching folders for new files."""
+        from PySide6.QtCore import QFileSystemWatcher
+        import os
+        
+        # Initialize the background worker for auto-indexing
+        if not hasattr(self, '_auto_index_worker'):
+            self._auto_index_worker = AutoIndexWorker()
+            self._auto_index_worker.file_indexed.connect(self._on_file_indexed)
+            self._auto_index_worker.status_update.connect(self._on_auto_index_status)
+        
+        if not hasattr(self, '_folder_watcher'):
+            self._folder_watcher = QFileSystemWatcher()
+            self._folder_watcher.directoryChanged.connect(self._on_watched_folder_changed)
+        
+        if not hasattr(self, '_watched_folders'):
+            self._watched_folders = {}
+        
+        folders_to_watch = []
+        
+        # Common folders
+        if settings.watch_common_folders:
+            home = Path.home()
+            common_paths = [
+                home / "Downloads",
+                home / "Desktop",
+                home / "Documents",
+                home / "Pictures",
+                home / "Videos",
+                home / "Music",
+            ]
+            # OneDrive
+            onedrive = home / "OneDrive"
+            if onedrive.exists():
+                common_paths.append(onedrive)
+            
+            for p in common_paths:
+                if p.exists():
+                    folders_to_watch.append(str(p))
+        
+        # Custom folders
+        if self.watch_custom_toggle.isChecked():
+            for folder in settings.watch_custom_folders:
+                if Path(folder).exists():
+                    folders_to_watch.append(folder)
+        
+        # Add to watcher
+        for folder in folders_to_watch:
+            if folder not in self._folder_watcher.directories():
+                self._folder_watcher.addPath(folder)
+                # Track current files
+                try:
+                    self._watched_folders[folder] = set(Path(folder).iterdir())
+                except Exception:
+                    self._watched_folders[folder] = set()
+        
+        logger.info(f"Started watching {len(folders_to_watch)} folders")
+    
+    def _restart_folder_watching(self):
+        """Restart folder watching with updated settings."""
+        self._stop_folder_watching()
+        if settings.watch_common_folders or (self.watch_custom_toggle.isChecked() and settings.watch_custom_folders):
+            self._start_folder_watching()
+    
+    def _stop_folder_watching(self):
+        """Stop watching all folders."""
+        if hasattr(self, '_folder_watcher'):
+            dirs = self._folder_watcher.directories()
+            if dirs:
+                self._folder_watcher.removePaths(dirs)
+        if hasattr(self, '_watched_folders'):
+            self._watched_folders = {}
+        logger.info("Stopped watching folders")
     
     def _start_downloads_watcher(self):
         """Start watching common folders for new files."""
@@ -3936,8 +4589,19 @@ Move Plan Summary:
         
         for new_file in new_files:
             if new_file.is_file():
+                # Skip temporary/partial download files
+                skip_extensions = {'.tmp', '.crdownload', '.part', '.partial', '.download'}
+                if new_file.suffix.lower() in skip_extensions:
+                    logger.debug(f"Skipping temporary file: {new_file.name}")
+                    continue
+                
+                # Skip hidden files
+                if new_file.name.startswith('.'):
+                    continue
+                
                 logger.info(f"New file detected in {folder_path.name}: {new_file.name}")
-                self.auto_index_status.setText(f"Queued: {new_file.name}")
+                self.watch_status_label.setText(f"📥 Indexing: {new_file.name}")
+                
                 # Add to background worker queue (non-blocking)
                 if hasattr(self, '_auto_index_worker'):
                     self._auto_index_worker.add_file(new_file)
@@ -3945,14 +4609,21 @@ Move Plan Summary:
     def _on_file_indexed(self, filename: str, status: str):
         """Handle file indexed signal from background worker."""
         if status == 'success':
-            self.auto_index_status.setText(f"Indexed: {filename}")
+            self.watch_status_label.setText(f"✓ Indexed: {filename}")
+            self.watch_status_label.setStyleSheet("color: #4CAF50; font-size: 13px;")
+            # Refresh file count
+            self.refresh_debug_view()
         elif status == 'skipped':
-            self.auto_index_status.setText(f"Already indexed: {filename}")
+            self.watch_status_label.setText(f"○ Already indexed: {filename}")
+            self.watch_status_label.setStyleSheet("color: #888; font-size: 13px;")
         else:
-            self.auto_index_status.setText(f"Error indexing: {filename}")
+            self.watch_status_label.setText(f"✗ Error: {filename}")
+            self.watch_status_label.setStyleSheet("color: #ff5555; font-size: 13px;")
         
-        # Clear status after delay
-        QTimer.singleShot(3000, lambda: self.auto_index_status.setText("Monitoring Downloads folder..."))
+        # Reset status after delay
+        def reset_status():
+            self._update_watch_status()
+        QTimer.singleShot(3000, reset_status)
     
     def _on_auto_index_status(self, message: str):
         """Handle status update from background worker."""
@@ -4074,6 +4745,20 @@ Move Plan Summary:
                 self.date_filter.setCurrentIndex(0)  # "Any Time"
                 self.date_filter.blockSignals(False)
                 logger.info(f"[SEARCH] Specific date: {specific_date}, range={date_start} to {date_end}")
+            elif date_filter.startswith('month:') or date_filter.startswith('year:'):
+                # Month or year filter - date_start and date_end already set by parser
+                # Reset UI dropdown since this is a custom date range
+                self.date_filter.blockSignals(True)
+                self.date_filter.setCurrentIndex(0)  # "Any Time"
+                self.date_filter.blockSignals(False)
+                logger.info(f"[SEARCH] Month/Year filter: {date_filter}, range={date_start} to {date_end}")
+            elif date_filter.startswith('range:'):
+                # Relative range filter (past N days, etc.) - date_start and date_end already set by parser
+                # Reset UI dropdown since this is a custom range
+                self.date_filter.blockSignals(True)
+                self.date_filter.setCurrentIndex(0)  # "Any Time"
+                self.date_filter.blockSignals(False)
+                logger.info(f"[SEARCH] Range filter: {date_filter}, range={date_start} to {date_end}")
             else:
                 # Standard date filter (today, yesterday, etc.)
                 # Update UI dropdown to reflect the detected filter
@@ -4557,6 +5242,10 @@ Move Plan Summary:
             return
         self._in_results_view = True
         
+        # Show the results container
+        if hasattr(self, 'results_container'):
+            self.results_container.setVisible(True)
+        
         # Create animation group for smooth transition
         self._transition_group = QParallelAnimationGroup(self)
         
@@ -4614,6 +5303,10 @@ Move Plan Summary:
         if not hasattr(self, '_in_results_view') or not self._in_results_view:
             return
         self._in_results_view = False
+        
+        # Hide the results container
+        if hasattr(self, 'results_container'):
+            self.results_container.setVisible(False)
         
         # Show hero elements first (set to visible with 0 height)
         if hasattr(self, 'hero_section'):
@@ -4806,7 +5499,7 @@ Move Plan Summary:
         """Handle cell changes in search results table (simplified - no editable columns)."""
         # Avoid handling during table population
         if getattr(self, '_populating_search_table', False):
-            return
+                return
         # Simplified table has no editable columns - ignore all changes
         pass
 
@@ -4900,6 +5593,8 @@ Move Plan Summary:
     
     def _clear_all_indexed_paths(self):
         """Clear all indexed files from the database."""
+        from app.core.database import file_index
+        
         reply = QMessageBox.question(
             self,
             "Clear All Indexed Files",
@@ -4909,7 +5604,15 @@ Move Plan Summary:
             QMessageBox.No
         )
         if reply == QMessageBox.Yes:
-            self.clear_index()
+            try:
+                file_index.clear_index()
+                self.refresh_debug_view()
+                self._update_view_files_button_count()
+                self.status_bar.showMessage("Index cleared successfully", 3000)
+                logger.info("Index cleared by user")
+            except Exception as e:
+                logger.error(f"Error clearing index: {e}")
+                QMessageBox.warning(self, "Error", f"Failed to clear index: {e}")
     
     def _update_indexed_paths_list(self):
         """Update indexed paths - simplified, just refreshes the debug table."""

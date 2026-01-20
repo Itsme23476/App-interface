@@ -1,11 +1,13 @@
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLineEdit, QTableWidget, QTableWidgetItem, 
-    QPushButton, QAbstractItemView, QFrame, QGraphicsDropShadowEffect
+    QPushButton, QAbstractItemView, QFrame, QGraphicsDropShadowEffect, QHeaderView,
+    QWidget, QSizePolicy
 )
-from PySide6.QtCore import Qt, QTimer, Signal, QRect, QPropertyAnimation, QEasingCurve, QPoint, QThread
-from PySide6.QtGui import QGuiApplication, QColor
+from PySide6.QtCore import Qt, QTimer, Signal, QRect, QPropertyAnimation, QEasingCurve, QPoint, QThread, QSize
+from PySide6.QtGui import QGuiApplication, QColor, QIcon
 from app.core.search import search_service
 from app.core.settings import settings
+from app.core.query_parser import parse_query
 from app.ui.win_hotkey import (
     get_cursor_pos, get_foreground_hwnd, get_window_rect, 
     is_file_dialog, get_window_title, get_window_class,
@@ -33,7 +35,27 @@ class SearchWorker(QThread):
     def run(self):
         try:
             if self._query:
-                results = search_service.search_files(self._query, limit=self._limit)
+                # Use the same NLP parsing as the main window
+                parsed = parse_query(self._query)
+                
+                clean_query = parsed.get('clean_query', self._query)
+                type_filter = parsed.get('type_filter')
+                date_range = parsed.get('date_range', (None, None))
+                date_start, date_end = date_range
+                extensions = parsed.get('extensions')
+                
+                # Log parsing results for debugging
+                logger.debug(f"[QS_SEARCH] Original: '{self._query}' -> Clean: '{clean_query}', "
+                            f"type={type_filter}, date={date_start} to {date_end}")
+                
+                results = search_service.search_files(
+                    clean_query, 
+                    limit=self._limit,
+                    type_filter=type_filter,
+                    date_start=date_start,
+                    date_end=date_end,
+                    extensions=extensions
+                )
             else:
                 results = []
             self.results_ready.emit(results)
@@ -64,6 +86,13 @@ class QuickSearchOverlay(QDialog):
         self._saved_window_title = ""
         self._saved_window_class = ""
         self._is_dialog_verified = False
+        
+        # Dragging state
+        self._drag_pos = None
+        
+        # Flag to control re-activation after opening files
+        # Set to False when user clicks outside popup to prevent timers from stealing focus back
+        self._allow_reactivation = True
 
         # Main layout for the dialog (transparent)
         main_layout = QVBoxLayout(self)
@@ -87,23 +116,57 @@ class QuickSearchOverlay(QDialog):
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(12)
 
+        # === Header row: Search input + X close button ===
+        header_row = QHBoxLayout()
+        header_row.setSpacing(8)
+        
         self.input = QLineEdit()
         self.input.setObjectName("overlayInput")
-        self.input.setPlaceholderText("Type to search... (Enter to paste, Ctrl+O to open)")
-        layout.addWidget(self.input)
+        self.input.setPlaceholderText("Type to search... (Enter to fill, Ctrl+O to open)")
+        header_row.addWidget(self.input, 1)  # Stretch factor 1
+        
+        # X close button at top-right
+        self.btn_close = QPushButton("X")
+        self.btn_close.setObjectName("overlayCloseBtn")
+        self.btn_close.setFixedSize(28, 28)
+        self.btn_close.setCursor(Qt.PointingHandCursor)
+        self.btn_close.setToolTip("Close (Esc)")
+        self.btn_close.clicked.connect(self.hide)
+        header_row.addWidget(self.btn_close)
+        
+        layout.addLayout(header_row)
 
+        # === Results table with Open button column ===
         self.results = QTableWidget()
         self.results.setObjectName("overlayResults")
-        self.results.setColumnCount(3)
-        self.results.setHorizontalHeaderLabels(["Name", "Label", "Path"])
-        self.results.horizontalHeader().setStretchLastSection(True)
+        self.results.setColumnCount(4)  # Open btn, Name, Label, Tags
+        self.results.setHorizontalHeaderLabels(["", "Name", "Label", "Tags"])
+        self.results.horizontalHeader().setVisible(False)  # Cleaner look without headers
         self.results.verticalHeader().setVisible(False)
         self.results.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.results.setSelectionMode(QAbstractItemView.SingleSelection)
         self.results.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.results.setFocusPolicy(Qt.StrongFocus)
         self.results.setShowGrid(False)
-        self.results.horizontalHeader().setVisible(False) # Cleaner look without headers
+        
+        # Disable mouse tracking to prevent hover-based selection changes
+        self.results.setMouseTracking(False)
+        self.results.viewport().setMouseTracking(False)
+        
+        # Disable drag and drop which can interfere with selection
+        self.results.setDragEnabled(False)
+        self.results.setDragDropMode(QAbstractItemView.NoDragDrop)
+        
+        # Install event filter to block unwanted selection changes
+        self.results.viewport().installEventFilter(self)
+        
+        # Column widths: Open btn fixed, others stretch
+        self.results.setColumnWidth(0, 60)  # Open button column
+        self.results.horizontalHeader().setSectionResizeMode(0, QHeaderView.Fixed)
+        self.results.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.results.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self.results.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
+        
         layout.addWidget(self.results)
 
         self._debounce = QTimer(self)
@@ -117,26 +180,29 @@ class QuickSearchOverlay(QDialog):
         self.results.itemSelectionChanged.connect(self._on_selection_changed)
         self.results.cellClicked.connect(self._on_cell_clicked)
 
-        # Action buttons (Hidden/Subtle in Wispr flow, but we keep them for accessibility/fallback)
+        # === Footer: Fill + Copy Path buttons ===
         btn_row = QHBoxLayout()
-        self.btn_ok = QPushButton("Copy Path")
-        self.btn_open = QPushButton("Open File")
-        self.btn_cancel = QPushButton("Close")
-        
-        # Style buttons as 'text buttons' or secondary
-        # self.btn_ok.setObjectName("primaryButton") # Optional: make Paste primary
-        
-        self.btn_ok.setDefault(True)
-        self.btn_ok.setEnabled(False)
         btn_row.addStretch()
-        btn_row.addWidget(self.btn_ok)
-        btn_row.addWidget(self.btn_open)
-        btn_row.addWidget(self.btn_cancel)
-        layout.addLayout(btn_row)
+        
+        self.btn_fill = QPushButton("Fill")
+        self.btn_fill.setObjectName("overlayFillBtn")
+        self.btn_fill.setMinimumWidth(100)
+        self.btn_fill.setDefault(True)
+        self.btn_fill.setEnabled(False)
+        self.btn_fill.setToolTip("Fill path into file dialog (Enter)")
+        self.btn_fill.clicked.connect(self._accept_selection)
+        btn_row.addWidget(self.btn_fill)
 
-        self.btn_ok.clicked.connect(self._accept_selection)
-        self.btn_open.clicked.connect(self._open_selection)
-        self.btn_cancel.clicked.connect(self.hide)
+        self.btn_copy_path = QPushButton("Copy Path")
+        self.btn_copy_path.setObjectName("overlayCopyBtn")
+        self.btn_copy_path.setMinimumWidth(110)
+        self.btn_copy_path.setEnabled(False)
+        self.btn_copy_path.setToolTip("Copy selected file path to clipboard")
+        self.btn_copy_path.clicked.connect(self._copy_current_path)
+        btn_row.addWidget(self.btn_copy_path)
+        
+        btn_row.addStretch()
+        layout.addLayout(btn_row)
         
         # Opacity animation
         self.opacity_anim = QPropertyAnimation(self, b"windowOpacity")
@@ -197,6 +263,44 @@ class QuickSearchOverlay(QDialog):
         self._saved_window_title = ""
         self._saved_window_class = ""
         self._is_dialog_verified = False
+    
+    def _remove_stay_on_top(self):
+        """Temporarily remove WindowStaysOnTopHint so opened files can appear on top."""
+        try:
+            flags = self.windowFlags()
+            if flags & Qt.WindowStaysOnTopHint:
+                flags &= ~Qt.WindowStaysOnTopHint
+                self.setWindowFlags(flags)
+                self.show()  # Required after changing window flags
+                logger.info("[QS] Removed WindowStaysOnTopHint - popup can now go behind other windows")
+        except Exception as e:
+            logger.error(f"[QS] Error removing stay-on-top: {e}")
+    
+    def _restore_stay_on_top(self):
+        """Restore WindowStaysOnTopHint so popup stays on top again."""
+        try:
+            flags = self.windowFlags()
+            if not (flags & Qt.WindowStaysOnTopHint):
+                flags |= Qt.WindowStaysOnTopHint
+                self.setWindowFlags(flags)
+                self.show()  # Required after changing window flags
+                self.raise_()
+                self.activateWindow()
+                logger.info("[QS] Restored WindowStaysOnTopHint - popup is now always on top")
+        except Exception as e:
+            logger.error(f"[QS] Error restoring stay-on-top: {e}")
+    
+    def focusInEvent(self, event):
+        """Restore stay-on-top when the popup regains focus."""
+        self._allow_reactivation = True  # Re-enable reactivation when user clicks back
+        self._restore_stay_on_top()
+        super().focusInEvent(event)
+    
+    def focusOutEvent(self, event):
+        """Remove stay-on-top when popup loses focus (user clicked on an opened file)."""
+        self._allow_reactivation = False  # Stop timers from stealing focus back
+        self._remove_stay_on_top()
+        super().focusOutEvent(event)
     
     def log_saved_state(self):
         """Log the current saved state for debugging."""
@@ -429,7 +533,7 @@ class QuickSearchOverlay(QDialog):
             # Empty query - clear results immediately
             self._rows = []
             self.results.setRowCount(0)
-            self.btn_ok.setEnabled(False)
+            self.btn_fill.setEnabled(False)
             return
         
         if self._search_worker.isRunning():
@@ -446,22 +550,44 @@ class QuickSearchOverlay(QDialog):
         self._rows = rows
         self.results.setRowCount(len(rows))
         for i, r in enumerate(rows):
+            # Column 0: Open button - set directly without wrapper
+            open_btn = QPushButton("Open")
+            open_btn.setObjectName("overlayOpenBtn")
+            open_btn.setFixedSize(52, 20)
+            open_btn.setCursor(Qt.PointingHandCursor)
+            open_btn.setToolTip("Open file")
+            open_btn.clicked.connect(lambda checked, row=i: self._open_row(row))
+            self.results.setCellWidget(i, 0, open_btn)
+            self.results.setRowHeight(i, 26)  # Fixed row height
+            
+            # Column 1: Name
             name = QTableWidgetItem(r.get('file_name') or '')
             name.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
-            self.results.setItem(i, 0, name)
+            self.results.setItem(i, 1, name)
+            
+            # Column 2: Label
             label = QTableWidgetItem(r.get('label') or '')
             label.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
-            self.results.setItem(i, 1, label)
-            path = QTableWidgetItem(r.get('file_path') or '')
-            path.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
-            self.results.setItem(i, 2, path)
+            self.results.setItem(i, 2, label)
+            
+            # Column 3: Tags (show tags instead of file path)
+            tags_val = r.get('tags') or ''
+            if isinstance(tags_val, (list, tuple)):
+                tags_val = ', '.join(tags_val)
+            tags = QTableWidgetItem(tags_val)
+            tags.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+            self.results.setItem(i, 3, tags)
         
-        # Auto-select first result for quicker OK
+        # Auto-select first result only if nothing is currently selected
+        # (Don't override user's selection when results refresh)
         if rows:
-            self.results.selectRow(0)
-            self.btn_ok.setEnabled(True)
+            if self.results.currentRow() < 0:
+                self.results.selectRow(0)
+            self.btn_fill.setEnabled(True)
+            self.btn_copy_path.setEnabled(True)
         else:
-            self.btn_ok.setEnabled(False)
+            self.btn_fill.setEnabled(False)
+            self.btn_copy_path.setEnabled(False)
         
         # If there's a pending query (user typed while searching), run it now
         if self._pending_query:
@@ -471,6 +597,17 @@ class QuickSearchOverlay(QDialog):
             if pending == self.input.text().strip():
                 self._search_worker.set_query(pending, limit=20)
                 self._search_worker.start()
+    
+    def _open_row(self, row: int):
+        """Open the file at the specified row. Popup stays open to allow viewing multiple files."""
+        try:
+            if 0 <= row < len(self._rows):
+                path = self._rows[row].get('file_path') or ''
+                if path:
+                    self.pathSelected.emit(path + "||OPEN")
+                    # Don't hide - let user open multiple files
+        except Exception as e:
+            logger.error(f"Error opening row {row}: {e}")
 
     def keyPressEvent(self, e):
         if e.key() == Qt.Key_Escape:
@@ -479,7 +616,66 @@ class QuickSearchOverlay(QDialog):
         if e.modifiers() == Qt.ControlModifier and e.key() == Qt.Key_O:
             self._open_selection()
             return
+        # Don't let Enter close the dialog - we handle it via returnPressed signal
+        if e.key() in (Qt.Key_Return, Qt.Key_Enter):
+            # If no selection, select first row first
+            if self.results.currentRow() < 0 and self.results.rowCount() > 0:
+                self.results.selectRow(0)
+            self._accept_selection()
+            return
         super().keyPressEvent(e)
+    
+    # === Dragging support for frameless window ===
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            # Only initiate drag if NOT clicking on interactive widgets (table, buttons, input)
+            click_pos = event.position().toPoint()
+            child = self.childAt(click_pos)
+            
+            # Check if click is on an interactive widget - if so, let it handle the event
+            if child is not None:
+                # Don't drag when clicking on table, buttons, or input
+                widget = child
+                while widget is not None:
+                    if widget in (self.results, self.input, self.btn_fill, self.btn_copy_path, self.btn_close):
+                        super().mousePressEvent(event)
+                        return
+                    # Also check for buttons inside the table (Open buttons)
+                    if isinstance(widget, QPushButton):
+                        super().mousePressEvent(event)
+                        return
+                    widget = widget.parent()
+            
+            # Click is on empty area - initiate drag
+            self._drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+            event.accept()
+        else:
+            super().mousePressEvent(event)
+    
+    def mouseMoveEvent(self, event):
+        if event.buttons() == Qt.LeftButton and self._drag_pos is not None:
+            self.move(event.globalPosition().toPoint() - self._drag_pos)
+            event.accept()
+        else:
+            super().mouseMoveEvent(event)
+    
+    def mouseReleaseEvent(self, event):
+        self._drag_pos = None
+        super().mouseReleaseEvent(event)
+    
+    def eventFilter(self, obj, event):
+        """Filter events on the table viewport to prevent unwanted selection changes."""
+        from PySide6.QtCore import QEvent
+        
+        # Block mouse move events on the viewport that aren't button presses
+        # This prevents hover-based selection changes
+        if obj == self.results.viewport():
+            if event.type() == QEvent.MouseMove:
+                # Only allow mouse move if a button is pressed (for drag selection)
+                if not event.buttons():
+                    return True  # Block the event
+        
+        return super().eventFilter(obj, event)
 
     def _current_path(self) -> str:
         sel = self.results.currentRow()
@@ -490,6 +686,16 @@ class QuickSearchOverlay(QDialog):
         except Exception:
             return ''
 
+    def _copy_current_path(self):
+        path = self._current_path()
+        if not path:
+            return
+        try:
+            clipboard = QGuiApplication.clipboard()
+            clipboard.setText(path)
+        except Exception as e:
+            logger.error(f"Failed to copy path: {e}")
+
     def _accept_selection(self):
         path = self._current_path()
         if path:
@@ -499,6 +705,11 @@ class QuickSearchOverlay(QDialog):
             
             # Hide the popup first
             self.hide()
+            
+            # IMPORTANT: Wait for Enter key to be fully released before restoring focus
+            # Otherwise the Enter keypress leaks to the file dialog and briefly opens files
+            import time
+            time.sleep(0.15)  # Let Enter key release complete
             
             # Phase 2: Restore focus to the file dialog
             logger.info("[QS] Phase 2: Starting focus restoration")
@@ -534,12 +745,18 @@ class QuickSearchOverlay(QDialog):
             self.hide()
 
     def _on_selection_changed(self):
-        self.btn_ok.setEnabled(bool(self._current_path()))
+        has_path = bool(self._current_path())
+        self.btn_fill.setEnabled(has_path)
+        self.btn_copy_path.setEnabled(has_path)
 
     def _on_cell_clicked(self, row: int, col: int):
         try:
+            # Don't select row if clicking the open button column
+            if col == 0:
+                return
             self.results.selectRow(row)
-            self.btn_ok.setEnabled(True)
+            self.btn_fill.setEnabled(True)
+            self.btn_copy_path.setEnabled(True)
         except Exception:
             pass
 

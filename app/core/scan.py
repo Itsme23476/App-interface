@@ -66,6 +66,49 @@ def scan_directory(source_path: Path, max_files: int = 1000) -> List[Dict[str, A
         return files
 
 
+def _is_onedrive_cloud_file(file_path: Path) -> bool:
+    """
+    Check if a file is an OneDrive cloud-only (placeholder) file.
+    These files appear in directory listings but aren't actually on disk.
+    
+    Args:
+        file_path: Path to check
+        
+    Returns:
+        True if file is a cloud-only placeholder
+    """
+    import os
+    
+    # Only check on Windows
+    if os.name != 'nt':
+        return False
+    
+    try:
+        import ctypes
+        
+        # Windows file attribute flags for cloud files
+        FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS = 0x00400000  # Cloud file - download on access
+        FILE_ATTRIBUTE_RECALL_ON_OPEN = 0x00040000  # Cloud file - download on open
+        FILE_ATTRIBUTE_OFFLINE = 0x1000  # Offline file
+        
+        # Get file attributes using Windows API
+        attrs = ctypes.windll.kernel32.GetFileAttributesW(str(file_path))
+        
+        if attrs == -1:  # INVALID_FILE_ATTRIBUTES
+            return True  # Can't read attributes, skip it
+        
+        # Check for cloud/offline attributes
+        if attrs & (FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS | FILE_ATTRIBUTE_RECALL_ON_OPEN | FILE_ATTRIBUTE_OFFLINE):
+            logger.debug(f"Skipping OneDrive cloud file: {file_path.name}")
+            return True
+        
+        return False
+        
+    except Exception as e:
+        logger.debug(f"Error checking OneDrive status for {file_path}: {e}")
+        return False
+
+
 def _should_skip_file(file_path: Path) -> bool:
     """
     Determine if a file should be skipped during scanning.
@@ -91,6 +134,10 @@ def _should_skip_file(file_path: Path) -> bool:
     # Skip temporary files
     temp_extensions = {'.tmp', '.temp', '.bak', '.swp', '.swo'}
     if file_path.suffix.lower() in temp_extensions:
+        return True
+    
+    # Skip OneDrive cloud-only files (not downloaded locally)
+    if _is_onedrive_cloud_file(file_path):
         return True
     
     return False

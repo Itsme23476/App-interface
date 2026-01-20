@@ -179,19 +179,29 @@ DATE_PATTERNS = {
     r'\bthis week\b': 'this_week',
     r'\blast week\b': 'last_week',
     r'\bpast week\b': 'last_week',
+    r'\bprevious week\b': 'last_week',
     r'\bpast 7 days\b': 'last_week',
     r'\blast 7 days\b': 'last_week',
+    r'\bwithin 7 days\b': 'last_week',
     
     # This month / Last month
     r'\bthis month\b': 'this_month',
     r'\blast month\b': 'last_month',
     r'\bpast month\b': 'last_month',
+    r'\bprevious month\b': 'last_month',
     r'\bpast 30 days\b': 'last_month',
     r'\blast 30 days\b': 'last_month',
+    r'\bwithin 30 days\b': 'last_month',
     
-    # This year
+    # This year / Last year / Previous year
     r'\bthis year\b': 'this_year',
     r'\blast year\b': 'last_year',
+    r'\bprevious year\b': 'previous_year',
+    r'\bthe previous year\b': 'previous_year',
+    
+    # Recent / Recently (last 7 days)
+    r'\brecent\b': 'last_week',
+    r'\brecently\b': 'last_week',
 }
 
 # Patterns for complex date expressions that dateparser should handle
@@ -305,7 +315,15 @@ def get_date_range(filter_value: str) -> Tuple[Optional[datetime], Optional[date
         return year_start, now
     
     elif filter_value == 'last_year':
+        # Rolling: past 365 days
         return today_start - timedelta(days=365), now
+    
+    elif filter_value == 'previous_year':
+        # Complete calendar year before the current one
+        previous_year = now.year - 1
+        start_of_prev_year = datetime(previous_year, 1, 1, 0, 0, 0)
+        end_of_prev_year = datetime(previous_year + 1, 1, 1, 0, 0, 0)
+        return start_of_prev_year, end_of_prev_year
     
     return None, None
 
@@ -323,6 +341,69 @@ def get_date_range_for_specific_date(parsed_date: datetime) -> Tuple[datetime, d
     start_of_day = parsed_date.replace(hour=0, minute=0, second=0, microsecond=0)
     end_of_day = start_of_day + timedelta(days=1)
     return start_of_day, end_of_day
+
+
+def get_date_range_for_month(month_num: int, year: int = None) -> Tuple[datetime, datetime]:
+    """
+    Get the date range for an entire month.
+    
+    Args:
+        month_num: Month number (1-12)
+        year: Year (defaults to current year, or previous if month is in the future)
+        
+    Returns:
+        Tuple of (start_of_month, end_of_month)
+    """
+    now = datetime.now()
+    
+    if year is None:
+        # If the month is in the future this year, use last year
+        if month_num > now.month:
+            year = now.year - 1
+        else:
+            year = now.year
+    
+    start_of_month = datetime(year, month_num, 1, 0, 0, 0)
+    
+    # Calculate end of month (start of next month)
+    if month_num == 12:
+        end_of_month = datetime(year + 1, 1, 1, 0, 0, 0)
+    else:
+        end_of_month = datetime(year, month_num + 1, 1, 0, 0, 0)
+    
+    return start_of_month, end_of_month
+
+
+def get_date_range_for_year(year: int) -> Tuple[datetime, datetime]:
+    """
+    Get the date range for an entire year.
+    
+    Args:
+        year: The year
+        
+    Returns:
+        Tuple of (start_of_year, end_of_year)
+    """
+    start_of_year = datetime(year, 1, 1, 0, 0, 0)
+    end_of_year = datetime(year + 1, 1, 1, 0, 0, 0)
+    return start_of_year, end_of_year
+
+
+# Month name to number mapping
+MONTH_NAME_TO_NUM = {
+    'january': 1, 'jan': 1,
+    'february': 2, 'feb': 2,
+    'march': 3, 'mar': 3,
+    'april': 4, 'apr': 4,
+    'may': 5,
+    'june': 6, 'jun': 6,
+    'july': 7, 'jul': 7,
+    'august': 8, 'aug': 8,
+    'september': 9, 'sep': 9, 'sept': 9,
+    'october': 10, 'oct': 10,
+    'november': 11, 'nov': 11,
+    'december': 12, 'dec': 12,
+}
 
 
 def calculate_day_date(modifier: str, day_name: str) -> Optional[datetime]:
@@ -401,6 +482,25 @@ def try_parse_complex_date(query: str) -> Tuple[Optional[str], Optional[Tuple[da
             logger.info(f"[DATE_PARSER] Calculated date: {calculated_date.strftime('%Y-%m-%d')}")
             return filter_label, date_range, matched_text
     
+    # Method 1b: Try standalone day names (e.g., "monday", "tuesday")
+    # These map to the most recent past occurrence of that day
+    standalone_day_pattern = r'\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b'
+    standalone_day_match = re.search(standalone_day_pattern, query_lower)
+    if standalone_day_match:
+        day_name = standalone_day_match.group(1)
+        matched_text = standalone_day_match.group(0)
+        
+        # Check it's not already handled by "last/this/next + day" pattern
+        if not re.search(rf'\b(last|previous|this|next)\s+{day_name}\b', query_lower):
+            logger.info(f"[DATE_PARSER] Found standalone day name: '{day_name}'")
+            # Treat standalone day as "last <day>" (most recent past occurrence)
+            calculated_date = calculate_day_date('last', day_name)
+            if calculated_date:
+                filter_label = f"specific_date:{calculated_date.strftime('%Y-%m-%d')}"
+                date_range = get_date_range_for_specific_date(calculated_date)
+                logger.info(f"[DATE_PARSER] Standalone day calculated: {calculated_date.strftime('%Y-%m-%d')}")
+                return filter_label, date_range, matched_text
+    
     # Method 2: Try "X days/weeks/months ago" pattern (manual calculation)
     ago_pattern = r'\b(\d+)\s+(days?|weeks?|months?|years?)\s+ago\b'
     ago_match = re.search(ago_pattern, query_lower)
@@ -429,7 +529,118 @@ def try_parse_complex_date(query: str) -> Tuple[Optional[str], Optional[Tuple[da
             logger.info(f"[DATE_PARSER] Calculated date: {calculated_date.strftime('%Y-%m-%d')}")
             return filter_label, date_range, matched_text
     
-    # Method 3: Try dateparser for other complex expressions (month names, specific dates)
+    # Method 2b: Try "past/last/within N days/weeks/months" patterns (returns a RANGE)
+    range_pattern = r'\b(past|last|within)\s+(\d+)\s+(days?|weeks?|months?)\b'
+    range_match = re.search(range_pattern, query_lower)
+    if range_match:
+        modifier = range_match.group(1)
+        amount = int(range_match.group(2))
+        unit = range_match.group(3).rstrip('s')  # Remove plural 's'
+        matched_text = range_match.group(0)
+        logger.info(f"[DATE_PARSER] Found range pattern: {modifier} {amount} {unit}")
+        
+        today = datetime.now().replace(hour=23, minute=59, second=59, microsecond=999999)
+        if unit == 'day':
+            start_date = (today - timedelta(days=amount)).replace(hour=0, minute=0, second=0, microsecond=0)
+        elif unit == 'week':
+            start_date = (today - timedelta(weeks=amount)).replace(hour=0, minute=0, second=0, microsecond=0)
+        elif unit == 'month':
+            start_date = (today - timedelta(days=amount * 30)).replace(hour=0, minute=0, second=0, microsecond=0)
+        else:
+            start_date = None
+        
+        if start_date:
+            date_range = (start_date, today)
+            filter_label = f"range:{amount}_{unit}"
+            logger.info(f"[DATE_PARSER] Range calculated: {start_date.strftime('%Y-%m-%d')} to {today.strftime('%Y-%m-%d')}")
+            return filter_label, date_range, matched_text
+    
+    # Method 3: Try "last/this + month name" patterns (e.g., "last december", "this january")
+    month_modifier_pattern = r'\b(last|this|previous)\s+(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sep|sept|oct|nov|dec)\b'
+    month_mod_match = re.search(month_modifier_pattern, query_lower)
+    if month_mod_match:
+        modifier = month_mod_match.group(1)
+        month_name = month_mod_match.group(2)
+        matched_text = month_mod_match.group(0)
+        
+        month_num = MONTH_NAME_TO_NUM.get(month_name)
+        if month_num:
+            now = datetime.now()
+            if modifier in ('last', 'previous'):
+                # Last occurrence of that month (could be this year or last year)
+                if month_num >= now.month:
+                    year = now.year - 1
+                else:
+                    year = now.year
+            else:  # 'this'
+                year = now.year
+            
+            date_range = get_date_range_for_month(month_num, year)
+            filter_label = f"month:{month_name}_{year}"
+            logger.info(f"[DATE_PARSER] Month with modifier: {month_name} {year}")
+            return filter_label, date_range, matched_text
+    
+    # Method 3b: Try "{month} {year}" pattern (e.g., "december 2024", "jan 2023")
+    month_year_pattern = r'\b(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sep|sept|oct|nov|dec)\s+(20\d{2})\b'
+    month_year_match = re.search(month_year_pattern, query_lower)
+    if month_year_match:
+        month_name = month_year_match.group(1)
+        year = int(month_year_match.group(2))
+        matched_text = month_year_match.group(0)
+        
+        month_num = MONTH_NAME_TO_NUM.get(month_name)
+        if month_num:
+            date_range = get_date_range_for_month(month_num, year)
+            filter_label = f"month:{month_name}_{year}"
+            logger.info(f"[DATE_PARSER] Month + Year pattern: {month_name} {year}")
+            return filter_label, date_range, matched_text
+    
+    # Method 4: Try standalone month names (e.g., "december", "january")
+    # Only match if NOT preceded or followed by a day number (those are handled by dateparser as specific dates)
+    for month_name, month_num in MONTH_NAME_TO_NUM.items():
+        # Check if month name is in query as a COMPLETE WORD (not substring)
+        # This prevents "dec" from matching inside "december"
+        if not re.search(rf'\b{month_name}\b', query_lower):
+            continue
+            
+        # Check it's not preceded by "last/this/previous" (handled in Method 3)
+        preceded_modifier_pattern = rf'\b(last|this|previous)\s+{month_name}\b'
+        if re.search(preceded_modifier_pattern, query_lower):
+            continue
+        
+        # Check it's NOT preceded by a day number (e.g., "27th december", "15 december")
+        # This pattern catches: "27th december", "27 december", "27th of december"
+        preceded_day_pattern = rf'\b\d{{1,2}}(?:st|nd|rd|th)?(?:\s+of)?\s+{month_name}\b'
+        if re.search(preceded_day_pattern, query_lower):
+            continue  # Let dateparser handle this as a specific date
+        
+        # Check it's NOT followed by a day number (e.g., "december 27", "december 27th")
+        followed_day_pattern = rf'\b{month_name}\s+\d{{1,2}}(?:st|nd|rd|th)?\b'
+        if re.search(followed_day_pattern, query_lower):
+            continue  # Let dateparser handle this as a specific date
+        
+        # It's a standalone month - return the month range
+        date_range = get_date_range_for_month(month_num)
+        year = date_range[0].year
+        filter_label = f"month:{month_name}_{year}"
+        logger.info(f"[DATE_PARSER] Standalone month: {month_name} {year}")
+        return filter_label, date_range, month_name
+    
+    # Method 5: Try year alone (e.g., "2024", "2023")
+    year_pattern = r'\b(20\d{2})\b'
+    year_match = re.search(year_pattern, query_lower)
+    if year_match:
+        year = int(year_match.group(1))
+        matched_text = year_match.group(0)
+        # Only treat as year filter if it's a reasonable year (not too far in past/future)
+        current_year = datetime.now().year
+        if current_year - 10 <= year <= current_year + 1:
+            date_range = get_date_range_for_year(year)
+            filter_label = f"year:{year}"
+            logger.info(f"[DATE_PARSER] Year filter: {year}")
+            return filter_label, date_range, matched_text
+    
+    # Method 6: Try dateparser for other complex expressions (specific dates like "27 december")
     if HAS_DATEPARSER:
         # List of date-related phrases to try extracting
         date_phrases_to_try = []
@@ -572,8 +783,10 @@ def parse_query(query: str) -> Dict:
             # If nothing remains, keep the original as search term (don't strip)
             break  # Only use first match
     
-    # Clean up the query (remove extra spaces, common words)
-    clean_query = re.sub(r'\b(i|the|a|an|my|from|created|made|that|which|were|was|in|on)\b', '', clean_query, flags=re.IGNORECASE)
+    # Clean up the query (remove extra spaces, common filler words)
+    # These are words that users commonly type but don't add search value
+    filler_words = r'\b(i|the|a|an|my|from|created|made|that|which|were|was|in|on|all|show|get|find|me|for|with|files|file)\b'
+    clean_query = re.sub(filler_words, '', clean_query, flags=re.IGNORECASE)
     clean_query = re.sub(r'\s+', ' ', clean_query).strip()
     
     # Keep empty string if we extracted filters - this enables date-only searches

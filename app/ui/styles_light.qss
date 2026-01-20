@@ -19,6 +19,36 @@ QMainWindow, QDialog {
     background-color: #FAFBFC;
 }
 
+#indexScrollArea, #indexScrollContent {
+    background-color: transparent;
+    border: none;
+}
+
+#indexScrollArea QScrollBar:vertical {
+    background-color: #E8E8E8;
+    width: 8px;
+    border-radius: 4px;
+}
+
+#indexScrollArea QScrollBar::handle:vertical {
+    background-color: #C0C0C0;
+    border-radius: 4px;
+    min-height: 30px;
+}
+
+#indexScrollArea QScrollBar::handle:vertical:hover {
+    background-color: #A0A0A0;
+}
+
+#indexScrollArea QScrollBar::add-line:vertical,
+#indexScrollArea QScrollBar::sub-line:vertical {
+    height: 0px;
+}
+
+#settingsContent {
+    background-color: #FAFBFC;
+}
+
 #pageStack {
     background-color: #FAFBFC;
 }
@@ -76,12 +106,15 @@ QMainWindow, QDialog {
 }
 
 #accountContainer {
-    background-color: #F5F5F5;
-    border-top: 1px solid #E8E8E8;
+    background-color: rgba(124, 77, 255, 0.06);
+    border-top: 1px solid rgba(0, 0, 0, 0.06);
+    border-radius: 12px;
+    margin: 8px;
+    padding: 4px;
 }
 
 #avatarCircle {
-    background-color: #7C4DFF;
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #7C4DFF, stop:1 #9D7AFF);
     color: white;
     font-size: 14px;
     font-weight: 600;
@@ -96,7 +129,7 @@ QMainWindow, QDialog {
 }
 
 #accountPlan {
-    color: #7C4DFF;
+    color: #666666;
     font-size: 11px;
     font-weight: 500;
     background: transparent;
@@ -335,6 +368,311 @@ QMainWindow, QDialog {
     background-color: #6A3DE8;
 }
 
+/* More Options Header */
+#moreOptionsHeader {
+    background-color: transparent;
+    color: #888;
+    border: none;
+    font-size: 14px;
+    font-weight: 500;
+    padding: 8px 20px;
+}
+
+#moreOptionsHeader:hover {
+    color: #7C4DFF;
+}
+
+#moreOptionsContent {
+    padding: 8px 0;
+}
+
+/* Index PC Now Button */
+#indexPcButton {
+    background-color: transparent;
+    color: #7C4DFF;
+    border: 2px solid #7C4DFF;
+    border-radius: 22px;
+    font-size: 15px;
+    font-weight: 600;
+    padding: 10px 28px;
+    min-width: 220px;
+}
+
+#indexPcButton:hover {
+    background-color: rgba(124, 77, 255, 0.08);
+}
+
+#indexPcButton:pressed {
+    background-color: rgba(124, 77, 255, 0.15);
+}
+
+/* Watch Header Button */
+#watchHeaderButton {
+    background-color: transparent;
+    color: #7C4DFF;
+    border: 2px solid #7C4DFF;
+    border-radius: 22px;
+    font-size: 15px;
+    font-weight: 600;
+    padding: 10px 28px;
+    min-width: 260px;
+}
+
+#watchHeaderButton:hover {
+    background-color: rgba(124, 77, 255, 0.08);
+}
+
+/* Watch Options Container */
+#watchOptionsContainer {
+    background-color: rgba(200, 200, 220, 0.3);
+    border-radius: 12px;
+    padding: 12px;
+    margin: 8px 40px;
+}
+
+/* Watch Toggle Buttons */
+#watchToggleBtn {
+    background-color: #ffffff;
+    color: #333333;
+    border: 1px solid #cccccc;
+    border-radius: 18px;
+    font-size: 14px;
+    font-weight: 500;
+    padding: 8px 20px;
+}
+
+#watchToggleBtn:checked {
+    background-color: #7C4DFF;
+    color: white;
+    border-color: #7C4DFF;
+}
+
+#watchToggleBtn:hover {
+    background-color: #f0f0f0;
+}
+
+#watchToggleBtn:checked:hover {
+    background-color: #9575FF;
+}
+
+/* Watch Description */
+#watchDescription {
+    color: #666;
+    font-size: 12px;
+    margin-left: 16px;
+    margin-bottom: 8px;
+}
+
+/* Add Folder Button */
+#addFolderBtn {
+    background-color: transparent;
+    color: #7C4DFF;
+    border: 1px dashed #7C4DFF;
+    border-radius: 14px;
+    font-size: 13px;
+    padding: 6px 16px;
+}
+
+#addFolderBtn:hover {
+    background-color: rgba(124, 77, 255, 0.08);
+}
+
+/* Custom Folder Label */
+#customFolderLabel {
+    color: #333;
+    font-size: 13px;
+    padding: 4px 8px;
+}
+
+/* Remove Folder Button */
+#removeFolderBtn {
+    background-color: transparent;
+    color: #888;
+    border: none;
+    font-size: 14px;
+    font-weight: bold;
+}
+
+#removeFolderBtn:hover {
+    color: #ff5555;
+}
+
+/* Watch Status Label */
+#watchStatusLabel {
+    font-size: 13px;
+    padding: 8px;
+}
+
+/* Watch Popup Styles */
+#watchPopupCloseBtn {
+    background-color: transparent;
+    color: #888;
+    border: none;
+    font-size: 18px;
+    font-weight: bold;
+}
+
+#watchPopupCloseBtn:hover {
+    color: #333;
+}
+
+#watchSectionFrame {
+    background-color: rgba(240, 240, 250, 0.8);
+    border: 1px solid rgba(124, 77, 255, 0.15);
+    border-radius: 12px;
+}
+
+#watchSectionTitle {
+    font-size: 15px;
+    font-weight: 600;
+    color: #333;
+}
+
+#watchSectionDesc {
+    font-size: 12px;
+    color: #666;
+    padding-left: 4px;
+}
+
+#watchTogglePill {
+    background-color: #ddd;
+    color: #888;
+    border: none;
+    border-radius: 14px;
+    font-size: 12px;
+    font-weight: 600;
+}
+
+#watchTogglePill:checked {
+    background-color: #4CAF50;
+    color: white;
+}
+
+#watchAddFolderBtn {
+    background-color: transparent;
+    color: #7C4DFF;
+    border: 1px solid #7C4DFF;
+    border-radius: 14px;
+    font-size: 13px;
+    padding: 4px 14px;
+}
+
+#watchAddFolderBtn:hover {
+    background-color: rgba(124, 77, 255, 0.08);
+}
+
+#watchEmptyLabel {
+    color: #888;
+    font-size: 12px;
+    font-style: italic;
+    padding: 8px 0;
+}
+
+#watchFolderItem {
+    color: #333;
+    font-size: 13px;
+}
+
+#watchRemoveFolderBtn {
+    background-color: transparent;
+    color: #888;
+    border: none;
+    font-size: 12px;
+}
+
+#watchRemoveFolderBtn:hover {
+    color: #ff5555;
+}
+
+#watchPopupStatus {
+    padding: 8px 0;
+}
+
+/* Styled Warning Dialog */
+#warningDialogContainer {
+    background-color: #ffffff;
+    border: 2px solid #7C4DFF;
+    border-radius: 20px;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.15);
+}
+
+#warningDialogTitle {
+    font-size: 22px;
+    font-weight: 700;
+    color: #1a1a2e;
+    padding: 8px 0;
+}
+
+#warningDialogContent {
+    font-size: 14px;
+    color: #444444;
+    line-height: 1.6;
+    padding: 8px 0;
+}
+
+#warningDialogSubtitle {
+    font-size: 14px;
+    color: #666;
+    padding-bottom: 12px;
+}
+
+#warningDialogSectionLabel {
+    font-size: 13px;
+    font-weight: 600;
+    color: #7C4DFF;
+    padding-top: 8px;
+}
+
+#warningDialogFolderList {
+    font-size: 13px;
+    color: #444;
+    padding: 8px 12px;
+    background-color: rgba(0, 0, 0, 0.03);
+    border-radius: 8px;
+    line-height: 1.8;
+}
+
+#warningDialogNote {
+    font-size: 12px;
+    color: #666;
+    padding: 8px 0;
+    font-style: italic;
+}
+
+#warningDialogCancelBtn {
+    background-color: transparent;
+    color: #666;
+    border: 2px solid #cccccc;
+    border-radius: 21px;
+    font-size: 15px;
+    font-weight: 600;
+    padding: 10px 24px;
+}
+
+#warningDialogCancelBtn:hover {
+    background-color: rgba(0, 0, 0, 0.03);
+    border-color: #999;
+    color: #444;
+}
+
+#warningDialogConfirmBtn {
+    background-color: #7C4DFF;
+    color: white;
+    border: none;
+    border-radius: 21px;
+    font-size: 15px;
+    font-weight: 600;
+    padding: 10px 24px;
+}
+
+#warningDialogConfirmBtn:hover {
+    background-color: #9575FF;
+}
+
+#warningDialogConfirmBtn:pressed {
+    background-color: #6A3DE8;
+}
+
 /* Files Overlay Dialog */
 QDialog#filesOverlay {
     background-color: #FFFFFF;
@@ -462,6 +800,30 @@ QPushButton:disabled {
     background-color: #F5F5F5;
     color: #AAAAAA;
     border: 1px solid #E0E0E0;
+}
+
+/* Checked/Toggle state for checkable buttons */
+QPushButton:checked {
+    background-color: rgba(124, 77, 255, 0.1);
+    border: 1px solid #7C4DFF;
+    color: #7C4DFF;
+    font-weight: 600;
+}
+
+QPushButton:checked:hover {
+    background-color: rgba(124, 77, 255, 0.15);
+}
+
+/* Settings toggle buttons */
+#settingsToggle {
+    min-width: 160px;
+    padding: 8px 16px;
+}
+
+#settingsToggle:checked {
+    background-color: rgba(124, 77, 255, 0.1);
+    border: 1px solid #7C4DFF;
+    color: #7C4DFF;
 }
 
 /* Primary Button */
@@ -796,6 +1158,98 @@ QToolTip {
     background-color: #F5F5FF;
     color: #1A1A1A;
     border: 1px solid #7C4DFF;
+}
+
+/* Overlay Close Button (X) */
+#overlayCloseBtn {
+    background-color: #7C4DFF;
+    border: none;
+    border-radius: 14px;
+    color: white;
+    font-size: 12px;
+    font-weight: bold;
+    padding: 0px;
+}
+
+#overlayCloseBtn:hover {
+    background-color: #9B6FFF;
+    color: white;
+}
+
+#overlayCloseBtn:pressed {
+    background-color: #6A3DDD;
+    color: white;
+}
+
+/* Overlay Open Button (per row) */
+#overlayOpenBtn {
+    background-color: #7C4DFF;
+    border: none;
+    border-radius: 4px;
+    color: white;
+    font-size: 9px;
+    font-weight: bold;
+    padding: 0px 4px;
+    min-height: 18px;
+    min-width: 40px;
+}
+
+#overlayOpenBtn:hover {
+    background-color: #9B6FFF;
+    color: white;
+}
+
+#overlayOpenBtn:pressed {
+    background-color: #6A3DDD;
+    color: white;
+}
+
+/* Overlay Fill Button (main action) */
+#overlayFillBtn {
+    background-color: #7C4DFF;
+    border: none;
+    border-radius: 8px;
+    color: #FFFFFF;
+    font-size: 14px;
+    font-weight: 600;
+    padding: 10px 24px;
+}
+
+#overlayFillBtn:hover {
+    background-color: #9B6FFF;
+}
+
+#overlayFillBtn:pressed {
+    background-color: #6A3DDD;
+}
+
+#overlayFillBtn:disabled {
+    background-color: #E8E8E8;
+    color: #AAAAAA;
+}
+
+/* Overlay Copy Path Button */
+#overlayCopyBtn {
+    background-color: transparent;
+    border: 1px solid #7C4DFF;
+    border-radius: 8px;
+    color: #7C4DFF;
+    font-size: 13px;
+    font-weight: 600;
+    padding: 8px 16px;
+}
+
+#overlayCopyBtn:hover {
+    background-color: #F5F5FF;
+}
+
+#overlayCopyBtn:pressed {
+    background-color: #E8E0FF;
+}
+
+#overlayCopyBtn:disabled {
+    border-color: #E0E0E0;
+    color: #AAAAAA;
 }
 
 /* ==================== Auth Dialog ==================== */

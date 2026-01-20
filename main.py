@@ -9,17 +9,17 @@ import sys
 import os
 from pathlib import Path
 
-# Add the app directory to Python path
-app_dir = Path(__file__).parent / "app"
-sys.path.insert(0, str(app_dir))
+# Add the project root to Python path for consistent imports
+project_root = Path(__file__).parent
+sys.path.insert(0, str(project_root))
 
 from PySide6.QtWidgets import QApplication, QMessageBox
 from PySide6.QtCore import Qt
-from ui.main_window import MainWindow
-from ui.auth_dialog import AuthDialog
-from core.logging_config import setup_logging
-from core.supabase_client import supabase_auth, SUPABASE_AVAILABLE
-from core.settings import settings
+from app.ui.main_window import MainWindow
+from app.ui.auth_dialog import AuthDialog
+from app.core.logging_config import setup_logging
+from app.core.supabase_client import supabase_auth, SUPABASE_AVAILABLE
+from app.core.settings import settings
 
 
 def check_existing_session():
@@ -62,7 +62,7 @@ def main():
     
     # Apply saved theme (dark/light)
     try:
-        from ui.theme_manager import theme_manager
+        from app.ui.theme_manager import theme_manager
         theme_manager.apply_theme()
     except Exception as e:
         print(f"Failed to apply theme: {e}")

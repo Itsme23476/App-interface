@@ -791,16 +791,19 @@ class FileIndex:
             return []
     
     def clear_index(self):
-        """Clear all indexed files."""
+        """Clear all indexed files, FTS index, and embeddings."""
         try:
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
+                # Delete from all related tables
                 cursor.execute("DELETE FROM files")
                 cursor.execute("DELETE FROM files_fts")
+                cursor.execute("DELETE FROM embeddings")
                 conn.commit()
-                logger.info("File index cleared")
+                logger.info("File index cleared (files, files_fts, embeddings)")
         except Exception as e:
             logger.error(f"Error clearing index: {e}")
+            raise  # Re-raise to let caller handle it
     
     def resync_file_dates(self, progress_callback=None) -> Dict[str, int]:
         """
