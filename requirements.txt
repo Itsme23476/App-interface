@@ -19,3 +19,4 @@ rapidfuzz>=3.0.0
 pyspellchecker>=0.8.0
 opencv-python>=4.8.0
 moviepy>=1.0.3
+mutagen>=1.47.0

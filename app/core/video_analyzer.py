@@ -259,7 +259,7 @@ def extract_audio_snippets(video_path: Path, snippet_duration: int = 40) -> Opti
                 temp_path = temp_file.name
                 temp_file.close()
                 
-                full_audio.write_audiofile(temp_path, logger=None)
+                full_audio.write_audiofile(temp_path, logger=None, bitrate="64k")
                 video.close()
                 
                 logger.info(f"Extracted full audio ({max_audio_duration:.1f}s) from {video_path.name}")
@@ -288,7 +288,7 @@ def extract_audio_snippets(video_path: Path, snippet_duration: int = 40) -> Opti
         temp_file.close()
         
         # Write audio to temp file (suppress moviepy's verbose output)
-        combined_audio.write_audiofile(temp_path, logger=None)
+        combined_audio.write_audiofile(temp_path, logger=None, bitrate="64k")
         
         # Calculate total duration
         if clips_used > 1:
@@ -370,7 +370,7 @@ def extract_audio_snippet(video_path: Path, max_duration_seconds: int = 30) -> O
         temp_file.close()
         
         # Write audio to temp file (suppress moviepy's verbose output)
-        audio_clip.write_audiofile(temp_path, logger=None)
+        audio_clip.write_audiofile(temp_path, logger=None, bitrate="64k")
         
         # Clean up
         audio_clip.close()
@@ -711,13 +711,201 @@ def analyze_video(video_path: Path) -> Optional[Dict[str, Any]]:
         return None
 
 
-def analyze_audio(audio_path: Path, max_duration_seconds: int = 60) -> Optional[Dict[str, Any]]:
+def _get_audio_metadata(audio_path: Path) -> Dict[str, str]:
     """
-    Analyze an audio file using OpenAI Whisper for transcription + GPT for analysis.
+    Extract metadata (artist, album, title, genre) from audio file using mutagen.
+    
+    Returns:
+        Dictionary with metadata fields that exist
+    """
+    try:
+        from mutagen import File as MutagenFile
+        from mutagen.easyid3 import EasyID3
+        from mutagen.mp3 import MP3
+        from mutagen.flac import FLAC
+        from mutagen.mp4 import MP4
+    except ImportError:
+        logger.debug("mutagen not available - skipping metadata extraction")
+        return {}
+    
+    metadata = {}
+    
+    try:
+        audio = MutagenFile(str(audio_path), easy=True)
+        
+        if audio is None:
+            return {}
+        
+        # Common metadata fields
+        field_mappings = {
+            'title': 'title',
+            'artist': 'artist',
+            'album': 'album',
+            'genre': 'genre',
+            'albumartist': 'album_artist',
+        }
+        
+        for mutagen_key, our_key in field_mappings.items():
+            if mutagen_key in audio:
+                value = audio[mutagen_key]
+                if isinstance(value, list) and value:
+                    metadata[our_key] = str(value[0])
+                elif value:
+                    metadata[our_key] = str(value)
+        
+        # Get duration if available
+        if hasattr(audio, 'info') and hasattr(audio.info, 'length'):
+            metadata['duration'] = audio.info.length
+        
+        if metadata:
+            logger.info(f"Extracted metadata from {audio_path.name}: {list(metadata.keys())}")
+        
+        return metadata
+        
+    except Exception as e:
+        logger.debug(f"Could not extract metadata from {audio_path.name}: {e}")
+        return {}
+
+
+def _get_audio_duration(audio_path: Path) -> Optional[float]:
+    """Get audio file duration in seconds using mutagen or moviepy."""
+    # Try mutagen first (faster)
+    try:
+        from mutagen import File as MutagenFile
+        audio = MutagenFile(str(audio_path))
+        if audio and hasattr(audio, 'info') and hasattr(audio.info, 'length'):
+            return audio.info.length
+    except Exception:
+        pass
+    
+    # Fallback to moviepy
+    VideoFileClip, _ = _get_moviepy()
+    if VideoFileClip:
+        try:
+            # moviepy can also open audio files
+            from moviepy import AudioFileClip
+            clip = AudioFileClip(str(audio_path))
+            duration = clip.duration
+            clip.close()
+            return duration
+        except Exception:
+            pass
+    
+    return None
+
+
+def _sample_audio_file(audio_path: Path, snippet_duration: int = 40) -> Optional[str]:
+    """
+    Sample 3 clips from a long audio file (beginning, middle, end).
+    Similar to video audio extraction.
     
     Args:
         audio_path: Path to audio file
-        max_duration_seconds: Maximum duration to transcribe (default 60s to save costs)
+        snippet_duration: Duration of each snippet in seconds
+        
+    Returns:
+        Path to temporary MP3 file with sampled audio, or None on failure
+    """
+    try:
+        from moviepy import AudioFileClip
+    except ImportError:
+        try:
+            from moviepy.editor import AudioFileClip
+        except ImportError:
+            logger.warning("moviepy not available - cannot sample audio file")
+            return None
+    
+    # Get concatenate function
+    _, concatenate_audioclips = _get_moviepy()
+    
+    audio = None
+    try:
+        audio = AudioFileClip(str(audio_path))
+        audio_duration = audio.duration
+        
+        if audio_duration < 5:
+            logger.info(f"Audio too short for sampling: {audio_path.name}")
+            audio.close()
+            return None
+        
+        # Calculate sample positions: 5%, 50%, 90%
+        sample_positions = [
+            audio_duration * 0.05,
+            audio_duration * 0.50,
+            audio_duration * 0.90,
+        ]
+        
+        actual_snippet_duration = min(snippet_duration, audio_duration / 4)
+        
+        audio_clips = []
+        for pos in sample_positions:
+            start = max(0, pos - actual_snippet_duration / 2)
+            end = min(audio_duration, start + actual_snippet_duration)
+            
+            if end - start >= 5:
+                try:
+                    if hasattr(audio, 'subclipped'):
+                        clip = audio.subclipped(start, end)
+                    else:
+                        clip = audio.subclip(start, end)
+                    audio_clips.append(clip)
+                except Exception as e:
+                    logger.debug(f"Could not sample audio at {start:.1f}s: {e}")
+        
+        if not audio_clips:
+            logger.warning(f"Could not sample any clips from {audio_path.name}")
+            audio.close()
+            return None
+        
+        # Concatenate clips
+        if len(audio_clips) == 1:
+            combined_audio = audio_clips[0]
+        elif concatenate_audioclips:
+            combined_audio = concatenate_audioclips(audio_clips)
+        else:
+            combined_audio = audio_clips[0]
+        
+        # Save to MP3
+        temp_file = tempfile.NamedTemporaryFile(suffix='.mp3', delete=False)
+        temp_path = temp_file.name
+        temp_file.close()
+        
+        combined_audio.write_audiofile(temp_path, logger=None, bitrate="64k")
+        
+        total_duration = sum(c.duration for c in audio_clips)
+        
+        # Cleanup
+        for clip in audio_clips:
+            try:
+                clip.close()
+            except:
+                pass
+        audio.close()
+        
+        logger.info(f"Sampled {total_duration:.1f}s audio from {audio_path.name}")
+        return temp_path
+        
+    except Exception as e:
+        logger.warning(f"Could not sample audio from {audio_path.name}: {e}")
+        if audio:
+            try:
+                audio.close()
+            except:
+                pass
+        return None
+
+
+def analyze_audio(audio_path: Path) -> Optional[Dict[str, Any]]:
+    """
+    Analyze an audio file using OpenAI Whisper for transcription + GPT for analysis.
+    
+    Strategy:
+    - Short files (< 3 min): Transcribe full file
+    - Long files (≥ 3 min): Sample 3 clips of 40s each (beginning, middle, end)
+    - Extract metadata (artist, album, title, genre) and include in tags
+    
+    Args:
+        audio_path: Path to audio file
         
     Returns:
         Dictionary with label, tags, caption, etc. or None on failure
@@ -736,49 +924,111 @@ def analyze_audio(audio_path: Path, max_duration_seconds: int = 60) -> Optional[
     try:
         client = OpenAI(api_key=api_key)
         
+        # Extract metadata first
+        metadata = _get_audio_metadata(audio_path)
+        metadata_tags = []
+        
+        # Add metadata as tags
+        if metadata.get('artist'):
+            metadata_tags.append(metadata['artist'].lower())
+        if metadata.get('album'):
+            metadata_tags.append(metadata['album'].lower())
+        if metadata.get('title'):
+            metadata_tags.append(metadata['title'].lower())
+        if metadata.get('genre'):
+            metadata_tags.append(metadata['genre'].lower())
+        
+        # Get duration and decide strategy
+        duration = metadata.get('duration') or _get_audio_duration(audio_path)
+        
+        # Threshold: 3 minutes = 180 seconds
+        SHORT_AUDIO_THRESHOLD = 180
+        
+        temp_file_to_delete = None
+        file_to_transcribe = audio_path
+        
+        if duration and duration >= SHORT_AUDIO_THRESHOLD:
+            # Long file - sample 3 clips
+            logger.info(f"Audio file {audio_path.name} is {duration:.0f}s - sampling 3 clips")
+            sampled_path = _sample_audio_file(audio_path, snippet_duration=40)
+            if sampled_path:
+                file_to_transcribe = Path(sampled_path)
+                temp_file_to_delete = sampled_path
+            else:
+                logger.warning(f"Sampling failed for {audio_path.name}, will try full file")
+        else:
+            logger.info(f"Audio file {audio_path.name} is short ({duration:.0f}s if known) - transcribing full file")
+        
         # Transcribe with Whisper
-        # Note: Whisper API accepts the full file but we can truncate the transcript
-        with open(audio_path, 'rb') as audio_file:
-            transcript_response = client.audio.transcriptions.create(
-                model="whisper-1",
-                file=audio_file,
-                response_format="text"
-            )
+        transcript = None
+        try:
+            with open(file_to_transcribe, 'rb') as audio_file:
+                transcript_response = client.audio.transcriptions.create(
+                    model="whisper-1",
+                    file=audio_file,
+                    response_format="text"
+                )
+            transcript = transcript_response if isinstance(transcript_response, str) else str(transcript_response)
+            
+            if transcript:
+                logger.info(f"Transcribed {len(transcript)} chars from {audio_path.name}")
+        except Exception as e:
+            logger.warning(f"Could not transcribe {audio_path.name}: {e}")
+        finally:
+            # Clean up temp file
+            if temp_file_to_delete:
+                try:
+                    os.unlink(temp_file_to_delete)
+                except:
+                    pass
         
-        transcript = transcript_response if isinstance(transcript_response, str) else str(transcript_response)
+        # Build context for GPT
+        context_parts = []
         
-        # Truncate transcript if too long
-        if len(transcript) > 3000:
-            transcript = transcript[:3000] + "..."
+        if metadata:
+            meta_str = ", ".join(f"{k}: {v}" for k, v in metadata.items() if k != 'duration')
+            if meta_str:
+                context_parts.append(f"Metadata: {meta_str}")
         
-        # Analyze transcript with GPT
+        if transcript:
+            # Truncate if too long
+            truncated = transcript[:3000] if len(transcript) > 3000 else transcript
+            context_parts.append(f"Transcript:\n{truncated}")
+        
+        context_parts.append(f"Filename: {audio_path.name}")
+        
+        context = "\n\n".join(context_parts)
+        
+        # Analyze with GPT
         from .settings import settings
         model = settings.openai_vision_model or "gpt-4o-mini"
         
-        analysis_prompt = f"""Analyze this audio transcript and return JSON:
+        analysis_prompt = f"""Analyze this audio file and return JSON:
 {{
-  "type": "<audio type: song, podcast, audiobook, voice memo, interview, lecture, other>",
+  "type": "<audio type: song, podcast, audiobook, voice memo, interview, lecture, tutorial, other>",
   "caption": "<2-3 sentence description of the audio content>",
-  "tags": ["<15-20 relevant lowercase tags>"],
-  "language": "<detected language>",
+  "tags": ["<20-30 SPECIFIC lowercase tags - include artist names, song titles, topics discussed, people mentioned>"],
+  "language": "<detected language or 'instrumental' for music without vocals>",
   "confidence": <float 0-1>
 }}
 
-Transcript:
-{transcript}
+{context}
 
-Filename: {audio_path.name}
+IMPORTANT:
+- Be SPECIFIC with names: artist names, song titles, people mentioned, topics discussed
+- Avoid generic tags like 'music', 'audio', 'sound' unless truly applicable
+- Include any proper nouns from metadata or transcript
 
 Return ONLY valid JSON."""
 
         resp = client.chat.completions.create(
             model=model,
             messages=[
-                {"role": "system", "content": "You are an audio content analyzer."},
+                {"role": "system", "content": "You are an audio content analyzer. Be specific with names and topics."},
                 {"role": "user", "content": analysis_prompt}
             ],
             temperature=0.2,
-            max_tokens=500,
+            max_tokens=600,
         )
         
         content = resp.choices[0].message.content or ""
@@ -799,13 +1049,27 @@ Return ONLY valid JSON."""
         tags = data.get("tags", [])
         if not isinstance(tags, list):
             tags = []
-        tags = [str(t).lower()[:64] for t in tags if isinstance(t, str)][:25]
+        
+        # Combine metadata tags with GPT-generated tags (metadata first for priority)
+        all_tags = metadata_tags + [str(t).lower()[:64] for t in tags if isinstance(t, str)]
+        # Deduplicate while preserving order
+        seen = set()
+        unique_tags = []
+        for tag in all_tags:
+            if tag not in seen:
+                seen.add(tag)
+                unique_tags.append(tag)
+        tags = unique_tags[:35]
+        
         caption = str(data.get("caption", "")).strip()[:1200]
         
         try:
             confidence = float(data.get("confidence", 0.8))
         except (ValueError, TypeError):
             confidence = 0.8
+        
+        # Determine sampling info for logging
+        sampled = temp_file_to_delete is not None
         
         result = {
             "label": label,
@@ -816,7 +1080,9 @@ Return ONLY valid JSON."""
             "ai_source": "openai:whisper+gpt-4o-mini",
         }
         
-        logger.info(f"Audio analysis successful for {audio_path.name}: {label}, {len(tags)} tags")
+        sampling_info = " (sampled)" if sampled else " (full)"
+        metadata_info = f", {len(metadata_tags)} from metadata" if metadata_tags else ""
+        logger.info(f"Audio analysis successful for {audio_path.name}: {label}, {len(tags)} tags{metadata_info}{sampling_info}")
         return result
         
     except Exception as e:

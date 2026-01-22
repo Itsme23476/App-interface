@@ -527,15 +527,28 @@ class SearchService:
                     pass
 
             # Merge keyword and semantic (simple union with max rank)
+            # Note: bm25 scores are NEGATIVE (more negative = better match, e.g., -15 is better than -5)
+            # Cosine similarity scores are POSITIVE (higher = better, scaled to 0-10)
+            # We must normalize bm25 to positive scale before merging with max()
             by_id: Dict[int, Dict[str, Any]] = {}
             for r in results + sem_results:
                 rid = r['id']
+                rank = r.get('rank', 0)
+                
+                # Normalize bm25 scores (negative, lower=better) to positive scale (higher=better)
+                # bm25 typically ranges from -30 (best) to 0 (worst)
+                # Negate so -15 becomes 15, -5 becomes 5 (now higher = better)
+                if rank < 0:
+                    rank = -rank
+                
                 if rid not in by_id:
-                    by_id[rid] = r
+                    by_id[rid] = r.copy()
+                    by_id[rid]['rank'] = rank
                 else:
-                    by_id[rid]['rank'] = max(by_id[rid].get('rank',0), r.get('rank',0))
+                    by_id[rid]['rank'] = max(by_id[rid].get('rank', 0), rank)
+            
             merged = list(by_id.values())
-            merged.sort(key=lambda x: x.get('rank',0), reverse=True)
+            merged.sort(key=lambda x: x.get('rank', 0), reverse=True)
             
             # Apply type filter (by file extension)
             if extensions:
