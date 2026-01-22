@@ -36,36 +36,35 @@ class FileOperations:
         Returns:
             Dict with 'removed' and 'errors' counts
         """
-        import sqlite3
-        
         stats = {'removed': 0, 'errors': 0}
         
         if not file_ids:
             return stats
         
         try:
-            with sqlite3.connect(self.file_index.db_path) as conn:
+            with self.file_index._get_connection() as conn:
                 cursor = conn.cursor()
                 
-                for file_id in file_ids:
-                    try:
-                        # Remove from FTS index first
-                        cursor.execute("DELETE FROM files_fts WHERE rowid = ?", (file_id,))
-                        # Remove from embeddings
-                        cursor.execute("DELETE FROM embeddings WHERE file_id = ?", (file_id,))
-                        # Remove from files table
-                        cursor.execute("DELETE FROM files WHERE id = ?", (file_id,))
-                        stats['removed'] += 1
-                    except Exception as e:
-                        logger.error(f"Error removing file ID {file_id}: {e}")
-                        stats['errors'] += 1
+                # Build placeholders for batch delete
+                placeholders = ",".join(["?"] * len(file_ids))
+                
+                # Delete from all tables in one go (same approach as clear_index)
+                cursor.execute(f"DELETE FROM files WHERE id IN ({placeholders})", file_ids)
+                cursor.execute(f"DELETE FROM embeddings WHERE file_id IN ({placeholders})", file_ids)
+                
+                # For FTS, delete by removing orphaned entries (avoids querying corrupted FTS)
+                cursor.execute("""
+                    DELETE FROM files_fts 
+                    WHERE rowid NOT IN (SELECT id FROM files)
+                """)
                 
                 conn.commit()
+                stats['removed'] = len(file_ids)
                 logger.info(f"Removed {stats['removed']} files from index")
                 
         except Exception as e:
             logger.error(f"Error in remove_from_index: {e}")
-            stats['errors'] += len(file_ids)
+            stats['errors'] = len(file_ids)
         
         return stats
     
@@ -139,7 +138,7 @@ class FileOperations:
             return stats
         
         try:
-            with sqlite3.connect(self.file_index.db_path) as conn:
+            with self.file_index._get_connection() as conn:
                 conn.row_factory = sqlite3.Row
                 cursor = conn.cursor()
                 
@@ -212,7 +211,7 @@ class FileOperations:
         paths = []
         try:
             placeholders = ",".join(["?"] * len(file_ids))
-            with sqlite3.connect(self.file_index.db_path) as conn:
+            with self.file_index._get_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute(
                     f"SELECT file_path FROM files WHERE id IN ({placeholders})",

@@ -282,6 +282,9 @@ class MainWindow(QMainWindow):
         # Auto-load indexed files on startup
         QTimer.singleShot(100, self.refresh_debug_view)
         
+        # Check for updates in background
+        QTimer.singleShot(2000, self._check_for_updates)
+        
         logger.info("Main window initialized")
     
     def setup_ui(self):
@@ -5132,6 +5135,67 @@ Move Plan Summary:
         if self.search_input.text().strip():
             self.search_files()
         self.refresh_debug_view()
+    
+    def _repair_database(self):
+        """Attempt to repair a corrupted database."""
+        try:
+            from app.core.search import search_service
+            if search_service.index.repair_database():
+                QMessageBox.information(
+                    self,
+                    "Database Repaired",
+                    "The database has been repaired successfully.\n\n"
+                    "Please re-index your folders to restore your file data."
+                )
+                self.refresh_debug_view()
+            else:
+                QMessageBox.critical(
+                    self,
+                    "Repair Failed",
+                    "Could not repair the database automatically.\n\n"
+                    "Please try manually deleting the database file at:\n"
+                    f"{search_service.index.db_path}"
+                )
+        except Exception as e:
+            logger.error(f"Database repair failed: {e}")
+            QMessageBox.critical(self, "Repair Failed", f"Error: {e}")
+    
+    def _check_for_updates(self):
+        """Check for app updates in background."""
+        try:
+            from app.core.update_checker import check_for_updates_async, open_download_page
+            
+            def on_update_result(result):
+                if result and result.get("available"):
+                    # Show update dialog on main thread
+                    QTimer.singleShot(0, lambda: self._show_update_dialog(result))
+            
+            check_for_updates_async(on_update_result)
+        except Exception as e:
+            logger.debug(f"Update check failed: {e}")
+    
+    def _show_update_dialog(self, update_info: dict):
+        """Show update available dialog."""
+        from app.core.update_checker import open_download_page
+        
+        current = update_info.get("current_version", "?")
+        latest = update_info.get("latest_version", "?")
+        notes = update_info.get("release_notes", "")
+        
+        message = f"A new version is available!\n\nCurrent: v{current}\nLatest: v{latest}"
+        if notes:
+            message += f"\n\nWhat's new:\n{notes}"
+        
+        reply = QMessageBox.question(
+            self,
+            "Update Available",
+            message + "\n\nWould you like to download the update?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes
+        )
+        
+        if reply == QMessageBox.Yes:
+            open_download_page(update_info.get("download_url"))
     
     def _on_batch_operation_error(self, error: str, progress: QProgressDialog):
         """Handle batch operation error."""

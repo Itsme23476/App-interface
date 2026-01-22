@@ -553,14 +553,15 @@ def _salvage_from_content(content: str) -> Optional[Dict[str, Any]]:
 
 
 def gpt_vision_fallback(image_b64: str, filename: Optional[str] = None) -> Optional[Dict[str, Any]]:
-    """Cloud fallback using OpenAI GPT-4o-mini if OPENAI_API_KEY is set.
+    """Cloud fallback using OpenAI GPT-4o-mini.
+    
+    Supports two modes:
+    1. Subscription mode: Routes through Supabase Edge Function (tracks usage)
+    2. Direct mode: Uses user's own OpenAI API key
+    
     image_b64 should be raw base64 without data URI prefix.
     """
     try:
-        api_key = os.environ.get("OPENAI_API_KEY")
-        if not api_key or OpenAI is None:
-            return None
-        client = OpenAI(api_key=api_key)
         system = DETAILED_SYSTEM_PROMPT
         # Build data URL for inline base64 image
         data_url = f"data:image/png;base64,{image_b64}"
@@ -569,15 +570,42 @@ def gpt_vision_fallback(image_b64: str, filename: Optional[str] = None) -> Optio
             user_content.append({"type": "text", "text": f"filename: {filename}"})
         user_content.append({"type": "text", "text": "Return STRICT JSON only using the schema."})
         user_content.append({"type": "image_url", "image_url": {"url": data_url}})
-        resp = client.chat.completions.create(
-            model=get_openai_vision_model(),
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": user_content},
-            ],
-            temperature=0.2,
-        )
-        content = resp.choices[0].message.content or ""
+        
+        messages = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user_content},
+        ]
+        
+        # Check if using subscription mode (Supabase proxy)
+        if settings.use_subscription_mode and settings.auth_access_token:
+            try:
+                from .api_client import get_api_client
+                client = get_api_client()
+                client.set_access_token(settings.auth_access_token)
+                resp = client.vision_completion(
+                    messages=messages,
+                    model=get_openai_vision_model(),
+                    max_tokens=500,
+                )
+                content = resp.get("choices", [{}])[0].get("message", {}).get("content", "")
+            except PermissionError as e:
+                logger.warning(f"Subscription error: {e}")
+                return None
+            except Exception as e:
+                logger.error(f"Supabase proxy error: {e}")
+                return None
+        else:
+            # Direct OpenAI mode (user's own API key)
+            api_key = os.environ.get("OPENAI_API_KEY")
+            if not api_key or OpenAI is None:
+                return None
+            client = OpenAI(api_key=api_key)
+            resp = client.chat.completions.create(
+                model=get_openai_vision_model(),
+                messages=messages,
+                temperature=0.2,
+            )
+            content = resp.choices[0].message.content or ""
         try:
             data = json.loads(content)
         except Exception:

@@ -5,12 +5,16 @@ Database management for file indexing and search functionality.
 import sqlite3
 import json
 import logging
+import shutil
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 from .settings import settings
 
 logger = logging.getLogger(__name__)
+
+# Database connection timeout (seconds) - helps with locked databases
+DB_TIMEOUT = 30
 
 def _parse_tags_value(raw: Any) -> Optional[List[str]]:
     """Parse tags stored in DB.
@@ -52,10 +56,61 @@ class FileIndex:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_database()
     
+    def _get_connection(self) -> sqlite3.Connection:
+        """Get a database connection with proper settings for resilience."""
+        conn = sqlite3.connect(self.db_path, timeout=DB_TIMEOUT)
+        # Enable WAL mode for better concurrency and crash resilience
+        conn.execute("PRAGMA journal_mode=WAL")
+        # Good balance of safety and speed
+        conn.execute("PRAGMA synchronous=NORMAL")
+        return conn
+    
+    def check_integrity(self) -> bool:
+        """Check database integrity. Returns True if database is healthy."""
+        try:
+            with self._get_connection() as conn:
+                result = conn.execute("PRAGMA integrity_check").fetchone()
+                if result and result[0] == "ok":
+                    return True
+                logger.error(f"Database integrity check failed: {result}")
+                return False
+        except Exception as e:
+            logger.error(f"Database integrity check error: {e}")
+            return False
+    
+    def repair_database(self) -> bool:
+        """Attempt to recover from database corruption by recreating it."""
+        backup_path = self.db_path.with_suffix('.db.corrupted')
+        try:
+            logger.warning("Attempting to repair corrupted database...")
+            # Backup corrupted file
+            if self.db_path.exists():
+                shutil.copy(self.db_path, backup_path)
+                logger.info(f"Backed up corrupted database to {backup_path}")
+                self.db_path.unlink()
+                # Also remove WAL and SHM files if they exist
+                wal_path = Path(str(self.db_path) + "-wal")
+                shm_path = Path(str(self.db_path) + "-shm")
+                if wal_path.exists():
+                    wal_path.unlink()
+                if shm_path.exists():
+                    shm_path.unlink()
+            # Reinitialize fresh database
+            self._init_database()
+            logger.info("Database recreated successfully. Please re-index your files.")
+            return True
+        except Exception as e:
+            logger.error(f"Could not repair database: {e}")
+            return False
+    
     def _init_database(self):
         """Initialize database tables."""
-        with sqlite3.connect(self.db_path) as conn:
+        with sqlite3.connect(self.db_path, timeout=DB_TIMEOUT) as conn:
             cursor = conn.cursor()
+            
+            # Enable WAL mode for better concurrency and crash resilience
+            cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.execute("PRAGMA synchronous=NORMAL")
             
             # Create files table
             cursor.execute("""
@@ -176,7 +231,7 @@ class FileIndex:
         if field not in allowed:
             return False
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with sqlite3.connect(self.db_path, timeout=DB_TIMEOUT) as conn:
                 cursor = conn.cursor()
                 val = value
                 if field in {"tags", "user_tags", "metadata"}:
@@ -213,7 +268,7 @@ class FileIndex:
         logger.warning(f"[DB_WRITE] add_file called: file='{file_name}', incoming_tags={repr(incoming_tags)[:100]}")
         
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with sqlite3.connect(self.db_path, timeout=DB_TIMEOUT) as conn:
                 conn.row_factory = sqlite3.Row
                 cursor = conn.cursor()
                 
@@ -379,7 +434,7 @@ class FileIndex:
             List of matching file dictionaries
         """
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with sqlite3.connect(self.db_path, timeout=DB_TIMEOUT) as conn:
                 conn.row_factory = sqlite3.Row
                 cursor = conn.cursor()
 
@@ -449,7 +504,7 @@ class FileIndex:
     ) -> List[Dict[str, Any]]:
         """Search with parsed terms/filters, with robust fallbacks."""
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with sqlite3.connect(self.db_path, timeout=DB_TIMEOUT) as conn:
                 conn.row_factory = sqlite3.Row
                 cursor = conn.cursor()
 
@@ -576,7 +631,7 @@ class FileIndex:
             File dictionary or None if not found
         """
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with sqlite3.connect(self.db_path, timeout=DB_TIMEOUT) as conn:
                 conn.row_factory = sqlite3.Row
                 cursor = conn.cursor()
                 cursor.execute("SELECT * FROM files WHERE file_path = ?", (file_path,))
@@ -618,7 +673,7 @@ class FileIndex:
             Number of files in the database
         """
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with sqlite3.connect(self.db_path, timeout=DB_TIMEOUT) as conn:
                 cursor = conn.cursor()
                 cursor.execute("SELECT COUNT(*) FROM files")
                 return cursor.fetchone()[0]
@@ -629,7 +684,7 @@ class FileIndex:
     # ---------- Embeddings helpers ----------
     def upsert_embedding(self, file_id: int, model: str, vector: List[float]) -> None:
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with sqlite3.connect(self.db_path, timeout=DB_TIMEOUT) as conn:
                 cursor = conn.cursor()
                 cursor.execute(
                     """
@@ -649,7 +704,7 @@ class FileIndex:
 
     def get_all_embeddings(self) -> List[Dict[str, Any]]:
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with sqlite3.connect(self.db_path, timeout=DB_TIMEOUT) as conn:
                 conn.row_factory = sqlite3.Row
                 cursor = conn.cursor()
                 cursor.execute("SELECT * FROM embeddings")
@@ -672,7 +727,7 @@ class FileIndex:
             return []
         try:
             placeholders = ",".join(["?"] * len(ids))
-            with sqlite3.connect(self.db_path) as conn:
+            with sqlite3.connect(self.db_path, timeout=DB_TIMEOUT) as conn:
                 conn.row_factory = sqlite3.Row
                 cursor = conn.cursor()
                 cursor.execute(f"SELECT * FROM files WHERE id IN ({placeholders})", ids)
@@ -712,7 +767,7 @@ class FileIndex:
             Dictionary with statistics
         """
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with sqlite3.connect(self.db_path, timeout=DB_TIMEOUT) as conn:
                 conn.row_factory = sqlite3.Row
                 cursor = conn.cursor()
                 
@@ -747,7 +802,7 @@ class FileIndex:
     def _log_search(self, query: str, results_count: int):
         """Log search query."""
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with sqlite3.connect(self.db_path, timeout=DB_TIMEOUT) as conn:
                 cursor = conn.cursor()
                 cursor.execute("""
                     INSERT INTO search_history (query, timestamp, results_count)
@@ -768,7 +823,7 @@ class FileIndex:
             List of search history entries
         """
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with sqlite3.connect(self.db_path, timeout=DB_TIMEOUT) as conn:
                 cursor = conn.cursor()
                 cursor.execute("""
                     SELECT query, timestamp, results_count 
@@ -793,7 +848,7 @@ class FileIndex:
     def clear_index(self):
         """Clear all indexed files, FTS index, and embeddings."""
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with sqlite3.connect(self.db_path, timeout=DB_TIMEOUT) as conn:
                 cursor = conn.cursor()
                 # Delete from all related tables
                 cursor.execute("DELETE FROM files")
@@ -825,7 +880,7 @@ class FileIndex:
             logger.warning("Metadata utils not available, skipping metadata extraction")
         
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with sqlite3.connect(self.db_path, timeout=DB_TIMEOUT) as conn:
                 cursor = conn.cursor()
                 
                 # Get all file paths

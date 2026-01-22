@@ -48,6 +48,9 @@ class Settings:
         self.auth_access_token: str = ''
         self.auth_refresh_token: str = ''
         self.auth_user_email: str = ''
+        # Subscription mode: when True, routes API calls through Supabase (user pays subscription)
+        # When False, user provides their own OpenAI API key
+        self.use_subscription_mode: bool = False
         # Load persisted config if available
         try:
             self._load_config()
@@ -234,6 +237,8 @@ class Settings:
         self.auth_access_token = data.get('auth_access_token', '')
         self.auth_refresh_token = data.get('auth_refresh_token', '')
         self.auth_user_email = data.get('auth_user_email', '')
+        # Subscription mode
+        self.use_subscription_mode = bool(data.get('use_subscription_mode', False))
 
     def _save_config(self) -> None:
         cfg = {
@@ -257,6 +262,7 @@ class Settings:
             'auth_access_token': self.auth_access_token,
             'auth_refresh_token': self.auth_refresh_token,
             'auth_user_email': self.auth_user_email,
+            'use_subscription_mode': self.use_subscription_mode,
         }
         try:
             with open(self._config_file(), 'w', encoding='utf-8') as f:
