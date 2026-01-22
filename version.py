@@ -12,7 +12,7 @@ VERSION_TUPLE = tuple(int(x) for x in VERSION.split("."))
 
 # Update URL - where the app checks for updates
 # This file is auto-updated by GitHub Actions when you create a release
-UPDATE_CHECK_URL = "https://raw.githubusercontent.com/Itsme23476/Finished/main/version.json"
+UPDATE_CHECK_URL = "https://raw.githubusercontent.com/Itsme23476/App-interface/main/version.json"
 
 # Download URL - where users can download updates
-DOWNLOAD_URL = "https://github.com/Itsme23476/Finished/releases/latest"
+DOWNLOAD_URL = "https://github.com/Itsme23476/App-interface/releases/latest"

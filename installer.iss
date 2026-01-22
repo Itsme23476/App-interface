@@ -35,7 +35,6 @@ DisableProgramGroupPage=yes
 ; Output settings
 OutputDir=Output
 OutputBaseFilename=AI_File_Organizer_Setup_v{#MyAppVersion}
-; SetupIconFile=resources\icon.ico  ; Uncomment when you add your icon
 Compression=lzma2/ultra64
 SolidCompression=yes
 
@@ -48,6 +47,7 @@ PrivilegesRequiredOverridesAllowed=dialog
 
 ; Visual settings
 WizardStyle=modern
+WizardResizable=no
 
 ; Uninstaller
 UninstallDisplayIcon={app}\{#MyAppExeName}
@@ -58,6 +58,7 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
+Name: "quicklaunchicon"; Description: "{cm:CreateQuickLaunchIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked; OnlyBelowVersion: 6.1; Check: not IsAdminInstallMode
 
 [Files]
 ; Include everything from the PyInstaller output folder
