@@ -31,7 +31,18 @@ SUPABASE_URL = "https://gsvccxhdgcshiwgjvgfi.supabase.co"
 SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImdzdmNjeGhkZ2NzaGl3Z2p2Z2ZpIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjczOTY2NTIsImV4cCI6MjA4Mjk3MjY1Mn0.Sbb6YJjlQ_ig2LCcs9zz_Be1kU-iIHBx4Vu4nzCPyTM"
 
 # Stripe configuration
-STRIPE_PRICE_ID = "price_1SlJ7TBATYQXewwiW3WdOIRN"
+# Standard plan - $15/month with 10-day free trial, 1000 analyses
+STRIPE_PRICE_ID = "price_1StmTIBATYQXewwisuaa8ms1"
+STRIPE_PRICE_ID_STANDARD = "price_1StmTIBATYQXewwisuaa8ms1"
+
+# Ultra plan - $49/month, 5000 analyses
+STRIPE_PRICE_ID_ULTRA = "price_1SuJOxBATYQXewwiuqsqAcMJ"  # TODO: Replace with actual Stripe price ID
+
+# Plan limits
+PLAN_LIMITS = {
+    'standard': {'image': 750, 'video': 250, 'total': 1000},
+    'ultra': {'image': 3750, 'video': 1250, 'total': 5000},
+}
 
 
 class SupabaseAuth:
@@ -255,11 +266,20 @@ class SupabaseAuth:
             if not db_client:
                 return {'has_subscription': False, 'status': None, 'error': 'Database not available'}
             
-            # Query subscriptions table
-            response = db_client.from_('subscriptions').select('*').eq('user_id', user_id).execute()
+            # Query subscriptions table - get most recent with valid status
+            response = db_client.from_('subscriptions') \
+                .select('*') \
+                .eq('user_id', user_id) \
+                .in_('status', ['active', 'trialing', 'past_due']) \
+                .order('created_at', desc=True) \
+                .limit(1) \
+                .execute()
+            
+            logger.info(f"Subscription query for user {user_id}: {len(response.data) if response.data else 0} results")
             
             if response.data and len(response.data) > 0:
                 sub = response.data[0]
+                logger.info(f"Found subscription with status: {sub.get('status')}")
                 self._subscription = sub
                 
                 status = sub.get('status')
@@ -313,6 +333,200 @@ class SupabaseAuth:
         except Exception as e:
             logger.error(f"Failed to open checkout: {e}")
             return False
+    
+    def open_customer_portal(self) -> tuple[bool, str]:
+        """
+        Open Stripe Customer Portal in browser for subscription management.
+        
+        Returns:
+            Tuple of (success: bool, message: str)
+        """
+        if not self._user:
+            logger.warning("Cannot open portal: user not authenticated")
+            return False, "Please sign in first"
+        
+        email = self._user.get('email', '')
+        user_id = self._user.get('id', '')
+        
+        if not email or not user_id:
+            logger.warning("Cannot open portal: missing user info")
+            return False, "Please sign in again"
+        
+        # Open portal URL directly in browser (same pattern as checkout)
+        # Edge function will redirect to Stripe Customer Portal
+        portal_url = f"{SUPABASE_URL}/functions/v1/create-portal-session?user_id={user_id}&email={email}"
+        
+        try:
+            webbrowser.open(portal_url)
+            logger.info(f"Opened customer portal for user: {email}")
+            return True, "Opening subscription management..."
+        except Exception as e:
+            logger.error(f"Failed to open customer portal: {e}")
+            return False, f"Error: {str(e)}"
+    
+    def get_current_plan(self) -> str:
+        """
+        Get the user's current subscription plan type.
+        
+        Returns:
+            'ultra' if on Ultra plan, 'standard' otherwise
+        """
+        if not self._subscription:
+            # Try to get subscription
+            self.check_subscription()
+        
+        if self._subscription:
+            price_id = self._subscription.get('price_id', '')
+            if price_id == STRIPE_PRICE_ID_ULTRA:
+                return 'ultra'
+        
+        return 'standard'
+    
+    def get_plan_limits(self) -> Dict[str, int]:
+        """Get the limits for the current plan."""
+        plan = self.get_current_plan()
+        return PLAN_LIMITS.get(plan, PLAN_LIMITS['standard'])
+    
+    def get_monthly_usage(self) -> Dict[str, Any]:
+        """
+        Get the user's AI usage for the current month.
+        
+        Returns:
+            Dict with 'image_count', 'video_count', 'total_count', 'remaining', 'plan', 'total_limit'
+        """
+        # Get limits based on current plan
+        limits = self.get_plan_limits()
+        IMAGE_LIMIT = limits['image']
+        VIDEO_LIMIT = limits['video']
+        TOTAL_DISPLAY_LIMIT = limits['total']
+        current_plan = self.get_current_plan()
+        
+        default = {
+            'image_count': 0,
+            'video_count': 0, 
+            'total_count': 0,
+            'remaining': TOTAL_DISPLAY_LIMIT,
+            'total_limit': TOTAL_DISPLAY_LIMIT,
+            'plan': current_plan,
+            'at_limit': False
+        }
+        
+        if not self._user:
+            logger.warning(f"[USAGE] Cannot get usage: no user logged in")
+            return default
+        
+        db_client = self._get_db_client()
+        if not db_client:
+            logger.warning(f"[USAGE] Cannot get usage: db_client not available")
+            return default
+        
+        try:
+            user_id = self._user.get('id')
+            if not user_id:
+                logger.warning("[USAGE] No user_id found")
+                return default
+            
+            logger.info(f"[USAGE] Fetching usage for user {user_id}")
+            
+            # Get current month's start (use UTC to match database)
+            from datetime import timezone
+            now = datetime.now(timezone.utc)
+            month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+            
+            # Query api_usage for this month
+            response = db_client.from_('api_usage') \
+                .select('endpoint') \
+                .eq('user_id', user_id) \
+                .gte('created_at', month_start.isoformat()) \
+                .execute()
+            
+            logger.info(f"[USAGE] Query returned {len(response.data) if response.data else 0} records")
+            
+            if not response.data:
+                logger.info("[USAGE] No usage records found, returning default")
+                return default
+            
+            # Count by type
+            image_count = 0
+            video_count = 0
+            
+            for record in response.data:
+                endpoint = record.get('endpoint', '')
+                if endpoint in ('vision', 'chat'):
+                    image_count += 1
+                elif endpoint == 'whisper':
+                    video_count += 1
+            
+            # Check limits
+            image_at_limit = image_count >= IMAGE_LIMIT
+            video_at_limit = video_count >= VIDEO_LIMIT
+            
+            # Calculate remaining (simplified for user display)
+            total_used = image_count + video_count
+            remaining = max(0, TOTAL_DISPLAY_LIMIT - total_used)
+            
+            result = {
+                'image_count': image_count,
+                'video_count': video_count,
+                'total_count': total_used,
+                'remaining': remaining,
+                'total_limit': TOTAL_DISPLAY_LIMIT,
+                'plan': current_plan,
+                'at_limit': image_at_limit and video_at_limit,
+                'image_at_limit': image_at_limit,
+                'video_at_limit': video_at_limit,
+            }
+            logger.info(f"[USAGE] Returning: {result}")
+            return result
+            
+        except Exception as e:
+            logger.error(f"[USAGE] Error getting usage: {e}")
+            return default
+    
+    def can_use_ai(self, analysis_type: str = 'image') -> tuple[bool, str]:
+        """
+        Check if user can perform AI analysis (under limit).
+        
+        Args:
+            analysis_type: 'image' or 'video'
+            
+        Returns:
+            (can_use, message)
+        """
+        usage = self.get_monthly_usage()
+        limits = self.get_plan_limits()
+        plan = usage.get('plan', 'standard')
+        total_limit = usage.get('total_limit', 1000)
+        
+        # For Ultra plan, only show upgrade message if they're not already on it
+        upgrade_msg = " Upgrade to Ultra for 5,000 analyses!" if plan == 'standard' else ""
+        
+        if analysis_type == 'video' and usage.get('video_at_limit'):
+            self._limit_reached = True
+            self._limit_message = f"Monthly video analysis limit reached ({usage['video_count']}/{limits['video']}).{upgrade_msg}"
+            return False, self._limit_message
+        
+        if analysis_type == 'image' and usage.get('image_at_limit'):
+            self._limit_reached = True
+            self._limit_message = f"Monthly image analysis limit reached ({usage['image_count']}/{limits['image']}).{upgrade_msg}"
+            return False, self._limit_message
+        
+        # Check total limit
+        if usage.get('remaining', total_limit) <= 0:
+            self._limit_reached = True
+            self._limit_message = f"Monthly AI analysis limit reached ({total_limit}/{total_limit}).{upgrade_msg}"
+            return False, self._limit_message
+        
+        return True, f"{usage['remaining']} AI analyses remaining"
+    
+    def check_and_clear_limit_flag(self) -> tuple[bool, str]:
+        """Check if limit was reached and clear the flag. Returns (was_reached, message)."""
+        if hasattr(self, '_limit_reached') and self._limit_reached:
+            msg = getattr(self, '_limit_message', 'AI analysis limit reached')
+            self._limit_reached = False
+            self._limit_message = ''
+            return True, msg
+        return False, ''
 
 
 # Global instance

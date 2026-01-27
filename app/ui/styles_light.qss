@@ -107,10 +107,20 @@ QMainWindow, QDialog {
 
 #accountContainer {
     background-color: rgba(124, 77, 255, 0.06);
-    border-top: 1px solid rgba(0, 0, 0, 0.06);
+    border: 1px solid rgba(124, 77, 255, 0.12);
     border-radius: 12px;
     margin: 8px;
-    padding: 4px;
+    padding: 0px;
+    text-align: left;
+}
+
+#accountContainer:hover {
+    background-color: rgba(124, 77, 255, 0.12);
+    border: 1px solid rgba(124, 77, 255, 0.20);
+}
+
+#accountContainer:pressed {
+    background-color: rgba(124, 77, 255, 0.18);
 }
 
 #avatarCircle {
@@ -121,18 +131,26 @@ QMainWindow, QDialog {
     border-radius: 20px;
 }
 
+#accountInfo {
+    background: transparent;
+}
+
 #accountName {
     color: #1A1A1A;
     font-size: 13px;
     font-weight: 600;
     background: transparent;
+    padding: 0px;
+    margin: 0px;
 }
 
 #accountPlan {
-    color: #666666;
+    color: #7C4DFF;
     font-size: 11px;
     font-weight: 500;
     background: transparent;
+    padding: 0px;
+    margin: 0px;
 }
 
 /* ==================== Search Page - Hero Section ==================== */
@@ -1313,6 +1331,17 @@ QToolTip {
     border-radius: 16px;
 }
 
+#trialBadge {
+    color: #059669;
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 1px;
+    background: rgba(16, 185, 129, 0.12);
+    border-radius: 20px;
+    padding: 8px 20px;
+    margin-bottom: 8px;
+}
+
 #planBadge {
     color: #7C4DFF;
     font-size: 11px;
@@ -1321,6 +1350,14 @@ QToolTip {
     background: rgba(124, 77, 255, 0.1);
     border-radius: 20px;
     padding: 6px 16px;
+}
+
+#trialInfo {
+    color: #059669;
+    font-size: 12px;
+    font-weight: 500;
+    background: transparent;
+    margin-top: -8px;
 }
 
 #priceAmount {

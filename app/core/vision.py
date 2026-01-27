@@ -226,86 +226,86 @@ def analyze_image(image_path: Path, model: str = None) -> Optional[Dict[str, Any
         if provider == 'local':
             if model is None:
                 model = get_vision_model()
-            if not _ollama_is_alive():
-                logger.warning("Ollama is not running at localhost:11434")
-                return None
-            if not _model_is_available(model):
-                logger.info(f"Model '{model}' not available locally. Skipping analyze_image.")
-                return None
+        if not _ollama_is_alive():
+            logger.warning("Ollama is not running at localhost:11434")
+            return None
+        if not _model_is_available(model):
+            logger.info(f"Model '{model}' not available locally. Skipping analyze_image.")
+            return None
 
-            # Build image b64 and gather context (dimensions, aspect)
+        # Build image b64 and gather context (dimensions, aspect)
+        width = height = None
+        try:
+            with Image.open(image_path) as dim_img:
+                width, height = dim_img.size
+        except Exception:
             width = height = None
+        image_b64 = _file_to_b64(image_path)
+        if not image_b64:
+            return None
+        aspect = round((width / height), 3) if width and height and height != 0 else None
+        ctx = []
+        if image_path.name:
+            ctx.append(f"filename: {image_path.name}")
+        if width and height:
+            ctx.append(f"dimensions: {width}x{height}, aspect={aspect}")
+        ctx_str = "\n".join(ctx)
+        prompt = SYSTEM_PROMPT + "\n" + ctx_str + "\nReturn STRICT JSON only (no markdown)."
+        payload = {
+            "model": model,
+            "prompt": prompt,
+            "images": [image_b64],
+            "stream": False,
+            "temperature": 0.2,
+            "options": {"num_predict": 512}
+        }
+        # Retry up to 2 times on transient failures
+        last_err: Optional[str] = None
+        r = None
+        for attempt in range(2):
             try:
-                with Image.open(image_path) as dim_img:
-                    width, height = dim_img.size
-            except Exception:
-                width = height = None
-            image_b64 = _file_to_b64(image_path)
-            if not image_b64:
-                return None
-            aspect = round((width / height), 3) if width and height and height != 0 else None
-            ctx = []
-            if image_path.name:
-                ctx.append(f"filename: {image_path.name}")
-            if width and height:
-                ctx.append(f"dimensions: {width}x{height}, aspect={aspect}")
-            ctx_str = "\n".join(ctx)
-            prompt = SYSTEM_PROMPT + "\n" + ctx_str + "\nReturn STRICT JSON only (no markdown)."
-            payload = {
-                "model": model,
-                "prompt": prompt,
-                "images": [image_b64],
-                "stream": False,
-                "temperature": 0.2,
-                "options": {"num_predict": 512}
-            }
-            # Retry up to 2 times on transient failures
-            last_err: Optional[str] = None
-            r = None
-            for attempt in range(2):
-                try:
-                    r = requests.post(f"{OLLAMA_URL}/api/generate", json=payload, timeout=60)
-                    if r.ok:
-                        break
-                    last_err = r.text
-                except Exception as e:
-                    last_err = str(e)
-            if not r or not r.ok:
-                logger.error("Ollama response not OK: %s", last_err)
-                return None
-            out = r.json()
-            content = out.get("response") or ""
-            logger.info(f"Ollama raw content (trunc): {content[:200]}")
-            result = _parse_json_relaxed(content)
-            if result is None:
-                salvage = _salvage_from_content(content)
-                if salvage:
-                    logger.info("Used salvage parser for vision result")
-                    return salvage
-                logger.error("Failed to parse JSON from Ollama content after sanitation")
-                return None
+                r = requests.post(f"{OLLAMA_URL}/api/generate", json=payload, timeout=60)
+                if r.ok:
+                    break
+                last_err = r.text
+            except Exception as e:
+                last_err = str(e)
+        if not r or not r.ok:
+            logger.error("Ollama response not OK: %s", last_err)
+            return None
+        out = r.json()
+        content = out.get("response") or ""
+        logger.info(f"Ollama raw content (trunc): {content[:200]}")
+        result = _parse_json_relaxed(content)
+        if result is None:
+            salvage = _salvage_from_content(content)
+            if salvage:
+                logger.info("Used salvage parser for vision result")
+                return salvage
+            logger.error("Failed to parse JSON from Ollama content after sanitation")
+            return None
 
-            # Validate fields
-            label = str(result.get("type", "other")).strip().lower()
-            tags = result.get("tags") or []
-            if not isinstance(tags, list):
-                tags = []
-            tags = [str(t).lower()[:64] for t in tags][:25]
-            caption = str(result.get("caption", "")).strip()[:400]
-            confidence = result.get("confidence")
-            try:
-                confidence = float(confidence)
-            except Exception:
-                confidence = 0.0
+        # Validate fields
+        label = str(result.get("type", "other")).strip().lower()
+        tags = result.get("tags") or []
+        if not isinstance(tags, list):
+            tags = []
+        tags = [str(t).lower()[:64] for t in tags][:25]
+        caption = str(result.get("caption", "")).strip()[:400]
+        confidence = result.get("confidence")
+        try:
+            confidence = float(confidence)
+        except Exception:
+            confidence = 0.0
 
-            parsed = {
-                "label": label,
-                "tags": tags,
-                "caption": caption,
-                "vision_confidence": confidence,
-            }
-            logger.info(f"Parsed vision result: {parsed}")
-            return parsed
+        parsed = {
+            "label": label,
+            "tags": tags,
+            "caption": caption,
+            "vision_confidence": confidence,
+        }
+        logger.info(f"Parsed vision result: {parsed}")
+        return parsed
         
         # Provider is 'none' - no AI analysis
         return None
@@ -404,69 +404,69 @@ def analyze_text(text: str, filename: Optional[str] = None, model: str = None) -
                 logger.info(f"Model '{model}' not available locally. Skipping text analyzer.")
                 return None
 
-            name_part = f"Filename: {filename}\n" if filename else ""
-            snippet = (text or "").strip()
-            if len(snippet) > 5000:
-                snippet = snippet[:5000]
-            prompt = (
-                SYSTEM_PROMPT
-                + "\nClassify the following file content. Return STRICT JSON only.\n"
-                + name_part
-                + "Content snippet:\n" + snippet
-            )
-            payload = {
-                "model": model,
-                "prompt": prompt,
-                "stream": False,
-                "temperature": 0.2,
-                "options": {"num_predict": 512}
-            }
+        name_part = f"Filename: {filename}\n" if filename else ""
+        snippet = (text or "").strip()
+        if len(snippet) > 5000:
+            snippet = snippet[:5000]
+        prompt = (
+            SYSTEM_PROMPT
+            + "\nClassify the following file content. Return STRICT JSON only.\n"
+            + name_part
+            + "Content snippet:\n" + snippet
+        )
+        payload = {
+            "model": model,
+            "prompt": prompt,
+            "stream": False,
+            "temperature": 0.2,
+            "options": {"num_predict": 512}
+        }
 
-            last_err: Optional[str] = None
-            r = None
-            for _ in range(3):
-                try:
-                    r = requests.post(f"{OLLAMA_URL}/api/generate", json=payload, timeout=120)
-                    if r.ok:
-                        break
-                    last_err = r.text
-                except Exception as e:
-                    last_err = str(e)
-            if not r or not r.ok:
-                logger.error(f"Ollama text response not OK: {last_err}")
-                return None
-            out = r.json()
-            content = out.get("response") or ""
-            logger.info(f"Text LLM raw content (trunc): {content[:200]}")
-            result = _parse_json_relaxed(content)
-            if result is None:
-                salvage = _salvage_from_content(content)
-                if salvage:
-                    logger.info("Used salvage parser for text result")
-                    return salvage
-                logger.error("Failed to parse JSON from text LLM content after sanitation")
-                return None
-
-            label = str(result.get("type", "other")).strip().lower()
-            tags = result.get("tags") or []
-            if not isinstance(tags, list):
-                tags = []
-            tags = [str(t).lower()[:64] for t in tags][:25]
-            caption = str(result.get("caption", "")).strip()[:400]
-            confidence = result.get("confidence")
+        last_err: Optional[str] = None
+        r = None
+        for _ in range(3):
             try:
-                confidence = float(confidence)
-            except Exception:
-                confidence = 0.0
+                r = requests.post(f"{OLLAMA_URL}/api/generate", json=payload, timeout=120)
+                if r.ok:
+                    break
+                last_err = r.text
+            except Exception as e:
+                last_err = str(e)
+        if not r or not r.ok:
+            logger.error(f"Ollama text response not OK: {last_err}")
+            return None
+        out = r.json()
+        content = out.get("response") or ""
+        logger.info(f"Text LLM raw content (trunc): {content[:200]}")
+        result = _parse_json_relaxed(content)
+        if result is None:
+            salvage = _salvage_from_content(content)
+            if salvage:
+                logger.info("Used salvage parser for text result")
+                return salvage
+            logger.error("Failed to parse JSON from text LLM content after sanitation")
+            return None
 
-            parsed = {
-                "label": label,
-                "tags": tags,
-                "caption": caption,
-                "vision_confidence": confidence,
-            }
-            logger.info(f"Parsed text result: {parsed}")
-            return parsed
+        label = str(result.get("type", "other")).strip().lower()
+        tags = result.get("tags") or []
+        if not isinstance(tags, list):
+            tags = []
+        tags = [str(t).lower()[:64] for t in tags][:25]
+        caption = str(result.get("caption", "")).strip()[:400]
+        confidence = result.get("confidence")
+        try:
+            confidence = float(confidence)
+        except Exception:
+            confidence = 0.0
+
+        parsed = {
+            "label": label,
+            "tags": tags,
+            "caption": caption,
+            "vision_confidence": confidence,
+        }
+        logger.info(f"Parsed text result: {parsed}")
+        return parsed
         
         # Provider is 'none' - no AI analysis
         return None
@@ -572,19 +572,38 @@ def gpt_vision_fallback(image_b64: str, filename: Optional[str] = None) -> Optio
         user_content.append({"type": "image_url", "image_url": {"url": data_url}})
         
         messages = [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user_content},
+                {"role": "system", "content": system},
+                {"role": "user", "content": user_content},
         ]
         
         # Check if using subscription mode (Supabase proxy)
-        if settings.use_subscription_mode and settings.auth_access_token:
+        # ALWAYS prefer fresh token from live session (saved tokens may be expired)
+        from .supabase_client import supabase_auth
+        access_token = None
+        if supabase_auth.is_authenticated:
+            tokens = supabase_auth.get_session_tokens()
+            if tokens:
+                access_token = tokens.get('access_token', '')
+        # Only fall back to saved token if no live session
+        if not access_token:
+            access_token = settings.auth_access_token
+        
+        if settings.use_subscription_mode and access_token:
             try:
+                # Check usage limits first
+                can_use, limit_msg = supabase_auth.can_use_ai('image')
+                if not can_use:
+                    logger.warning(f"AI limit reached: {limit_msg}")
+                    return None
+                
                 from .api_client import get_api_client
                 client = get_api_client()
-                client.set_access_token(settings.auth_access_token)
+                client.set_access_token(access_token)
+                model = get_openai_vision_model()
+                logger.info(f"Using Supabase proxy for vision (model={model}, token present: {bool(access_token)})")
                 resp = client.vision_completion(
                     messages=messages,
-                    model=get_openai_vision_model(),
+                    model=model,
                     max_tokens=500,
                 )
                 content = resp.get("choices", [{}])[0].get("message", {}).get("content", "")
@@ -595,6 +614,7 @@ def gpt_vision_fallback(image_b64: str, filename: Optional[str] = None) -> Optio
                 logger.error(f"Supabase proxy error: {e}")
                 return None
         else:
+            logger.info(f"Using direct OpenAI (subscription_mode={settings.use_subscription_mode}, token={bool(access_token)})")
             # Direct OpenAI mode (user's own API key)
             api_key = os.environ.get("OPENAI_API_KEY")
             if not api_key or OpenAI is None:
@@ -663,94 +683,94 @@ def describe_image_detailed(image_path: Path, model: str = None) -> Optional[Dic
         if provider == 'local':
             if model is None:
                 model = get_detailed_vision_model()
-            if not _ollama_is_alive():
-                logger.warning("Ollama is not running at localhost:11434")
-                return None
-            if not _model_is_available(model):
-                logger.info(f"Detailed model '{model}' not available locally. Skipping detailed analyzer.")
-                return None
+        if not _ollama_is_alive():
+            logger.warning("Ollama is not running at localhost:11434")
+            return None
+        if not _model_is_available(model):
+            logger.info(f"Detailed model '{model}' not available locally. Skipping detailed analyzer.")
+            return None
 
-            image_b64 = _file_to_b64(image_path)
-            if not image_b64:
-                return None
+        image_b64 = _file_to_b64(image_path)
+        if not image_b64:
+            return None
 
-            width = height = None
+        width = height = None
+        try:
+            with Image.open(image_path) as im:
+                width, height = im.size
+        except Exception:
+            pass
+        aspect = round((width / height), 3) if width and height and height != 0 else None
+
+        ctx = []
+        if image_path.name:
+            ctx.append(f"filename: {image_path.name}")
+        if width and height:
+            ctx.append(f"dimensions: {width}x{height}, aspect={aspect}")
+        ctx_str = "\n".join(ctx)
+        prompt = DETAILED_SYSTEM_PROMPT + "\n" + ctx_str + "\nReturn STRICT JSON only."
+
+        payload = {
+            "model": model,
+            "prompt": prompt,
+            "images": [image_b64],
+            "stream": False,
+            "temperature": 0.2,
+            "options": {"num_predict": 1024}
+        }
+
+        last_err: Optional[str] = None
+        r = None
+        for _ in range(2):
             try:
-                with Image.open(image_path) as im:
-                    width, height = im.size
-            except Exception:
-                pass
-            aspect = round((width / height), 3) if width and height and height != 0 else None
+                r = requests.post(f"{OLLAMA_URL}/api/generate", json=payload, timeout=60)
+                if r.ok:
+                    break
+                last_err = r.text
+            except Exception as e:
+                last_err = str(e)
+        if not r or not r.ok:
+            logger.info("Skipping detailed vision: %s", last_err)
+            return None
 
-            ctx = []
-            if image_path.name:
-                ctx.append(f"filename: {image_path.name}")
-            if width and height:
-                ctx.append(f"dimensions: {width}x{height}, aspect={aspect}")
-            ctx_str = "\n".join(ctx)
-            prompt = DETAILED_SYSTEM_PROMPT + "\n" + ctx_str + "\nReturn STRICT JSON only."
+        content = r.json().get("response") or ""
+        logger.info(f"Detailed vision raw content (trunc): {content[:200]}")
+        data = _parse_json_relaxed(content)
+        if data is None:
+            salvage = _salvage_from_content(content)
+            if salvage:
+                logger.info("Used salvage parser for detailed vision result")
+                salvage.setdefault("label", salvage.get("type", "other"))
+                salvage.setdefault("caption", salvage.get("description", salvage.get("caption", "")))
+                salvage.setdefault("tags", salvage.get("tags", []))
+                return salvage
+            return None
 
-            payload = {
-                "model": model,
-                "prompt": prompt,
-                "images": [image_b64],
-                "stream": False,
-                "temperature": 0.2,
-                "options": {"num_predict": 1024}
-            }
+        label = str(data.get("type", "other")).strip().lower()
+        description = str(data.get("description", "")).strip()
+        caption = description[:1200]
+        tags = data.get("tags") or []
+        if not isinstance(tags, list):
+            tags = []
+        tags = [str(t).lower()[:64] for t in tags][:25]
+        try:
+            confidence = float(data.get("confidence", 0.0))
+        except Exception:
+            confidence = 0.0
 
-            last_err: Optional[str] = None
-            r = None
-            for _ in range(2):
-                try:
-                    r = requests.post(f"{OLLAMA_URL}/api/generate", json=payload, timeout=60)
-                    if r.ok:
-                        break
-                    last_err = r.text
-                except Exception as e:
-                    last_err = str(e)
-            if not r or not r.ok:
-                logger.info("Skipping detailed vision: %s", last_err)
-                return None
-
-            content = r.json().get("response") or ""
-            logger.info(f"Detailed vision raw content (trunc): {content[:200]}")
-            data = _parse_json_relaxed(content)
-            if data is None:
-                salvage = _salvage_from_content(content)
-                if salvage:
-                    logger.info("Used salvage parser for detailed vision result")
-                    salvage.setdefault("label", salvage.get("type", "other"))
-                    salvage.setdefault("caption", salvage.get("description", salvage.get("caption", "")))
-                    salvage.setdefault("tags", salvage.get("tags", []))
-                    return salvage
-                return None
-
-            label = str(data.get("type", "other")).strip().lower()
-            description = str(data.get("description", "")).strip()
-            caption = description[:1200]
-            tags = data.get("tags") or []
-            if not isinstance(tags, list):
-                tags = []
-            tags = [str(t).lower()[:64] for t in tags][:25]
-            try:
-                confidence = float(data.get("confidence", 0.0))
-            except Exception:
-                confidence = 0.0
-
-            result: Dict[str, Any] = {
-                "label": label,
-                "tags": tags,
-                "caption": caption,
-                "vision_confidence": confidence,
-                "type": data.get("type"),
-                "detected_text": data.get("detected_text"),
-                "purpose": data.get("purpose"),
-                "suggested_filename": data.get("suggested_filename"),
-                "description": description,
-            }
-            logger.info(f"Detailed vision result: {{'label': {label}, 'len(caption)': {len(caption)}, 'tags': {len(tags)}}}")
-            return result
+        result: Dict[str, Any] = {
+            "label": label,
+            "tags": tags,
+            "caption": caption,
+            "vision_confidence": confidence,
+            "type": data.get("type"),
+            "detected_text": data.get("detected_text"),
+            "purpose": data.get("purpose"),
+            "suggested_filename": data.get("suggested_filename"),
+            "description": description,
+        }
+        logger.info(f"Detailed vision result: {{'label': {label}, 'len(caption)': {len(caption)}, 'tags': {len(tags)}}}")
+        return result
         
         # Provider is 'none' - no AI analysis
         return None

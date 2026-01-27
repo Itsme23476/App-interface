@@ -55,8 +55,8 @@ QMainWindow, QDialog {
 
 /* ==================== Sidebar ==================== */
 #sidebar {
-    background-color: #FAFBFC;
-    border-right: 1px solid #E8E8E8;
+    background-color: #1A1A1A;
+    border-right: 1px solid #2A2A2A;
 }
 
 #logoContainer {
@@ -72,7 +72,7 @@ QMainWindow, QDialog {
 #logoText {
     font-size: 20px;
     font-weight: 700;
-    color: #1A1A1A;
+    color: #FFFFFF;
     background: transparent;
     letter-spacing: -0.5px;
 }
@@ -88,18 +88,18 @@ QMainWindow, QDialog {
     border-radius: 0px;
     text-align: left;
     padding: 14px 16px;
-    color: #666666;
+    color: #AAAAAA;
     font-size: 14px;
     font-weight: 500;
 }
 
 #navButton:hover {
-    background-color: rgba(124, 77, 255, 0.05);
-    color: #4A4A4A;
+    background-color: rgba(124, 77, 255, 0.10);
+    color: #DDDDDD;
 }
 
 #navButton:checked {
-    background-color: rgba(124, 77, 255, 0.08);
+    background-color: rgba(124, 77, 255, 0.15);
     border-left: 3px solid #7C4DFF;
     color: #7C4DFF;
     font-weight: 600;
@@ -107,10 +107,20 @@ QMainWindow, QDialog {
 
 #accountContainer {
     background-color: rgba(124, 77, 255, 0.08);
-    border-top: 1px solid rgba(255, 255, 255, 0.1);
+    border: 1px solid rgba(124, 77, 255, 0.15);
     border-radius: 12px;
     margin: 8px;
-    padding: 4px;
+    padding: 0px;
+    text-align: left;
+}
+
+#accountContainer:hover {
+    background-color: rgba(124, 77, 255, 0.15);
+    border: 1px solid rgba(124, 77, 255, 0.25);
+}
+
+#accountContainer:pressed {
+    background-color: rgba(124, 77, 255, 0.20);
 }
 
 #avatarCircle {
@@ -121,18 +131,26 @@ QMainWindow, QDialog {
     border-radius: 20px;
 }
 
+#accountInfo {
+    background: transparent;
+}
+
 #accountName {
     color: #FFFFFF;
     font-size: 13px;
     font-weight: 600;
     background: transparent;
+    padding: 0px;
+    margin: 0px;
 }
 
 #accountPlan {
-    color: rgba(255, 255, 255, 0.6);
+    color: #7C4DFF;
     font-size: 11px;
     font-weight: 500;
     background: transparent;
+    padding: 0px;
+    margin: 0px;
 }
 
 /* ==================== Search Page - Hero Section ==================== */
@@ -1314,6 +1332,17 @@ QToolTip {
     border-radius: 16px;
 }
 
+#trialBadge {
+    color: #10B981;
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 1px;
+    background: rgba(16, 185, 129, 0.15);
+    border-radius: 20px;
+    padding: 8px 20px;
+    margin-bottom: 8px;
+}
+
 #planBadge {
     color: #7C4DFF;
     font-size: 11px;
@@ -1322,6 +1351,14 @@ QToolTip {
     background: rgba(124, 77, 255, 0.15);
     border-radius: 20px;
     padding: 6px 16px;
+}
+
+#trialInfo {
+    color: #10B981;
+    font-size: 12px;
+    font-weight: 500;
+    background: transparent;
+    margin-top: -8px;
 }
 
 #priceAmount {

@@ -5,7 +5,7 @@ Update this file when releasing a new version.
 """
 
 # Current version - update this for each release
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 
 # Version as tuple for comparison
 VERSION_TUPLE = tuple(int(x) for x in VERSION.split("."))

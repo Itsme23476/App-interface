@@ -27,7 +27,7 @@ class AuthDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("File Search Assistant")
-        self.setFixedSize(460, 680)
+        self.setFixedSize(520, 820)  # Taller to fit trial info and features
         self.setWindowFlags(Qt.Dialog | Qt.WindowCloseButtonHint)
         self.setModal(True)
         self.setObjectName("authDialog")
@@ -53,7 +53,7 @@ class AuthDialog(QDialog):
         self.container = QFrame()
         self.container.setObjectName("authContainer")
         container_layout = QVBoxLayout(self.container)
-        container_layout.setContentsMargins(48, 40, 48, 40)
+        container_layout.setContentsMargins(40, 36, 40, 36)  # Slightly smaller margins
         container_layout.setSpacing(0)
         
         # Header with logo
@@ -264,6 +264,8 @@ class AuthDialog(QDialog):
         self.welcome_label = QLabel("Welcome!")
         self.welcome_label.setObjectName("authWelcome")
         self.welcome_label.setAlignment(Qt.AlignCenter)
+        self.welcome_label.setWordWrap(True)  # Allow wrap for long names
+        self.welcome_label.setMinimumWidth(300)  # Ensure readable width
         layout.addWidget(self.welcome_label)
         
         layout.addSpacing(8)
@@ -271,9 +273,16 @@ class AuthDialog(QDialog):
         # Subscription card
         sub_card = QFrame()
         sub_card.setObjectName("subscriptionCard")
+        sub_card.setMinimumHeight(340)  # Ensure card is tall enough for all content
         card_layout = QVBoxLayout(sub_card)
-        card_layout.setContentsMargins(24, 24, 24, 24)
-        card_layout.setSpacing(16)
+        card_layout.setContentsMargins(20, 16, 20, 16)
+        card_layout.setSpacing(8)  # Tighter spacing
+        
+        # Free trial badge
+        trial_badge = QLabel("✨ 10-DAY FREE TRIAL ✨")
+        trial_badge.setObjectName("trialBadge")
+        trial_badge.setAlignment(Qt.AlignCenter)
+        card_layout.addWidget(trial_badge)
         
         # Plan badge
         plan_badge = QLabel("PRO PLAN")
@@ -286,7 +295,7 @@ class AuthDialog(QDialog):
         price_layout.setAlignment(Qt.AlignCenter)
         price_layout.setSpacing(4)
         
-        price_amount = QLabel("$12")
+        price_amount = QLabel("$15")
         price_amount.setObjectName("priceAmount")
         price_period = QLabel("/ month")
         price_period.setObjectName("pricePeriod")
@@ -294,6 +303,12 @@ class AuthDialog(QDialog):
         price_layout.addWidget(price_amount)
         price_layout.addWidget(price_period)
         card_layout.addLayout(price_layout)
+        
+        # Trial info
+        trial_info = QLabel("Start free, cancel anytime")
+        trial_info.setObjectName("trialInfo")
+        trial_info.setAlignment(Qt.AlignCenter)
+        card_layout.addWidget(trial_info)
         
         # Features
         features = [
@@ -306,8 +321,8 @@ class AuthDialog(QDialog):
         features_container = QWidget()
         features_container.setObjectName("featuresContainer")
         features_layout = QVBoxLayout(features_container)
-        features_layout.setContentsMargins(0, 8, 0, 0)
-        features_layout.setSpacing(10)
+        features_layout.setContentsMargins(0, 4, 0, 0)
+        features_layout.setSpacing(6)  # Tighter feature spacing
         
         for feature in features:
             feat_label = QLabel(feature)
@@ -320,11 +335,18 @@ class AuthDialog(QDialog):
         layout.addSpacing(16)
         
         # Subscribe button
-        self.subscribe_button = QPushButton("Subscribe Now")
+        self.subscribe_button = QPushButton("Start Free Trial")
         self.subscribe_button.setObjectName("primaryButton")
         self.subscribe_button.setMinimumHeight(52)
         self.subscribe_button.setCursor(Qt.PointingHandCursor)
         layout.addWidget(self.subscribe_button)
+        
+        # Cancel waiting button (hidden by default)
+        self.cancel_wait_button = QPushButton("Cancel / Try Again")
+        self.cancel_wait_button.setObjectName("linkButton")
+        self.cancel_wait_button.setCursor(Qt.PointingHandCursor)
+        self.cancel_wait_button.hide()  # Hidden until waiting starts
+        layout.addWidget(self.cancel_wait_button, alignment=Qt.AlignCenter)
         
         # Status label
         self.sub_status = QLabel("")
@@ -358,6 +380,7 @@ class AuthDialog(QDialog):
         
         # Subscribe page
         self.subscribe_button.clicked.connect(self._open_checkout)
+        self.cancel_wait_button.clicked.connect(self._cancel_waiting)
         self.logout_button.clicked.connect(self._do_logout)
     
     def _go_to_signup(self):
@@ -382,6 +405,15 @@ class AuthDialog(QDialog):
             
             if result.get('success'):
                 logger.info("Session restored successfully")
+                # Update settings with fresh tokens from restored session
+                tokens = supabase_auth.get_session_tokens()
+                if tokens:
+                    settings.set_auth_tokens(
+                        tokens['access_token'],
+                        tokens['refresh_token'],
+                        settings.auth_user_email
+                    )
+                    logger.info("Tokens refreshed after session restore")
                 self._check_subscription_silent()
             else:
                 settings.clear_auth_tokens()
@@ -485,15 +517,25 @@ class AuthDialog(QDialog):
         success = supabase_auth.open_checkout()
         
         if success:
-            self.sub_status.setText("Waiting for payment confirmation...")
+            self.sub_status.setText("Complete checkout in your browser...")
             self.subscribe_button.setEnabled(False)
             self.subscribe_button.setText("Waiting...")
+            self.cancel_wait_button.show()  # Show cancel option
             # Start polling
             self._poll_count = 0
             self._poll_timer.start(3000)
         else:
             self.sub_status.setText("Failed to open checkout. Try again.")
             self.sub_status.setObjectName("errorLabel")
+    
+    def _cancel_waiting(self):
+        """Cancel the payment waiting and reset UI."""
+        self._poll_timer.stop()
+        self.subscribe_button.setEnabled(True)
+        self.subscribe_button.setText("Start Free Trial")
+        self.cancel_wait_button.hide()
+        self.sub_status.setText("Checkout cancelled. Click to try again.")
+        self.sub_status.setObjectName("statusLabel")
     
     def _poll_subscription(self):
         """Poll for subscription status after checkout."""
@@ -503,8 +545,9 @@ class AuthDialog(QDialog):
         if self._poll_count > 100:
             self._poll_timer.stop()
             self.subscribe_button.setEnabled(True)
-            self.subscribe_button.setText("Subscribe Now")
-            self.sub_status.setText("Auto-check timed out. Click 'Subscribe Now' to try again.")
+            self.subscribe_button.setText("Start Free Trial")
+            self.cancel_wait_button.hide()
+            self.sub_status.setText("Timed out. Click to try again.")
             return
         
         # Update status
@@ -517,6 +560,7 @@ class AuthDialog(QDialog):
         
         if result.get('has_subscription'):
             self._poll_timer.stop()
+            self.cancel_wait_button.hide()
             self.sub_status.setText("Payment confirmed! 🎉")
             logger.info("Subscription verified!")
             QTimer.singleShot(500, lambda: (self.auth_successful.emit(), self.accept()))

@@ -11,7 +11,7 @@
 ; To change version: Update AppVersion below
 
 #define MyAppName "AI File Organizer"
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "1.1.0"
 #define MyAppPublisher "Your Company Name"
 #define MyAppURL "https://yourwebsite.com"
 #define MyAppExeName "AI File Organizer.exe"
@@ -35,6 +35,7 @@ DisableProgramGroupPage=yes
 ; Output settings
 OutputDir=Output
 OutputBaseFilename=AI_File_Organizer_Setup_v{#MyAppVersion}
+SetupIconFile=resources\icon.ico
 Compression=lzma2/ultra64
 SolidCompression=yes
 
@@ -66,10 +67,10 @@ Source: "dist\{#MyAppName}\*"; DestDir: "{app}"; Flags: ignoreversion recursesub
 
 [Icons]
 ; Start Menu shortcut
-Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
+Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\{#MyAppExeName}"
 
 ; Desktop shortcut (if user selected it)
-Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
+Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 
 [Run]
 ; Option to launch after install

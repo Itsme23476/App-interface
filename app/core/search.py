@@ -67,7 +67,7 @@ class SearchService:
     def _process_single_file(self, file_data: Dict, directory_path: Path, force_ai: bool = False) -> Dict[str, Any]:
         """
         Process a single file with AI analysis. Called in parallel.
-        
+            
         Returns:
             Dictionary with file metadata and AI analysis results
         """
@@ -80,7 +80,7 @@ class SearchService:
             
             # Get basic metadata
             full_metadata = get_file_metadata(file_path)
-            
+
             # Compute content hash
             try:
                 h = hashlib.sha256()
@@ -90,10 +90,10 @@ class SearchService:
                 full_metadata['content_hash'] = h.hexdigest()
             except Exception:
                 full_metadata['content_hash'] = None
-            
+
             full_metadata['last_indexed_at'] = datetime.utcnow().isoformat()
             full_metadata['source_path'] = str(file_path)
-            
+
             # Check if file already indexed with same content hash - skip AI analysis (unless forced)
             existing = self.index.get_file_by_path(str(file_path))
             if (not force_ai) and existing and existing.get('content_hash') == full_metadata.get('content_hash'):
@@ -109,10 +109,7 @@ class SearchService:
             if not self._wait_if_paused():
                 return {'_file_path': file_path, '_cancelled': True, **full_metadata}
             
-            # AI Analysis - Different providers for different file types:
-            # - Images/PDFs: OpenAI GPT-4o-mini (most cost-effective for vision)
-            # - Video/Audio: OpenAI (keyframe extraction + Whisper transcription)
-            # - Other files: OpenAI GPT-4o-mini for text analysis
+            # AI Analysis - Different providers for different file types
             ext = file_path.suffix.lower()
             image_extensions = {'.png', '.jpg', '.jpeg', '.bmp', '.tiff', '.tif', '.gif', '.webp', '.avif', '.heic', '.heif', '.ico', '.raw', '.cr2', '.nef', '.arw', '.pdf'}
             
@@ -123,7 +120,6 @@ class SearchService:
                     full_metadata.update(video_result)
                     logger.info(f"OpenAI video analysis complete: {file_path.name}")
                 else:
-                    # Fallback: just categorize by extension without AI
                     full_metadata['label'] = 'video'
                     full_metadata['tags'] = ['video', ext.replace('.', '')]
                     full_metadata['caption'] = f'Video file: {file_path.name}'
@@ -136,15 +132,13 @@ class SearchService:
                     full_metadata.update(audio_result)
                     logger.info(f"OpenAI audio analysis complete: {file_path.name}")
                 else:
-                    # Fallback: just categorize by extension without AI
                     full_metadata['label'] = 'audio'
                     full_metadata['tags'] = ['audio', ext.replace('.', '')]
                     full_metadata['caption'] = f'Audio file: {file_path.name}'
                     logger.warning(f"Audio analysis failed, using basic metadata: {file_path.name}")
             
-            # Handle images/PDFs with OpenAI
+            # Handle images/PDFs with OpenAI vision
             elif ext in image_extensions:
-                # Image/PDF: Use vision model
                 if settings.ai_provider == 'openai':
                     from .vision import _file_to_b64
                     image_b64 = _file_to_b64(file_path)
@@ -152,7 +146,7 @@ class SearchService:
                         gptv = gpt_vision_fallback(image_b64, filename=file_path.name)
                         if gptv:
                             full_metadata.update(gptv)
-                            full_metadata['ai_source'] = 'openai:gpt-4o'
+                            full_metadata['ai_source'] = 'openai:gpt-4o-mini'
                 else:
                     # Local models path
                     use_detailed = os.environ.get('USE_DETAILED_VISION', '1').strip() not in {'0', 'false', 'no'}
@@ -169,11 +163,12 @@ class SearchService:
                             gptv = gpt_vision_fallback(image_b64, filename=file_path.name)
                             if gptv:
                                 vision = gptv
-                                full_metadata['ai_source'] = 'openai:'
+                                full_metadata['ai_source'] = 'openai:gpt-4o-mini'
                     if vision:
                         full_metadata.update(vision)
                         if 'ai_source' not in full_metadata:
                             full_metadata['ai_source'] = 'ollama:local'
+            
             else:
                 # Non-image: Extract text and analyze
                 snippet = ""
@@ -194,10 +189,10 @@ class SearchService:
                     tvision = analyze_text(snippet, filename=file_path.name)
                     if tvision:
                         full_metadata.update(tvision)
-                        if settings.ai_provider == 'openai':
-                            full_metadata['ai_source'] = 'openai:gpt-4o-mini'
-                        else:
-                            full_metadata['ai_source'] = 'ollama:qwen2.5vl'
+                    if settings.ai_provider == 'openai':
+                        full_metadata['ai_source'] = 'openai:gpt-4o-mini'
+                    else:
+                        full_metadata['ai_source'] = 'ollama:qwen2.5vl'
             
             full_metadata['_file_path'] = file_path
             return full_metadata
@@ -472,10 +467,7 @@ class SearchService:
             is_date_only = not query.strip() and (date_start or date_end)
             
             # Parse and prepare query
-            if query.strip():
-                fts_terms, filters, debug_info = self._prepare_query(query)
-            else:
-                fts_terms, filters, debug_info = [], {}, "Date/filter-only search"
+            fts_terms, filters, debug_info = self._prepare_query(query) if query.strip() else ([], {}, "Date/filter-only search")
             self.last_debug_info = debug_info
 
             # Perform keyword search (FTS + LIKE fallback) - fetch more to allow for filtering

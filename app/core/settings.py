@@ -50,7 +50,8 @@ class Settings:
         self.auth_user_email: str = ''
         # Subscription mode: when True, routes API calls through Supabase (user pays subscription)
         # When False, user provides their own OpenAI API key
-        self.use_subscription_mode: bool = False
+        # Default to True since app now uses subscription-based access
+        self.use_subscription_mode: bool = True
         # Load persisted config if available
         try:
             self._load_config()
@@ -144,7 +145,7 @@ class Settings:
         self._save_config()
 
     def set_openai_vision_model(self, model: str) -> None:
-        model = (model or '').strip() or 'gpt-4o'
+        model = (model or '').strip() or 'gpt-4o-mini'
         self.openai_vision_model = model
         os.environ['OPENAI_VISION_MODEL'] = model
         self._save_config()
@@ -189,7 +190,11 @@ class Settings:
             os.environ['OPENAI_API_KEY'] = self.openai_api_key
         m = data.get('openai_vision_model')
         if isinstance(m, str) and m.strip():
-            self.openai_vision_model = m.strip()
+            loaded_model = m.strip()
+            # Force cost-effective model - migrate from gpt-4o to gpt-4o-mini
+            if loaded_model == 'gpt-4o':
+                loaded_model = 'gpt-4o-mini'
+            self.openai_vision_model = loaded_model
             os.environ['OPENAI_VISION_MODEL'] = self.openai_vision_model
         sm = data.get('openai_search_model')
         if isinstance(sm, str) and sm.strip():
@@ -237,8 +242,8 @@ class Settings:
         self.auth_access_token = data.get('auth_access_token', '')
         self.auth_refresh_token = data.get('auth_refresh_token', '')
         self.auth_user_email = data.get('auth_user_email', '')
-        # Subscription mode
-        self.use_subscription_mode = bool(data.get('use_subscription_mode', False))
+        # Subscription mode - ALWAYS True for subscription-based app (ignore saved value)
+        self.use_subscription_mode = True
 
     def _save_config(self) -> None:
         cfg = {

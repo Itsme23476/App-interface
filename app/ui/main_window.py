@@ -285,12 +285,29 @@ class MainWindow(QMainWindow):
         # Check for updates in background
         QTimer.singleShot(2000, self._check_for_updates)
         
+        # Periodic subscription check (every 30 minutes) - non-blocking
+        self._subscription_check_timer = QTimer(self)
+        self._subscription_check_timer.timeout.connect(self._periodic_subscription_check)
+        self._subscription_check_timer.start(30 * 60 * 1000)  # 30 minutes
+        
         logger.info("Main window initialized")
     
     def setup_ui(self):
         """Setup the user interface with modern sidebar navigation."""
         self.setWindowTitle("Lumina - File Search Assistant")
         self.setMinimumSize(1200, 800)
+        
+        # Set window icon
+        icon_paths = [
+            os.path.join(os.path.dirname(__file__), '..', '..', 'resources', 'icon.ico'),
+            os.path.join(os.path.dirname(__file__), '..', '..', 'resources', 'logo.png.png'),
+            'resources/icon.ico',
+            'resources/logo.png.png',
+        ]
+        for icon_path in icon_paths:
+            if os.path.exists(icon_path):
+                self.setWindowIcon(QIcon(icon_path))
+                break
         
         # Central widget
         central_widget = QWidget()
@@ -328,8 +345,10 @@ class MainWindow(QMainWindow):
         self.setStatusBar(self.status_bar)
         self.status_bar.showMessage("Ready")
         
-        # Refresh account info after all UI is built
+        # Refresh account info after all UI is built (delay to allow session restore)
         self._refresh_account_info()
+        # Also refresh after a short delay to catch session restoration
+        QTimer.singleShot(2000, self._refresh_account_info)
     
     def setup_sidebar(self):
         """Setup the left sidebar with navigation and account section."""
@@ -342,9 +361,37 @@ class MainWindow(QMainWindow):
         logo_container.setObjectName("logoContainer")
         logo_layout = QHBoxLayout(logo_container)
         logo_layout.setContentsMargins(20, 20, 20, 16)
+        logo_layout.setSpacing(10)
         
-        logo_icon = QLabel("✦")
+        # Try to load the app logo image
+        logo_icon = QLabel()
         logo_icon.setObjectName("logoIcon")
+        logo_icon.setFixedSize(32, 32)
+        
+        # Look for logo in resources folder
+        logo_paths = [
+            os.path.join(os.path.dirname(__file__), '..', '..', 'resources', 'logo.png.png'),
+            os.path.join(os.path.dirname(__file__), '..', '..', 'resources', 'logo.png'),
+            'resources/logo.png.png',
+            'resources/logo.png',
+        ]
+        
+        logo_loaded = False
+        for logo_path in logo_paths:
+            if os.path.exists(logo_path):
+                from PySide6.QtGui import QPixmap
+                pixmap = QPixmap(logo_path)
+                if not pixmap.isNull():
+                    scaled = pixmap.scaled(32, 32, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                    logo_icon.setPixmap(scaled)
+                    logo_loaded = True
+                    break
+        
+        if not logo_loaded:
+            # Fallback to text icon
+            logo_icon.setText("✦")
+            logo_icon.setAlignment(Qt.AlignCenter)
+        
         logo_layout.addWidget(logo_icon)
         
         logo_text = QLabel("Lumina")
@@ -384,40 +431,50 @@ class MainWindow(QMainWindow):
         nav_layout.addStretch()
         sidebar_layout.addWidget(nav_container, 1)  # Takes remaining space
         
-        # Account section at bottom
-        account_container = QWidget()
+        # Account section at bottom (clickable to go to Settings/Account)
+        account_container = QPushButton()
         account_container.setObjectName("accountContainer")
-        account_layout = QHBoxLayout(account_container)
-        account_layout.setContentsMargins(16, 12, 16, 16)
-        account_layout.setSpacing(12)
+        account_container.setCursor(Qt.PointingHandCursor)
+        account_container.clicked.connect(lambda: self._on_nav_clicked(2))  # Navigate to Settings
+        account_container.setFlat(True)
+        account_container.setMinimumHeight(64)
+        account_container_layout = QHBoxLayout(account_container)
+        account_container_layout.setContentsMargins(12, 10, 12, 10)
+        account_container_layout.setSpacing(10)
         
         # Avatar circle with initials
         self.avatar_label = QLabel("?")
         self.avatar_label.setObjectName("avatarCircle")
         self.avatar_label.setFixedSize(40, 40)
         self.avatar_label.setAlignment(Qt.AlignCenter)
-        account_layout.addWidget(self.avatar_label)
+        account_container_layout.addWidget(self.avatar_label)
         
         # Name and plan info
         info_container = QWidget()
+        info_container.setObjectName("accountInfo")
         info_layout = QVBoxLayout(info_container)
         info_layout.setContentsMargins(0, 0, 0, 0)
-        info_layout.setSpacing(2)
+        info_layout.setSpacing(4)
         
         self.account_name_label = QLabel("Not logged in")
         self.account_name_label.setObjectName("accountName")
+        self.account_name_label.setFixedHeight(18)
         info_layout.addWidget(self.account_name_label)
         
         self.account_plan_label = QLabel("Free Plan")
         self.account_plan_label.setObjectName("accountPlan")
+        self.account_plan_label.setFixedHeight(16)
         info_layout.addWidget(self.account_plan_label)
         
-        account_layout.addWidget(info_container, 1)
+        account_container_layout.addWidget(info_container, 1)
         sidebar_layout.addWidget(account_container)
     
     def _on_nav_clicked(self, index: int):
         """Handle navigation button clicks."""
         self.page_stack.setCurrentIndex(index)
+        # Also update the nav button selection
+        if 0 <= index < len(self.nav_buttons):
+            self.nav_buttons[index].setChecked(True)
     
     def setup_organize_tab(self):
         """Setup the file organization tab."""
@@ -1437,8 +1494,8 @@ class MainWindow(QMainWindow):
         self.openai_model_combo.setMinimumWidth(200)
         # Pre-populate common vision-capable models
         model_options = [
-            "gpt-4o",
             "gpt-4o-mini",
+            "gpt-4o",
             "gpt-4.1",
             "gpt-4.1-mini",
             "gpt-4.1-nano",
@@ -1470,6 +1527,8 @@ class MainWindow(QMainWindow):
         # Update visibility based on current selection
         self._update_ai_provider_visibility()
 
+        # Hide AI settings - API is handled by subscription backend
+        ai_group.setVisible(False)
         layout.addWidget(ai_group)
         
         # Legacy checkbox removed - using ai_provider dropdown now
@@ -1576,12 +1635,26 @@ class MainWindow(QMainWindow):
         sub_row.addStretch()
         account_layout.addLayout(sub_row)
         
+        # AI Usage quota
+        usage_row = QHBoxLayout()
+        usage_row.addWidget(QLabel("AI Analyses:"))
+        self.account_usage_label = QLabel("— remaining")
+        self.account_usage_label.setObjectName("secondaryLabel")
+        usage_row.addWidget(self.account_usage_label)
+        usage_row.addStretch()
+        account_layout.addLayout(usage_row)
+        
         # Buttons row
         button_row = QHBoxLayout()
         self.refresh_account_btn = QPushButton("Refresh Account Info")
         self.refresh_account_btn.setMinimumWidth(160)
         self.refresh_account_btn.clicked.connect(self._refresh_account_info)
         button_row.addWidget(self.refresh_account_btn)
+        
+        self.manage_subscription_btn = QPushButton("Manage Subscription")
+        self.manage_subscription_btn.setMinimumWidth(160)
+        self.manage_subscription_btn.clicked.connect(self._open_subscription_portal)
+        button_row.addWidget(self.manage_subscription_btn)
         
         self.signout_btn = QPushButton("Sign Out")
         self.signout_btn.setMinimumWidth(100)
@@ -1654,6 +1727,21 @@ class MainWindow(QMainWindow):
                     self.account_sub_label.setStyleSheet("color: #7C4DFF;")
                     self.account_plan_label.setText("Pro Plan ✓")
                     self.account_plan_label.setStyleSheet("color: #7C4DFF; font-weight: 500;")
+                    
+                    # Update usage quota with plan info
+                    usage = supabase_auth.get_monthly_usage()
+                    remaining = usage.get('remaining', 1000)
+                    total_limit = usage.get('total_limit', 1000)
+                    plan = usage.get('plan', 'standard')
+                    plan_label = "Ultra" if plan == 'ultra' else "Standard"
+                    
+                    self.account_usage_label.setText(f"{remaining}/{total_limit} remaining ({plan_label})")
+                    if remaining < total_limit * 0.1:  # Less than 10% remaining
+                        self.account_usage_label.setStyleSheet("color: #FF6B6B;")
+                    elif plan == 'ultra':
+                        self.account_usage_label.setStyleSheet("color: #FFD700;")  # Gold for Ultra
+                    else:
+                        self.account_usage_label.setStyleSheet("color: #7C4DFF;")
                 else:
                     status = result.get('status')
                     if status:
@@ -1663,11 +1751,15 @@ class MainWindow(QMainWindow):
                     self.account_sub_label.setStyleSheet("color: #FF6B6B;")
                     self.account_plan_label.setText("Free Plan")
                     self.account_plan_label.setStyleSheet("")
+                    self.account_usage_label.setText("Subscribe for AI features")
+                    self.account_usage_label.setStyleSheet("")
             else:
                 logger.info("[ACCOUNT] User not authenticated")
                 self.account_email_label.setText("Not logged in")
                 self.account_sub_label.setText("No subscription")
                 self.account_sub_label.setStyleSheet("")
+                self.account_usage_label.setText("—")
+                self.account_usage_label.setStyleSheet("")
                 # Update sidebar
                 self.account_name_label.setText("Guest")
                 self.account_plan_label.setText("Sign in to continue")
@@ -1675,6 +1767,99 @@ class MainWindow(QMainWindow):
                 self.avatar_label.setText("?")
         except Exception as e:
             logger.error(f"[ACCOUNT] Error refreshing account info: {e}")
+    
+    def _check_and_show_limit_popup(self):
+        """Check if AI limit was reached and show appropriate popup to the user."""
+        limit_reached, message = supabase_auth.check_and_clear_limit_flag()
+        if limit_reached:
+            # Check if user is already on Ultra
+            current_plan = supabase_auth.get_current_plan()
+            
+            if current_plan == 'ultra':
+                # Already on Ultra - just inform them
+                QMessageBox.information(
+                    self,
+                    "Monthly Limit Reached",
+                    "You've used all 5,000 AI analyses this month.\n\n"
+                    "Your limit will reset at the start of next month.\n"
+                    "Contact support if you need a higher limit."
+                )
+            else:
+                # Standard plan - offer upgrade to Ultra
+                msg_box = QMessageBox(self)
+                msg_box.setWindowTitle("Upgrade to Ultra")
+                msg_box.setIcon(QMessageBox.Information)
+                msg_box.setText("You've reached your monthly limit! 🎉")
+                msg_box.setInformativeText(
+                    "You've used all 1,000 AI analyses this month.\n\n"
+                    "💎 Upgrade to Ultra for just $49/month:\n"
+                    "   • 5,000 AI analyses per month\n"
+                    "   • 5x more power, only 3x the price\n"
+                    "   • Perfect for power users"
+                )
+                upgrade_btn = msg_box.addButton("Upgrade to Ultra", QMessageBox.AcceptRole)
+                msg_box.addButton("Maybe Later", QMessageBox.RejectRole)
+                msg_box.exec()
+                
+                if msg_box.clickedButton() == upgrade_btn:
+                    self._open_ultra_upgrade()
+    
+    def _open_ultra_upgrade(self):
+        """Open Stripe checkout for Ultra plan."""
+        import webbrowser
+        # Ultra plan payment link - $49/month for 5000 analyses
+        # TODO: Replace with actual Stripe payment link after creating Ultra product
+        ultra_payment_link = "https://buy.stripe.com/00w00ifFPbEX9u19Cg9IQ0b"
+        webbrowser.open(ultra_payment_link)
+        self.status_bar.showMessage("Opening Ultra upgrade page in browser...", 5000)
+    
+    def _open_subscription_portal(self):
+        """Open Stripe Customer Portal for subscription management."""
+        if not supabase_auth.is_authenticated:
+            QMessageBox.warning(
+                self,
+                "Not Signed In",
+                "Please sign in to manage your subscription."
+            )
+            return
+        
+        success, message = supabase_auth.open_customer_portal()
+        
+        if success:
+            self.status_bar.showMessage("Opening subscription portal in browser...", 5000)
+        else:
+            QMessageBox.warning(
+                self,
+                "Subscription Portal",
+                message
+            )
+    
+    def _periodic_subscription_check(self):
+        """Periodically verify subscription is still valid (runs every 30 min)."""
+        if not supabase_auth.is_authenticated:
+            return
+        
+        try:
+            result = supabase_auth.check_subscription()
+            
+            if not result.get('has_subscription'):
+                status = result.get('status', 'expired')
+                logger.warning(f"Subscription no longer valid: {status}")
+                
+                # Stop the timer
+                self._subscription_check_timer.stop()
+                
+                # Show warning and sign out
+                QMessageBox.warning(
+                    self,
+                    "Subscription Expired",
+                    "Your subscription has expired or been cancelled.\n\n"
+                    "Please renew your subscription to continue using the app."
+                )
+                self._sign_out()
+        except Exception as e:
+            # Don't interrupt user for network errors, just log
+            logger.debug(f"Periodic subscription check failed: {e}")
     
     def _sign_out(self):
         """Sign out the current user and show login dialog."""
@@ -3815,6 +4000,10 @@ Move Plan Summary:
             self.update_search_statistics(stats)
             self.search_button.setEnabled(True)
             self.refresh_debug_view()
+            # Refresh account info to update AI usage count
+            self._refresh_account_info()
+            # Check if AI limit was reached during indexing
+            self._check_and_show_limit_popup()
             return
         
         # Update search statistics
@@ -3841,6 +4030,12 @@ Move Plan Summary:
         # Update info label
         if hasattr(self, 'debug_info_label'):
             self.debug_info_label.setText(f"Showing {indexed_count} indexed files")
+        
+        # Refresh account info to update AI usage count
+        self._refresh_account_info()
+        
+        # Check if AI limit was reached during indexing
+        self._check_and_show_limit_popup()
     
     def on_index_error(self, error: str):
         """Handle index error."""
