@@ -1,12 +1,19 @@
 # -*- mode: python ; coding: utf-8 -*-
+from PyInstaller.utils.hooks import collect_all
+
+datas = [('resources', 'resources'), ('app/ui/styles.qss', 'app/ui'), ('app/ui/styles_light.qss', 'app/ui')]
+binaries = []
+hiddenimports = ['PySide6.QtCore', 'PySide6.QtWidgets', 'PySide6.QtGui', 'PIL', 'cv2', 'moviepy', 'mutagen', 'openai', 'requests', 'sqlite3', 'json5', 'pdf2image', 'pytesseract']
+tmp_ret = collect_all('PySide6')
+datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
 
 a = Analysis(
     ['main.py'],
     pathex=[],
-    binaries=[],
-    datas=[('resources', 'resources'), ('app/ui/styles.qss', 'app/ui'), ('app/ui/styles_light.qss', 'app/ui')],
-    hiddenimports=['PySide6.QtCore', 'PySide6.QtWidgets', 'PySide6.QtGui', 'PIL', 'cv2', 'moviepy', 'mutagen', 'openai', 'requests', 'sqlite3', 'json5', 'pdf2image', 'pytesseract'],
+    binaries=binaries,
+    datas=datas,
+    hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -32,6 +39,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon=['resources\\icon.ico'],
 )
 coll = COLLECT(
     exe,

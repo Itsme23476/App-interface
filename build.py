@@ -89,6 +89,9 @@ def build():
         "--hidden-import", "pdf2image",
         "--hidden-import", "pytesseract",
         
+        # CRITICAL: Collect all PySide6 DLLs and plugins
+        "--collect-all", "PySide6",
+        
         # Exclude unnecessary packages to reduce size
         "--exclude-module", "matplotlib",
         "--exclude-module", "notebook",
