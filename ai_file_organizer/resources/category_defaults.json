@@ -1,0 +1,18 @@
+{
+  "Documents/PDFs": [".pdf"],
+  "Documents/Word": [".doc", ".docx", ".rtf"],
+  "Documents/Text": [".txt", ".md"],
+  "Spreadsheets": [".xls", ".xlsx", ".csv"],
+  "Presentations": [".ppt", ".pptx"],
+  "Images/Photos": [".jpg", ".jpeg"],
+  "Images/Screenshots": [".png"],
+  "Images/Graphics": [".gif", ".svg", ".webp"],
+  "Videos": [".mp4", ".mov"],
+  "Audio/Music": [".mp3"],
+  "Audio/Recordings": [".wav", ".m4a"],
+  "Archives": [".zip", ".rar", ".7z"],
+  "Code": [".py", ".js", ".ts"],
+  "Misc": []
+}
+
+
