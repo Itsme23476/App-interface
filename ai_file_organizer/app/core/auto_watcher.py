@@ -325,6 +325,25 @@ class AutoOrganizeWatcher(QObject):
             instruction = self._get_instruction_for_folder(folder)
             self._process_files_with_ai(files, folder, instruction)
     
+    def _organize_existing_files_with_options(self, flatten_first: bool = False) -> None:
+        """
+        Organize existing files with options.
+        Called when instructions are changed while watching.
+        
+        Args:
+            flatten_first: If True, flatten folder structure before organizing
+        """
+        if flatten_first:
+            total_flattened = 0
+            for folder in self.watched_folders:
+                count = self.flatten_folder(folder)
+                total_flattened += count
+            if total_flattened > 0:
+                self.status_changed.emit(f"Flattened {total_flattened} files, now organizing...")
+        
+        # Now organize
+        self._organize_existing_files()
+    
     def _check_for_new_files(self) -> None:
         """Periodic check for new files in watched folders."""
         if not self._is_running:
@@ -485,14 +504,19 @@ class AutoOrganizeWatcher(QObject):
         # Build instruction for AI
         if instruction:
             full_instruction = (
-                f"[AUTO-ORGANIZE] {instruction}\n"
-                "CRITICAL: Place EVERY file into an appropriate folder. Do NOT leave any file out."
+                f"[AUTO-ORGANIZE] User's specific instructions: {instruction}\n\n"
+                "RULES FOR AUTO-ORGANIZE MODE:\n"
+                "1. FOLLOW the user's specific instructions EXACTLY for any files they mentioned\n"
+                "2. For ALL REMAINING files not covered by user's instructions, organize them logically by file type\n"
+                "3. EVERY file MUST be placed in a folder - NO files left out\n"
+                "4. Use simple, clear folder names (e.g., 'images', 'documents', 'videos', 'audio')\n"
+                "5. If user says 'screenshots to X' - put screenshots in X, organize everything else by type"
             )
         else:
             full_instruction = (
-                "[AUTO-ORGANIZE] Organize these files into logical folders based on file type and content. "
-                "Keep folder names simple and clear (e.g., 'images', 'documents', 'videos'). "
-                "CRITICAL: EVERY file must be placed in a folder."
+                "[AUTO-ORGANIZE] Organize ALL files into logical folders based on file type and content.\n"
+                "Use clear folder names: 'images', 'documents', 'videos', 'audio', etc.\n"
+                "EVERY file MUST be placed in a folder - NO files left out."
             )
         
         logger.info(f"Requesting AI plan for {len(files_info)} files with instruction: {instruction[:50]}...")

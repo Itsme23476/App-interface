@@ -40,10 +40,9 @@ STRICT RULES:
 1. Return ONLY valid JSON matching this schema:
 {ORGANIZATION_SCHEMA}
 
-2. folder-name: descriptive, lowercase, kebab-case (e.g., "client-acme-invoices", "2024-q1-receipts")
+2. folder-name: descriptive, lowercase, kebab-case (e.g., "screenshots", "videos", "documents")
 3. Use ONLY file_ids from the provided list - NEVER invent IDs
-4. ONLY include files that SPECIFICALLY MATCH the user's instruction - leave ALL other files OUT
-5. USE THE FILE EXTENSION (ext:) to identify file types:
+4. USE THE FILE EXTENSION (ext:) to identify file types:
    - "videos" = .mp4, .mov, .avi, .mkv, .webm
    - "images/photos" = .jpg, .jpeg, .png, .gif, .webp
    - "screenshots" = .png files with "screenshot" in name OR tagged as screenshot
@@ -51,18 +50,26 @@ STRICT RULES:
    - "PDFs" = .pdf
    - "documents" = .doc, .docx, .pdf, .txt
    - "audio" = .mp3, .wav, .m4a, .flac
-6. Do NOT create "unsorted", "misc", or "other" folders unless explicitly asked
-7. It is OK to return empty folders object if no files match
-8. Maximum 2 folder levels
-9. Do NOT rename files - only organize into folders
-10. When user specifies MULTIPLE types, ONLY include those types - leave everything else OUT
+5. Maximum 2 folder levels
+6. Do NOT rename files - only organize into folders
 
-CRITICAL - COMMON MISTAKE TO AVOID:
-- User says: "Move videos to AA and JSON to json"
-- WRONG: Include .mp3, .png, or other non-video/non-json files
-- CORRECT: ONLY include files where ext:.mp4/.mov/.avi (for videos) and ext:.json (for JSON)
+TWO MODES OF OPERATION:
 
-The number of files in your response should be MUCH SMALLER than total if user mentions specific types.
+MODE 1 - REGULAR ORGANIZE (instruction does NOT start with [AUTO-ORGANIZE]):
+- ONLY include files that SPECIFICALLY MATCH the user's instruction
+- Leave ALL other files OUT of the response
+- It's OK to return fewer files than provided
+- Do NOT create "misc" or "other" folders
+
+MODE 2 - AUTO-ORGANIZE (instruction starts with [AUTO-ORGANIZE]):
+- Follow user's specific instructions EXACTLY for mentioned file types
+- ALSO organize ALL remaining files by their file type
+- EVERY file MUST be included - no file left out
+- Example: "screenshots to screenshots-folder" means:
+  * Screenshots → "screenshots-folder" (as user specified)
+  * Videos → "videos" (organized by type)
+  * Documents → "documents" (organized by type)
+  * etc.
 
 JSON only. No markdown. No explanation. No prose."""
 

@@ -1,0 +1,12 @@
+{
+  "tests/test_search.py::test_database_initialization": true,
+  "tests/test_search.py::test_add_file": true,
+  "tests/test_search.py::test_search_files": true,
+  "tests/test_search.py::test_search_by_ocr_content": true,
+  "tests/test_search.py::test_search_service_index_directory": true,
+  "tests/test_search.py::test_search_service_search": true,
+  "tests/test_search.py::test_search_by_category": true,
+  "tests/test_search.py::test_search_suggestions": true,
+  "tests/test_search.py::test_file_details": true,
+  "tests/test_search.py::test_index_statistics": true
+}

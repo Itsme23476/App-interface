@@ -849,65 +849,76 @@ class OrganizePage(QWidget):
         self._update_file_count()
     
     def _create_auto_organize_section(self, parent_layout):
-        """Create the Watch & Auto-Organize section."""
+        """Create the Watch & Auto-Organize section matching app theme."""
+        # Use standard QGroupBox to match app style
         watch_group = QGroupBox("Watch & Auto-Organize")
         watch_layout = QVBoxLayout(watch_group)
         watch_layout.setSpacing(12)
+        watch_layout.setContentsMargins(16, 20, 16, 16)
         
         # Description
         desc_label = QLabel(
-            "Automatically organize new files as they appear in watched folders. "
-            "Configure per-folder instructions for custom organization rules."
+            "Monitor folders for new files, auto-index them, and organize automatically."
         )
         desc_label.setWordWrap(True)
         desc_label.setStyleSheet("color: #888; font-size: 12px;")
         watch_layout.addWidget(desc_label)
         
-        # Summary row
-        summary_row = QHBoxLayout()
+        # Status line (folder count + auto-start)
+        self.watch_status_label = QLabel("📁 No folders configured")
+        self.watch_status_label.setStyleSheet("font-size: 13px; color: #aaa;")
+        watch_layout.addWidget(self.watch_status_label)
         
-        self.watch_summary_label = QLabel("No folders configured")
-        self.watch_summary_label.setStyleSheet("font-size: 13px;")
-        summary_row.addWidget(self.watch_summary_label, 1)
+        # Activity line (shows latest organized file when watching)
+        self.watch_activity_label = QLabel("")
+        self.watch_activity_label.setStyleSheet("font-size: 12px; color: #888;")
+        self.watch_activity_label.setVisible(False)
+        watch_layout.addWidget(self.watch_activity_label)
         
-        # Configure button
-        self.watch_config_btn = QPushButton("Configure")
-        self.watch_config_btn.setMinimumHeight(36)
-        self.watch_config_btn.setMinimumWidth(100)
+        # Buttons row
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(12)
+        
+        # Configure button - secondary style
+        self.watch_config_btn = QPushButton("⚙️ Configure")
+        self.watch_config_btn.setObjectName("secondaryButton")
+        self.watch_config_btn.setMinimumHeight(40)
+        self.watch_config_btn.setMinimumWidth(120)
+        self.watch_config_btn.setCursor(Qt.PointingHandCursor)
         self.watch_config_btn.clicked.connect(self._open_watch_config)
-        summary_row.addWidget(self.watch_config_btn)
+        btn_row.addWidget(self.watch_config_btn)
         
-        # Start/Stop button
-        self.watch_toggle_btn = QPushButton("Start Watching")
-        self.watch_toggle_btn.setMinimumHeight(36)
-        self.watch_toggle_btn.setMinimumWidth(130)
+        # Start/Stop button - uses green for start, red for stop
+        self.watch_toggle_btn = QPushButton("▶ Start Watching")
+        self.watch_toggle_btn.setMinimumHeight(40)
+        self.watch_toggle_btn.setMinimumWidth(140)
+        self.watch_toggle_btn.setCursor(Qt.PointingHandCursor)
         self.watch_toggle_btn.setStyleSheet("""
             QPushButton {
                 background-color: #2ecc71;
                 color: white;
                 border: none;
                 border-radius: 6px;
-                font-weight: bold;
+                font-size: 13px;
+                font-weight: 600;
             }
-            QPushButton:hover { background-color: #27ae60; }
-            QPushButton:disabled { background-color: #555; color: #888; }
+            QPushButton:hover {
+                background-color: #27ae60;
+            }
+            QPushButton:disabled {
+                background-color: #3a3a3a;
+                color: #666;
+            }
         """)
         self.watch_toggle_btn.clicked.connect(self._toggle_watch_mode)
-        summary_row.addWidget(self.watch_toggle_btn)
+        btn_row.addWidget(self.watch_toggle_btn)
         
-        watch_layout.addLayout(summary_row)
+        btn_row.addStretch()
+        watch_layout.addLayout(btn_row)
         
-        # Status/Activity area
-        self.watch_status_label = QLabel("")
-        self.watch_status_label.setStyleSheet("color: #888; font-style: italic; font-size: 12px;")
-        self.watch_status_label.setWordWrap(True)
-        watch_layout.addWidget(self.watch_status_label)
-        
-        # Activity log (last few organized files)
-        self.watch_activity_label = QLabel("")
-        self.watch_activity_label.setStyleSheet("color: #666; font-size: 11px;")
-        self.watch_activity_label.setWordWrap(True)
-        watch_layout.addWidget(self.watch_activity_label)
+        # Hidden summary label for compatibility
+        self.watch_summary_label = QLabel("")
+        self.watch_summary_label.setVisible(False)
         
         parent_layout.addWidget(watch_group)
         
@@ -922,32 +933,161 @@ class OrganizePage(QWidget):
         if result == QDialog.Accepted:
             self._update_watch_summary()
             
-            # If watcher is running, update its folder list
+            # If watcher is running, apply new settings without stopping
             if self.auto_watcher and self.auto_watcher.is_running:
-                self._stop_watch_mode()
-                QMessageBox.information(
-                    self, "Configuration Changed",
-                    "Watcher has been stopped because configuration changed.\n"
-                    "Click 'Start Watching' to restart with the new settings."
-                )
+                self._apply_config_changes()
+    
+    def _apply_config_changes(self):
+        """Apply configuration changes while watcher is running."""
+        # Update folder instructions from settings
+        folder_instructions = {}
+        for folder_data in settings.auto_organize_folders:
+            folder_path = folder_data.get('path', '')
+            instruction = folder_data.get('instruction', '')
+            if folder_path:
+                normalized_path = os.path.normpath(folder_path)
+                folder_instructions[normalized_path] = instruction
+        
+        # Update watcher's instructions
+        self.auto_watcher.folder_instructions = folder_instructions
+        
+        # Count existing files
+        existing_count = 0
+        subfolder_count = 0
+        for folder in self.watch_folders:
+            try:
+                for item in os.listdir(folder):
+                    item_path = os.path.join(folder, item)
+                    if os.path.isfile(item_path):
+                        existing_count += 1
+                    elif os.path.isdir(item_path) and not item.startswith('.'):
+                        subfolder_count += 1
+                        for sub_item in os.listdir(item_path):
+                            if os.path.isfile(os.path.join(item_path, sub_item)):
+                                existing_count += 1
+            except Exception:
+                pass
+        
+        total_items = existing_count + subfolder_count
+        
+        if total_items > 0:
+            # Ask user what to do with existing files with new instructions
+            dialog = QMessageBox(self)
+            dialog.setWindowTitle("Apply New Instructions?")
+            
+            if subfolder_count > 0:
+                dialog.setText(f"Instructions changed. Found {existing_count} file(s) and {subfolder_count} subfolder(s).")
+            else:
+                dialog.setText(f"Instructions changed. Found {existing_count} file(s) in watched folders.")
+            dialog.setInformativeText(
+                "How would you like to apply the new instructions?\n\n"
+                "• Re-organize All: Flatten folders first, then organize fresh\n"
+                "• Organize As-Is: Organize files with new instructions\n"
+                "• Continue Watching: Keep watching, only apply to new files"
+            )
+            
+            reorganize_btn = dialog.addButton("Re-organize All", QMessageBox.AcceptRole)
+            organize_btn = dialog.addButton("Organize As-Is", QMessageBox.AcceptRole)
+            continue_btn = dialog.addButton("Continue Watching", QMessageBox.RejectRole)
+            
+            dialog.exec()
+            clicked = dialog.clickedButton()
+            
+            if clicked == reorganize_btn:
+                # Flatten and reorganize
+                self.auto_watcher._organize_existing_files_with_options(flatten_first=True)
+            elif clicked == organize_btn:
+                # Organize as-is with new instructions
+                self.auto_watcher._organize_existing_files_with_options(flatten_first=False)
+            # else: continue_btn - just keep watching with new instructions
+        
+        self.watch_activity_label.setText("Instructions updated, watching...")
+        logger.info("Applied configuration changes while watching")
     
     def _update_watch_summary(self):
-        """Update the watch summary label."""
+        """Update the watch status display."""
         folder_count = len(settings.auto_organize_folders)
+        is_watching = self.auto_watcher and self.auto_watcher.is_running
+        auto_start = settings.auto_organize_auto_start
         
         if folder_count == 0:
-            self.watch_summary_label.setText("No folders configured")
+            self.watch_status_label.setText("📁 No folders configured")
+            self.watch_status_label.setStyleSheet("font-size: 13px; color: #888;")
             self.watch_toggle_btn.setEnabled(False)
         else:
-            # Count folders with instructions
-            with_instructions = sum(1 for f in settings.auto_organize_folders if f.get('instruction'))
+            # Build status text
+            auto_start_text = " • Auto-start enabled" if auto_start else ""
             
-            text = f"{folder_count} folder(s) configured"
-            if with_instructions > 0:
-                text += f" ({with_instructions} with custom instructions)"
+            if is_watching:
+                status_text = f"✅ Watching {folder_count} folder{'s' if folder_count > 1 else ''}{auto_start_text}"
+                self.watch_status_label.setStyleSheet("font-size: 13px; color: #2ecc71; font-weight: 500;")
+            else:
+                status_text = f"📁 {folder_count} folder(s) configured{auto_start_text}"
+                self.watch_status_label.setStyleSheet("font-size: 13px; color: #aaa;")
             
-            self.watch_summary_label.setText(text)
+            self.watch_status_label.setText(status_text)
             self.watch_toggle_btn.setEnabled(True)
+        
+        # Update button state
+        if is_watching:
+            self.watch_toggle_btn.setText("⏹ Stop")
+            self.watch_toggle_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #e74c3c;
+                    color: white;
+                    border: none;
+                    border-radius: 6px;
+                    font-size: 13px;
+                    font-weight: 600;
+                }
+                QPushButton:hover {
+                    background-color: #c0392b;
+                }
+            """)
+        else:
+            self.watch_toggle_btn.setText("▶ Start Watching")
+            self.watch_toggle_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #2ecc71;
+                    color: white;
+                    border: none;
+                    border-radius: 6px;
+                    font-size: 13px;
+                    font-weight: 600;
+                }
+                QPushButton:hover {
+                    background-color: #27ae60;
+                }
+                QPushButton:disabled {
+                    background-color: #3a3a3a;
+                    color: #666;
+                }
+            """)
+    
+    def _update_watch_summary_as_watching(self):
+        """Immediately update UI to show watching state (before watcher actually starts)."""
+        folder_count = len(self.watch_folders)
+        auto_start = settings.auto_organize_auto_start
+        auto_start_text = " • Auto-start enabled" if auto_start else ""
+        
+        status_text = f"✅ Watching {folder_count} folder{'s' if folder_count > 1 else ''}{auto_start_text}"
+        self.watch_status_label.setText(status_text)
+        self.watch_status_label.setStyleSheet("font-size: 13px; color: #2ecc71; font-weight: 500;")
+        
+        self.watch_toggle_btn.setText("⏹ Stop")
+        self.watch_toggle_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #e74c3c;
+                color: white;
+                border: none;
+                border-radius: 6px;
+                font-size: 13px;
+                font-weight: 600;
+            }
+            QPushButton:hover {
+                background-color: #c0392b;
+            }
+        """)
     
     def _toggle_watch_mode(self):
         """Toggle the watch mode on/off."""
@@ -956,8 +1096,14 @@ class OrganizePage(QWidget):
         else:
             self._start_watch_mode()
     
-    def _start_watch_mode(self, is_catch_up: bool = False, catch_up_since=None):
-        """Start watching folders for new files."""
+    def _start_watch_mode(self, is_catch_up: bool = False, catch_up_since=None, skip_existing_popup: bool = False):
+        """Start watching folders for new files.
+        
+        Args:
+            is_catch_up: If True, organize files modified since catch_up_since
+            catch_up_since: Datetime to filter files for catch-up mode
+            skip_existing_popup: If True, skip the "Organize Existing Files?" popup (for auto-start)
+        """
         if not settings.auto_organize_folders:
             QMessageBox.warning(
                 self, "No Folders",
@@ -1006,13 +1152,30 @@ class OrganizePage(QWidget):
         if catch_up_since:
             self.auto_watcher.catch_up_since = catch_up_since
         
-        # Count existing files
+        # UPDATE UI IMMEDIATELY - show "watching" state right away
+        self._update_watch_summary_as_watching()
+        self.watch_activity_label.setVisible(True)
+        self.watch_activity_label.setText("Preparing...")
+        
+        # Process events to update UI before dialog
+        from PySide6.QtWidgets import QApplication
+        QApplication.processEvents()
+        
+        # Count existing files (including files in subfolders)
         existing_count = 0
+        subfolder_count = 0
         for folder in self.watch_folders:
             try:
                 for item in os.listdir(folder):
-                    if os.path.isfile(os.path.join(folder, item)):
+                    item_path = os.path.join(folder, item)
+                    if os.path.isfile(item_path):
                         existing_count += 1
+                    elif os.path.isdir(item_path) and not item.startswith('.'):
+                        # Count files in subfolders too
+                        subfolder_count += 1
+                        for sub_item in os.listdir(item_path):
+                            if os.path.isfile(os.path.join(item_path, sub_item)):
+                                existing_count += 1
             except Exception:
                 pass
         
@@ -1020,10 +1183,15 @@ class OrganizePage(QWidget):
         organize_existing = False
         flatten_first = False
         
-        if existing_count > 0 and not is_catch_up:
+        total_items = existing_count + subfolder_count
+        if total_items > 0 and not is_catch_up and not skip_existing_popup:
             dialog = QMessageBox(self)
             dialog.setWindowTitle("Organize Existing Files?")
-            dialog.setText(f"Found {existing_count} file(s) in the watched folder(s).")
+            
+            if subfolder_count > 0:
+                dialog.setText(f"Found {existing_count} file(s) and {subfolder_count} subfolder(s) in the watched folder(s).")
+            else:
+                dialog.setText(f"Found {existing_count} file(s) in the watched folder(s).")
             dialog.setInformativeText(
                 "Choose how to handle existing files:\n\n"
                 "• Re-organize All: Flatten folders first, then organize fresh\n"
@@ -1050,20 +1218,8 @@ class OrganizePage(QWidget):
         # Start the watcher
         self.auto_watcher.start(organize_existing=organize_existing, flatten_first=flatten_first)
         
-        # Update UI
-        self.watch_toggle_btn.setText("Stop Watching")
-        self.watch_toggle_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #e74c3c;
-                color: white;
-                border: none;
-                border-radius: 6px;
-                font-weight: bold;
-            }
-            QPushButton:hover { background-color: #c0392b; }
-        """)
-        
-        self.watch_status_label.setText(f"🟢 Watching {len(self.watch_folders)} folder(s)...")
+        # Update activity label
+        self.watch_activity_label.setText("Waiting for new files...")
     
     def _stop_watch_mode(self):
         """Stop watching folders."""
@@ -1073,21 +1229,10 @@ class OrganizePage(QWidget):
         # Save last active timestamp for catch-up feature
         settings.update_auto_organize_last_active()
         
-        # Update UI
-        self.watch_toggle_btn.setText("Start Watching")
-        self.watch_toggle_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #2ecc71;
-                color: white;
-                border: none;
-                border-radius: 6px;
-                font-weight: bold;
-            }
-            QPushButton:hover { background-color: #27ae60; }
-            QPushButton:disabled { background-color: #555; color: #888; }
-        """)
-        
-        self.watch_status_label.setText("Watcher stopped")
+        # Update UI using centralized method
+        self._update_watch_summary()
+        self.watch_activity_label.setVisible(False)
+        self.watch_activity_label.setText("")
     
     def _check_auto_start(self):
         """Check if we should auto-start the watcher on app open."""
@@ -1119,32 +1264,37 @@ class OrganizePage(QWidget):
                 )
                 
                 if reply == QMessageBox.Yes:
-                    self._start_watch_mode(is_catch_up=True, catch_up_since=last_active)
+                    self._start_watch_mode(is_catch_up=True, catch_up_since=last_active, skip_existing_popup=True)
                     return
         
-        # Normal auto-start (no catch-up needed or user declined)
-        self._start_watch_mode()
+        # Normal auto-start - skip existing files popup, just watch for new files
+        self._start_watch_mode(skip_existing_popup=True)
     
     def _on_watch_file_organized(self, source: str, dest: str, category: str):
         """Handle file organized signal from watcher."""
         file_name = os.path.basename(source)
-        self.watch_activity_label.setText(f"✓ {file_name} → {category}/")
+        self.watch_activity_label.setVisible(True)
+        self.watch_activity_label.setText(f"Latest: {file_name} → {category}/")
         logger.info(f"Watch organized: {source} -> {dest}")
     
     def _on_watch_file_indexed(self, file_path: str):
         """Handle file indexed signal from watcher."""
         file_name = os.path.basename(file_path)
-        self.watch_activity_label.setText(f"📁 Indexed: {file_name}")
+        self.watch_activity_label.setVisible(True)
+        self.watch_activity_label.setText(f"Indexing: {file_name}")
         logger.info(f"Watch auto-indexed: {file_path}")
     
     def _on_watch_status(self, status: str):
         """Handle status updates from watcher."""
-        self.watch_status_label.setText(status)
+        # Show status in activity label, not status label (which now shows folder count)
+        self.watch_activity_label.setVisible(True)
+        self.watch_activity_label.setText(status)
     
     def _on_watch_error(self, path: str, error: str):
         """Handle errors from watcher."""
         file_name = os.path.basename(path) if path else "Unknown"
-        self.watch_status_label.setText(f"⚠️ Error: {file_name} - {error[:50]}")
+        self.watch_activity_label.setVisible(True)
+        self.watch_activity_label.setText(f"⚠️ Error: {file_name}")
         logger.error(f"Watch error for {path}: {error}")
     
     def showEvent(self, event):
