@@ -559,6 +559,238 @@ class ModernConfirmDialog(QDialog):
         return dialog.result_accepted
 
 
+class ApplyInstructionsDialog(QDialog):
+    """
+    Modern dialog for choosing how to apply new instructions to existing files.
+    Clean, minimal design with three options.
+    """
+    
+    # Result constants
+    REORGANIZE_ALL = 1
+    ORGANIZE_AS_IS = 2
+    CONTINUE_WATCHING = 3
+    
+    def __init__(self, parent=None, file_count: int = 0, subfolder_count: int = 0):
+        super().__init__(parent)
+        self.setWindowTitle("Apply Instructions")
+        self.setMinimumWidth(420)
+        self.setModal(True)
+        self.result_choice = self.CONTINUE_WATCHING
+        self._drag_pos = None
+        
+        # Remove default window frame for custom styling
+        self.setWindowFlags(self.windowFlags() | Qt.FramelessWindowHint)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        
+        # Main container
+        self.container = QFrame(self)
+        self.container.setObjectName("applyDialogContainer")
+        self.container.setStyleSheet("""
+            QFrame#applyDialogContainer {
+                background-color: #FFFFFF;
+                border-radius: 20px;
+                border: 1px solid #E0E0E0;
+            }
+        """)
+        
+        # Add drop shadow
+        from PySide6.QtWidgets import QGraphicsDropShadowEffect
+        from PySide6.QtGui import QColor
+        shadow = QGraphicsDropShadowEffect(self)
+        shadow.setBlurRadius(25)
+        shadow.setXOffset(0)
+        shadow.setYOffset(4)
+        shadow.setColor(QColor(0, 0, 0, 40))
+        self.container.setGraphicsEffect(shadow)
+        
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(20, 20, 20, 20)
+        main_layout.addWidget(self.container)
+        
+        layout = QVBoxLayout(self.container)
+        layout.setContentsMargins(28, 24, 28, 24)
+        layout.setSpacing(16)
+        
+        # Header
+        header_layout = QHBoxLayout()
+        header_layout.setSpacing(12)
+        
+        icon_label = QLabel("🔄")
+        icon_label.setStyleSheet("""
+            font-size: 24px;
+            background-color: #F3EEFF;
+            border-radius: 20px;
+            border: 2px solid #E8DFFF;
+        """)
+        icon_label.setFixedSize(44, 44)
+        icon_label.setAlignment(Qt.AlignCenter)
+        header_layout.addWidget(icon_label)
+        
+        title_label = QLabel("Apply New Instructions")
+        title_label.setStyleSheet("""
+            font-family: "Segoe UI", sans-serif;
+            font-size: 18px;
+            font-weight: 700;
+            color: #1A1A2E;
+        """)
+        header_layout.addWidget(title_label)
+        header_layout.addStretch()
+        
+        close_btn = QPushButton("✕")
+        close_btn.setFixedSize(32, 32)
+        close_btn.setCursor(Qt.PointingHandCursor)
+        close_btn.setStyleSheet("""
+            QPushButton {
+                background-color: transparent;
+                border: none;
+                color: #AAAAAA;
+                font-size: 16px;
+                border-radius: 16px;
+            }
+            QPushButton:hover {
+                background-color: rgba(124, 77, 255, 0.1);
+                color: #7C4DFF;
+            }
+        """)
+        close_btn.clicked.connect(self._on_continue)
+        header_layout.addWidget(close_btn)
+        
+        layout.addLayout(header_layout)
+        
+        # Subtitle with file count
+        if subfolder_count > 0:
+            subtitle = f"Found {file_count} files in {subfolder_count} subfolders"
+        else:
+            subtitle = f"Found {file_count} existing files"
+        
+        subtitle_label = QLabel(subtitle)
+        subtitle_label.setStyleSheet("""
+            font-family: "Segoe UI", sans-serif;
+            font-size: 13px;
+            color: #666666;
+        """)
+        layout.addWidget(subtitle_label)
+        
+        # Options as styled buttons
+        options_layout = QVBoxLayout()
+        options_layout.setSpacing(10)
+        
+        # Option 1: Re-organize All
+        reorganize_btn = self._create_option_button(
+            "🔄 Re-organize All",
+            "Flatten folders, then organize fresh",
+            primary=True
+        )
+        reorganize_btn.clicked.connect(self._on_reorganize)
+        options_layout.addWidget(reorganize_btn)
+        
+        # Option 2: Organize As-Is
+        organize_btn = self._create_option_button(
+            "📂 Organize As-Is",
+            "Apply new instructions to current files"
+        )
+        organize_btn.clicked.connect(self._on_organize)
+        options_layout.addWidget(organize_btn)
+        
+        # Option 3: Continue Watching
+        continue_btn = self._create_option_button(
+            "⏭️ Skip",
+            "Only apply to new files going forward"
+        )
+        continue_btn.clicked.connect(self._on_continue)
+        options_layout.addWidget(continue_btn)
+        
+        layout.addLayout(options_layout)
+    
+    def _create_option_button(self, title: str, subtitle: str, primary: bool = False) -> QPushButton:
+        """Create a styled option button with title and subtitle."""
+        btn = QPushButton()
+        btn.setCursor(Qt.PointingHandCursor)
+        btn.setMinimumHeight(56)
+        
+        # Create layout for button content
+        btn_layout = QVBoxLayout(btn)
+        btn_layout.setContentsMargins(16, 10, 16, 10)
+        btn_layout.setSpacing(2)
+        
+        title_lbl = QLabel(title)
+        title_lbl.setStyleSheet(f"""
+            font-family: "Segoe UI", sans-serif;
+            font-size: 14px;
+            font-weight: 600;
+            color: {"#FFFFFF" if primary else "#333333"};
+            background: transparent;
+        """)
+        title_lbl.setAttribute(Qt.WA_TransparentForMouseEvents)
+        btn_layout.addWidget(title_lbl)
+        
+        subtitle_lbl = QLabel(subtitle)
+        subtitle_lbl.setStyleSheet(f"""
+            font-family: "Segoe UI", sans-serif;
+            font-size: 11px;
+            color: {"rgba(255,255,255,0.8)" if primary else "#888888"};
+            background: transparent;
+        """)
+        subtitle_lbl.setAttribute(Qt.WA_TransparentForMouseEvents)
+        btn_layout.addWidget(subtitle_lbl)
+        
+        if primary:
+            btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #7C4DFF;
+                    border: none;
+                    border-radius: 12px;
+                    text-align: left;
+                }
+                QPushButton:hover {
+                    background-color: #9575FF;
+                }
+                QPushButton:pressed {
+                    background-color: #6A3DE8;
+                }
+            """)
+        else:
+            btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #F8F8FA;
+                    border: 1px solid #E8E8E8;
+                    border-radius: 12px;
+                    text-align: left;
+                }
+                QPushButton:hover {
+                    background-color: #F0EEFF;
+                    border-color: #7C4DFF;
+                }
+                QPushButton:pressed {
+                    background-color: #E8E0FF;
+                }
+            """)
+        
+        return btn
+    
+    def _on_reorganize(self):
+        self.result_choice = self.REORGANIZE_ALL
+        self.accept()
+    
+    def _on_organize(self):
+        self.result_choice = self.ORGANIZE_AS_IS
+        self.accept()
+    
+    def _on_continue(self):
+        self.result_choice = self.CONTINUE_WATCHING
+        self.accept()
+    
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+            event.accept()
+    
+    def mouseMoveEvent(self, event):
+        if event.buttons() == Qt.LeftButton and self._drag_pos:
+            self.move(event.globalPosition().toPoint() - self._drag_pos)
+            event.accept()
+
+
 class WatchConfigDialog(QDialog):
     """
     Dialog for configuring Watch & Auto-Organize folders with per-folder instructions.
@@ -610,6 +842,11 @@ class WatchConfigDialog(QDialog):
         self.folder_data: Dict[str, str] = {}
         # Track folder widgets for updates
         self.folder_widgets: Dict[str, Dict] = {}
+        
+        # Voice recording state
+        self.voice_worker = None
+        self.is_recording_voice = False
+        self.current_recording_folder = None  # Track which folder's mic is recording
         
         self._setup_ui()
         self._load_from_settings()
@@ -728,13 +965,13 @@ class WatchConfigDialog(QDialog):
         cancel_btn.clicked.connect(self.reject)
         button_layout.addWidget(cancel_btn)
         
-        save_btn = QPushButton("Save Changes")
-        save_btn.setMinimumHeight(44)
-        save_btn.setMinimumWidth(140)
-        save_btn.setCursor(Qt.PointingHandCursor)
-        save_btn.setStyleSheet("""
+        self.save_btn = QPushButton("Save Changes")
+        self.save_btn.setMinimumHeight(44)
+        self.save_btn.setMinimumWidth(140)
+        self.save_btn.setCursor(Qt.PointingHandCursor)
+        self.save_btn.setStyleSheet("""
             QPushButton {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #7C4DFF, stop:1 #9575FF);
+                background-color: #7C4DFF;
                 color: white;
                 border: none;
                 border-radius: 10px;
@@ -742,14 +979,14 @@ class WatchConfigDialog(QDialog):
                 font-size: 14px;
             }
             QPushButton:hover {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #9575FF, stop:1 #B39DFF);
+                background-color: #9575FF;
             }
             QPushButton:pressed {
-                background: #6A3DE8;
+                background-color: #6A3DE8;
             }
         """)
-        save_btn.clicked.connect(self._save_and_close)
-        button_layout.addWidget(save_btn)
+        self.save_btn.clicked.connect(self._save_and_close)
+        button_layout.addWidget(self.save_btn)
         
         layout.addLayout(button_layout)
     
@@ -815,22 +1052,25 @@ class WatchConfigDialog(QDialog):
         path_label.setWordWrap(True)
         header_row.addWidget(path_label, 1)
         
-        remove_btn = QPushButton("✕")
-        remove_btn.setFixedSize(28, 28)
+        remove_btn = QPushButton("Remove")
+        remove_btn.setMinimumHeight(28)
+        remove_btn.setMinimumWidth(70)
         remove_btn.setCursor(Qt.PointingHandCursor)
-        remove_btn.setToolTip("Remove folder")
+        remove_btn.setToolTip("Remove this folder from auto-organize")
         remove_btn.setStyleSheet("""
             QPushButton {
                 background-color: transparent;
                 color: #999999;
-                border: none;
-                border-radius: 14px;
-                font-weight: bold;
-                font-size: 14px;
+                border: 1px solid #DDDDDD;
+                border-radius: 6px;
+                font-weight: 500;
+                font-size: 12px;
+                padding: 4px 10px;
             }
             QPushButton:hover {
                 background-color: #FFEBEE;
                 color: #D32F2F;
+                border-color: #D32F2F;
             }
         """)
         remove_btn.clicked.connect(lambda: self._remove_folder(folder_path))
@@ -846,6 +1086,10 @@ class WatchConfigDialog(QDialog):
         instruction_label.setStyleSheet("color: #666666; font-size: 11px; font-weight: 600; text-transform: uppercase; border: none; background: transparent;")
         instruction_layout.addWidget(instruction_label)
         
+        # Input row with text field and mic button
+        input_row = QHBoxLayout()
+        input_row.setSpacing(8)
+        
         instruction_input = QLineEdit()
         instruction_input.setPlaceholderText("e.g. Move screenshots to Images/Screenshots, organize others by type...")
         instruction_input.setText(instruction)
@@ -853,14 +1097,40 @@ class WatchConfigDialog(QDialog):
         instruction_input.textChanged.connect(
             lambda text, fp=folder_path: self._on_instruction_changed(fp, text)
         )
-        instruction_layout.addWidget(instruction_input)
+        input_row.addWidget(instruction_input, 1)
+        
+        # Microphone button
+        mic_button = QPushButton("Voice")
+        mic_button.setMinimumSize(55, 38)
+        mic_button.setMaximumSize(55, 38)
+        mic_button.setCursor(Qt.PointingHandCursor)
+        mic_button.setToolTip("Click to speak your instruction")
+        mic_button.setStyleSheet("""
+            QPushButton {
+                font-size: 11px;
+                font-weight: bold;
+                background-color: #F5F0FF;
+                border: 1px solid #7C4DFF;
+                border-radius: 6px;
+                color: #7C4DFF;
+                padding: 0px;
+            }
+            QPushButton:hover {
+                background-color: #EDE7FF;
+            }
+        """)
+        mic_button.clicked.connect(lambda checked, fp=folder_path: self._toggle_folder_voice(fp))
+        input_row.addWidget(mic_button)
+        
+        instruction_layout.addLayout(input_row)
         
         frame_layout.addLayout(instruction_layout)
         
         # Store widgets for later reference
         self.folder_widgets[folder_path] = {
             'widget': frame,
-            'input': instruction_input
+            'input': instruction_input,
+            'mic_button': mic_button
         }
         
         # Add to layout (before spacer)
@@ -892,18 +1162,130 @@ class WatchConfigDialog(QDialog):
     
     def _save_and_close(self):
         """Save settings and close dialog."""
-        # Update settings
-        new_folders = []
-        for path, instruction in self.folder_data.items():
-            new_folders.append({
-                'path': path,
-                'instruction': instruction
-            })
+        try:
+            logger.info(f"WatchConfigDialog._save_and_close called with {len(self.folder_data)} folders")
+            
+            # Update settings
+            new_folders = []
+            for path, instruction in self.folder_data.items():
+                logger.info(f"  Saving folder: {path}, instruction: {instruction[:50] if instruction else '(empty)'}...")
+                new_folders.append({
+                    'path': path,
+                    'instruction': instruction
+                })
+            
+            settings.auto_organize_folders = new_folders
+            settings._save_config()
+            logger.info("Settings saved, accepting dialog")
+            
+            self.accept()
+        except Exception as e:
+            logger.error(f"Error in _save_and_close: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    def _toggle_folder_voice(self, folder_path: str):
+        """Toggle voice recording for a specific folder's instruction."""
+        if self.is_recording_voice:
+            # Stop current recording
+            self._stop_folder_voice()
+        else:
+            # Start recording for this folder
+            self._start_folder_voice(folder_path)
+    
+    def _start_folder_voice(self, folder_path: str):
+        """Start recording voice for a folder's instruction."""
+        self.is_recording_voice = True
+        self.current_recording_folder = folder_path
         
-        settings.auto_organize_folders = new_folders
-        settings.save()
+        # Update the mic button to show recording state
+        if folder_path in self.folder_widgets:
+            mic_btn = self.folder_widgets[folder_path].get('mic_button')
+            if mic_btn:
+                mic_btn.setText("Stop")
+                mic_btn.setStyleSheet("""
+                    QPushButton {
+                        font-size: 11px;
+                        font-weight: bold;
+                        background-color: #EF5350;
+                        border: 1px solid #D32F2F;
+                        border-radius: 6px;
+                        color: white;
+                        padding: 0px;
+                    }
+                    QPushButton:hover {
+                        background-color: #E53935;
+                    }
+                """)
+                mic_btn.setToolTip("Recording... Click to stop")
         
-        self.accept()
+        # Start voice worker
+        self.voice_worker = VoiceRecordWorker()
+        self.voice_worker.finished.connect(self._on_folder_voice_transcribed)
+        self.voice_worker.error.connect(self._on_folder_voice_error)
+        self.voice_worker.recording_stopped.connect(self._on_folder_recording_stopped)
+        self.voice_worker.start()
+    
+    def _stop_folder_voice(self):
+        """Stop recording voice input."""
+        if self.voice_worker:
+            self.voice_worker.stop_recording()
+    
+    def _on_folder_recording_stopped(self):
+        """Called when recording has stopped, before transcription."""
+        self.is_recording_voice = False
+        self._reset_folder_mic_button()
+    
+    def _on_folder_voice_transcribed(self, text: str):
+        """Handle transcribed text for a folder's instruction."""
+        self.is_recording_voice = False
+        self._reset_folder_mic_button()
+        
+        if text.strip() and self.current_recording_folder:
+            folder_path = self.current_recording_folder
+            if folder_path in self.folder_widgets:
+                instruction_input = self.folder_widgets[folder_path].get('input')
+                if instruction_input:
+                    # Append to existing or replace
+                    current = instruction_input.text().strip()
+                    if current:
+                        instruction_input.setText(f"{current}. {text}")
+                    else:
+                        instruction_input.setText(text)
+        
+        self.current_recording_folder = None
+    
+    def _on_folder_voice_error(self, error: str):
+        """Handle voice recording errors."""
+        self.is_recording_voice = False
+        self._reset_folder_mic_button()
+        self.current_recording_folder = None
+        
+        # Show error in a simple message
+        from PySide6.QtWidgets import QMessageBox
+        QMessageBox.warning(self, "Voice Error", f"Could not transcribe: {error}")
+    
+    def _reset_folder_mic_button(self):
+        """Reset mic button to default state for the current recording folder."""
+        if self.current_recording_folder and self.current_recording_folder in self.folder_widgets:
+            mic_btn = self.folder_widgets[self.current_recording_folder].get('mic_button')
+            if mic_btn:
+                mic_btn.setText("Voice")
+                mic_btn.setStyleSheet("""
+                    QPushButton {
+                        font-size: 11px;
+                        font-weight: bold;
+                        background-color: #F5F0FF;
+                        border: 1px solid #7C4DFF;
+                        border-radius: 6px;
+                        color: #7C4DFF;
+                        padding: 0px;
+                    }
+                    QPushButton:hover {
+                        background-color: #EDE7FF;
+                    }
+                """)
+                mic_btn.setToolTip("Click to speak your instruction")
     
     def get_folder_count(self) -> int:
         """Get the number of configured folders."""
@@ -1544,25 +1926,25 @@ class OrganizePage(QWidget):
             }
         """)
         watch_layout = QVBoxLayout(watch_card)
-        watch_layout.setSpacing(16)
+        watch_layout.setSpacing(12)
         watch_layout.setContentsMargins(24, 24, 24, 24)
         
         # Header with icon and title
         header_row = QHBoxLayout()
         header_row.setSpacing(12)
         
-        watch_icon = QLabel("👁️")
+        watch_icon = QLabel("🔄")
         watch_icon.setStyleSheet("font-size: 28px; background: transparent;")
         header_row.addWidget(watch_icon)
         
         header_info = QVBoxLayout()
-        header_info.setSpacing(4)
+        header_info.setSpacing(2)
         
-        watch_title = QLabel("Watch & Auto-Organize")
+        watch_title = QLabel("Auto-Organize")
         watch_title.setStyleSheet("font-size: 18px; font-weight: 600; color: #7C4DFF; background: transparent;")
         header_info.addWidget(watch_title)
         
-        watch_desc = QLabel("Monitor folders for new files and organize them automatically")
+        watch_desc = QLabel("Monitor folders and organize new files automatically")
         watch_desc.setStyleSheet("color: #808080; font-size: 13px; background: transparent;")
         header_info.addWidget(watch_desc)
         
@@ -1572,41 +1954,27 @@ class OrganizePage(QWidget):
         # Separator line
         separator = QFrame()
         separator.setFrameShape(QFrame.HLine)
-        separator.setStyleSheet("background-color: #2A2A2A; border: none; max-height: 1px;")
+        separator.setStyleSheet("background-color: rgba(124, 77, 255, 0.2); border: none; max-height: 1px;")
         watch_layout.addWidget(separator)
         
-        # Status section
-        status_container = QHBoxLayout()
-        status_container.setSpacing(16)
-        
-        # Status indicator
-        self.watch_status_label = QLabel("📁 No folders configured")
-        self.watch_status_label.setStyleSheet("font-size: 14px; color: #A0A0A0; background: transparent;")
-        status_container.addWidget(self.watch_status_label, 1)
-        
-        watch_layout.addLayout(status_container)
-        
-        # Activity line (shows latest organized file when watching)
-        self.watch_activity_label = QLabel("")
-        self.watch_activity_label.setStyleSheet("""
+        # Combined folder count + status on one line
+        self.watch_folder_label = QLabel("📁 No folders configured")
+        self.watch_folder_label.setStyleSheet("""
             font-size: 13px; 
-            color: #7C4DFF; 
-            background: rgba(124, 77, 255, 0.1); 
-            padding: 8px 12px; 
-            border-radius: 8px;
-            border: 1px solid rgba(124, 77, 255, 0.2);
+            color: #555555; 
+            background: transparent;
+            padding: 4px 0;
         """)
-        self.watch_activity_label.setVisible(False)
-        watch_layout.addWidget(self.watch_activity_label)
+        watch_layout.addWidget(self.watch_folder_label)
         
         # Buttons row
         btn_row = QHBoxLayout()
-        btn_row.setSpacing(16)
+        btn_row.setSpacing(12)
         
-        # Configure button
-        self.watch_config_btn = QPushButton("⚙️ Configure Folders")
-        self.watch_config_btn.setMinimumHeight(44)
-        self.watch_config_btn.setMinimumWidth(160)
+        # Edit button (previously Configure)
+        self.watch_config_btn = QPushButton("✏️ Edit")
+        self.watch_config_btn.setMinimumHeight(42)
+        self.watch_config_btn.setMinimumWidth(100)
         self.watch_config_btn.setCursor(Qt.PointingHandCursor)
         self.watch_config_btn.setStyleSheet("""
             QPushButton {
@@ -1616,6 +1984,7 @@ class OrganizePage(QWidget):
                 border-radius: 12px;
                 font-size: 14px;
                 font-weight: 600;
+                padding: 0 16px;
             }
             QPushButton:hover {
                 background-color: rgba(124, 77, 255, 0.1);
@@ -1624,26 +1993,27 @@ class OrganizePage(QWidget):
         self.watch_config_btn.clicked.connect(self._open_watch_config)
         btn_row.addWidget(self.watch_config_btn)
         
-        # Start/Stop button
-        self.watch_toggle_btn = QPushButton("▶ Start Watching")
-        self.watch_toggle_btn.setMinimumHeight(44)
-        self.watch_toggle_btn.setMinimumWidth(160)
+        # Start/Stop button (purple theme)
+        self.watch_toggle_btn = QPushButton("▶ Start")
+        self.watch_toggle_btn.setMinimumHeight(42)
+        self.watch_toggle_btn.setMinimumWidth(120)
         self.watch_toggle_btn.setCursor(Qt.PointingHandCursor)
         self.watch_toggle_btn.setStyleSheet("""
             QPushButton {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #4CAF50, stop:1 #66BB6A);
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #7C4DFF, stop:1 #9575FF);
                 color: white;
                 border: none;
                 border-radius: 12px;
                 font-size: 14px;
                 font-weight: 600;
+                padding: 0 20px;
             }
             QPushButton:hover {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #66BB6A, stop:1 #81C784);
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #9575FF, stop:1 #B39DFF);
             }
             QPushButton:disabled {
-                background: #2A2A2A;
-                color: #606060;
+                background: rgba(124, 77, 255, 0.3);
+                color: rgba(255, 255, 255, 0.5);
             }
         """)
         self.watch_toggle_btn.clicked.connect(self._toggle_watch_mode)
@@ -1708,88 +2078,91 @@ class OrganizePage(QWidget):
         
         if total_items > 0:
             # Ask user what to do with existing files with new instructions
-            dialog = QMessageBox(self)
-            dialog.setWindowTitle("Apply New Instructions?")
-            
-            if subfolder_count > 0:
-                dialog.setText(f"Instructions changed. Found {existing_count} file(s) and {subfolder_count} subfolder(s).")
-            else:
-                dialog.setText(f"Instructions changed. Found {existing_count} file(s) in watched folders.")
-            dialog.setInformativeText(
-                "How would you like to apply the new instructions?\n\n"
-                "• Re-organize All: Flatten folders first, then organize fresh\n"
-                "• Organize As-Is: Organize files with new instructions\n"
-                "• Continue Watching: Keep watching, only apply to new files"
-            )
-            
-            reorganize_btn = dialog.addButton("Re-organize All", QMessageBox.AcceptRole)
-            organize_btn = dialog.addButton("Organize As-Is", QMessageBox.AcceptRole)
-            continue_btn = dialog.addButton("Continue Watching", QMessageBox.RejectRole)
-            
+            dialog = ApplyInstructionsDialog(self, existing_count, subfolder_count)
             dialog.exec()
-            clicked = dialog.clickedButton()
             
-            if clicked == reorganize_btn:
+            if dialog.result_choice == ApplyInstructionsDialog.REORGANIZE_ALL:
                 # Flatten and reorganize
                 self.auto_watcher._organize_existing_files_with_options(flatten_first=True)
-            elif clicked == organize_btn:
+            elif dialog.result_choice == ApplyInstructionsDialog.ORGANIZE_AS_IS:
                 # Organize as-is with new instructions
                 self.auto_watcher._organize_existing_files_with_options(flatten_first=False)
-            # else: continue_btn - just keep watching with new instructions
+            # else: CONTINUE_WATCHING - just keep watching with new instructions
         
-        self.watch_activity_label.setText("Instructions updated, watching...")
+        # Instructions updated - just update the summary
+        self._update_watch_summary()
         logger.info("Applied configuration changes while watching")
     
     def _update_watch_summary(self):
         """Update the watch status display."""
         folder_count = len(settings.auto_organize_folders)
         is_watching = self.auto_watcher and self.auto_watcher.is_running
-        auto_start = settings.auto_organize_auto_start
         
         if folder_count == 0:
-            self.watch_status_label.setText("📁 No folders configured")
-            self.watch_status_label.setStyleSheet("font-size: 13px; color: #888;")
+            # No folders configured
+            self.watch_folder_label.setText("📁 No folders configured")
+            self.watch_folder_label.setStyleSheet("""
+                font-size: 13px; 
+                color: #888888; 
+                background: transparent;
+                padding: 4px 0;
+            """)
             self.watch_toggle_btn.setEnabled(False)
         else:
-            # Build status text
-            auto_start_text = " • Auto-start enabled" if auto_start else ""
-            
+            # Show folder count + status on one line
             if is_watching:
-                status_text = f"✅ Watching {folder_count} folder{'s' if folder_count > 1 else ''}{auto_start_text}"
-                self.watch_status_label.setStyleSheet("font-size: 13px; color: #2ecc71; font-weight: 500;")
+                status_text = f"📁 {folder_count} folder{'s' if folder_count > 1 else ''} • ✅ Active"
+                color = "#7C4DFF"
             else:
-                status_text = f"📁 {folder_count} folder(s) configured{auto_start_text}"
-                self.watch_status_label.setStyleSheet("font-size: 13px; color: #aaa;")
+                status_text = f"📁 {folder_count} folder{'s' if folder_count > 1 else ''} configured"
+                color = "#555555"
             
-            self.watch_status_label.setText(status_text)
+            self.watch_folder_label.setText(status_text)
+            self.watch_folder_label.setStyleSheet(f"""
+                font-size: 13px; 
+                color: {color}; 
+                background: transparent;
+                padding: 4px 0;
+                font-weight: {'500' if is_watching else '400'};
+            """)
+            
             self.watch_toggle_btn.setEnabled(True)
         
-        # Update button state
+        # Update button state (purple theme for both states)
         if is_watching:
             self.watch_toggle_btn.setText("⏹ Stop")
             self.watch_toggle_btn.setStyleSheet("""
                 QPushButton {
-                    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #EF5350, stop:1 #E57373);
+                    background: transparent;
+                    color: #7C4DFF;
+                    border: 2px solid #7C4DFF;
+                    border-radius: 12px;
+                    font-size: 14px;
+                    font-weight: 600;
+                    padding: 0 20px;
+                }
+                QPushButton:hover {
+                    background: rgba(124, 77, 255, 0.1);
+                }
+            """)
+        else:
+            self.watch_toggle_btn.setText("▶ Start")
+            self.watch_toggle_btn.setStyleSheet("""
+                QPushButton {
+                    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #7C4DFF, stop:1 #9575FF);
                     color: white;
                     border: none;
                     border-radius: 12px;
                     font-size: 14px;
                     font-weight: 600;
+                    padding: 0 20px;
                 }
                 QPushButton:hover {
-                    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #E57373, stop:1 #EF9A9A);
+                    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #9575FF, stop:1 #B39DFF);
                 }
-            """)
-        else:
-            self.watch_toggle_btn.setText("▶ Start Watching")
-            self.watch_toggle_btn.setStyleSheet("""
-                QPushButton {
-                    background-color: #2ecc71;
-                    color: white;
-                    border: none;
-                    border-radius: 6px;
-                    font-size: 13px;
-                    font-weight: 600;
+                QPushButton:disabled {
+                    background: rgba(124, 77, 255, 0.3);
+                    color: rgba(255, 255, 255, 0.5);
                 }
                 QPushButton:hover {
                     background-color: #27ae60;
@@ -1802,26 +2175,31 @@ class OrganizePage(QWidget):
     
     def _update_watch_summary_as_watching(self):
         """Immediately update UI to show watching state (before watcher actually starts)."""
-        folder_count = len(self.watch_folders)
-        auto_start = settings.auto_organize_auto_start
-        auto_start_text = " • Auto-start enabled" if auto_start else ""
+        # Update folder label to show active status
+        folder_count = len(self.watch_folders) if self.watch_folders else len(settings.auto_organize_folders)
+        self.watch_folder_label.setText(f"📁 {folder_count} folder{'s' if folder_count > 1 else ''} • ✅ Active")
+        self.watch_folder_label.setStyleSheet("""
+            font-size: 13px; 
+            color: #7C4DFF; 
+            background: transparent;
+            padding: 4px 0;
+            font-weight: 500;
+        """)
         
-        status_text = f"✅ Watching {folder_count} folder{'s' if folder_count > 1 else ''}{auto_start_text}"
-        self.watch_status_label.setText(status_text)
-        self.watch_status_label.setStyleSheet("font-size: 13px; color: #2ecc71; font-weight: 500;")
-        
+        # Update toggle button to Stop state (purple outline)
         self.watch_toggle_btn.setText("⏹ Stop")
         self.watch_toggle_btn.setStyleSheet("""
             QPushButton {
-                background-color: #e74c3c;
-                color: white;
-                border: none;
-                border-radius: 6px;
-                font-size: 13px;
+                background: transparent;
+                color: #7C4DFF;
+                border: 2px solid #7C4DFF;
+                border-radius: 12px;
+                font-size: 14px;
                 font-weight: 600;
+                padding: 0 20px;
             }
             QPushButton:hover {
-                background-color: #c0392b;
+                background: rgba(124, 77, 255, 0.1);
             }
         """)
     
@@ -1890,8 +2268,6 @@ class OrganizePage(QWidget):
         
         # UPDATE UI IMMEDIATELY - show "watching" state right away
         self._update_watch_summary_as_watching()
-        self.watch_activity_label.setVisible(True)
-        self.watch_activity_label.setText("Preparing...")
         
         # Process events to update UI before dialog
         from PySide6.QtWidgets import QApplication
@@ -1921,42 +2297,21 @@ class OrganizePage(QWidget):
         
         total_items = existing_count + subfolder_count
         if total_items > 0 and not is_catch_up and not skip_existing_popup:
-            dialog = QMessageBox(self)
-            dialog.setWindowTitle("Organize Existing Files?")
-            
-            if subfolder_count > 0:
-                dialog.setText(f"Found {existing_count} file(s) and {subfolder_count} subfolder(s) in the watched folder(s).")
-            else:
-                dialog.setText(f"Found {existing_count} file(s) in the watched folder(s).")
-            dialog.setInformativeText(
-                "Choose how to handle existing files:\n\n"
-                "• Re-organize All: Flatten folders first, then organize fresh\n"
-                "• Organize As-Is: Organize files in current locations\n"
-                "• Watch Only: Skip existing, only organize new files"
-            )
-            
-            reorganize_btn = dialog.addButton("Re-organize All", QMessageBox.AcceptRole)
-            organize_btn = dialog.addButton("Organize As-Is", QMessageBox.AcceptRole)
-            watch_btn = dialog.addButton("Watch Only", QMessageBox.RejectRole)
-            
+            dialog = ApplyInstructionsDialog(self, existing_count, subfolder_count)
             dialog.exec()
-            clicked = dialog.clickedButton()
             
-            if clicked == reorganize_btn:
+            if dialog.result_choice == ApplyInstructionsDialog.REORGANIZE_ALL:
                 organize_existing = True
                 flatten_first = True
-            elif clicked == organize_btn:
+            elif dialog.result_choice == ApplyInstructionsDialog.ORGANIZE_AS_IS:
                 organize_existing = True
-            # else: watch_btn - just watch, don't organize existing
+            # else: CONTINUE_WATCHING - just watch, don't organize existing
         elif is_catch_up:
             organize_existing = True
         
         # Start the watcher
         self.auto_watcher.start(organize_existing=organize_existing, flatten_first=flatten_first)
         
-        # Update activity label
-        self.watch_activity_label.setText("Waiting for new files...")
-    
     def _stop_watch_mode(self):
         """Stop watching folders."""
         if self.auto_watcher:
@@ -1967,8 +2322,6 @@ class OrganizePage(QWidget):
         
         # Update UI using centralized method
         self._update_watch_summary()
-        self.watch_activity_label.setVisible(False)
-        self.watch_activity_label.setText("")
     
     def _check_auto_start(self):
         """Check if we should auto-start the watcher on app open."""
@@ -1996,29 +2349,20 @@ class OrganizePage(QWidget):
     
     def _on_watch_file_organized(self, source: str, dest: str, category: str):
         """Handle file organized signal from watcher."""
-        file_name = os.path.basename(source)
-        self.watch_activity_label.setVisible(True)
-        self.watch_activity_label.setText(f"Latest: {file_name} → {category}/")
+        # Just log it, don't show in UI per user request
+        pass
         logger.info(f"Watch organized: {source} -> {dest}")
     
     def _on_watch_file_indexed(self, file_path: str):
         """Handle file indexed signal from watcher."""
-        file_name = os.path.basename(file_path)
-        self.watch_activity_label.setVisible(True)
-        self.watch_activity_label.setText(f"Indexing: {file_name}")
         logger.info(f"Watch auto-indexed: {file_path}")
     
     def _on_watch_status(self, status: str):
         """Handle status updates from watcher."""
-        # Show status in activity label, not status label (which now shows folder count)
-        self.watch_activity_label.setVisible(True)
-        self.watch_activity_label.setText(status)
+        logger.info(f"Watch status: {status}")
     
     def _on_watch_error(self, path: str, error: str):
         """Handle errors from watcher."""
-        file_name = os.path.basename(path) if path else "Unknown"
-        self.watch_activity_label.setVisible(True)
-        self.watch_activity_label.setText(f"⚠️ Error: {file_name}")
         logger.error(f"Watch error for {path}: {error}")
     
     def showEvent(self, event):
