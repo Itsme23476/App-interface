@@ -23,7 +23,7 @@ from PySide6.QtWidgets import (
     QProgressBar, QMessageBox, QFileDialog, QGroupBox,
     QSplitter, QFrame, QSizePolicy, QScrollArea,
     QDialog, QListWidget, QListWidgetItem, QCheckBox,
-    QSpacerItem
+    QSpacerItem, QStackedWidget, QButtonGroup
 )
 from PySide6.QtCore import Qt, QThread, Signal, QTimer
 
@@ -289,6 +289,274 @@ class EmptyFolderDialog(QDialog):
     
     def get_folders_to_delete(self) -> list:
         return self.folders_to_delete
+
+
+class ModernConfirmDialog(QDialog):
+    """
+    Modern styled confirmation dialog matching the app's purple theme.
+    Futuristic look with drop shadow, draggable window, and smooth styling.
+    """
+    
+    def __init__(self, parent=None, title: str = "Confirm", message: str = "", 
+                 details: list = None, highlight_text: str = "", info_text: str = "",
+                 yes_text: str = "Yes", no_text: str = "No"):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setMinimumWidth(500)
+        self.setModal(True)
+        self.result_accepted = False
+        self._drag_pos = None
+        
+        # Remove default window frame for custom styling
+        self.setWindowFlags(self.windowFlags() | Qt.FramelessWindowHint)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        
+        # Main container with rounded corners and shadow
+        self.container = QFrame(self)
+        self.container.setObjectName("modernDialogContainer")
+        self.container.setStyleSheet("""
+            QFrame#modernDialogContainer {
+                background-color: #FFFFFF;
+                border-radius: 24px;
+                border: 1px solid #E0E0E0;
+            }
+        """)
+        
+        # Add subtle drop shadow effect
+        from PySide6.QtWidgets import QGraphicsDropShadowEffect
+        from PySide6.QtGui import QColor
+        shadow = QGraphicsDropShadowEffect(self)
+        shadow.setBlurRadius(25)
+        shadow.setXOffset(0)
+        shadow.setYOffset(4)
+        shadow.setColor(QColor(0, 0, 0, 40))
+        self.container.setGraphicsEffect(shadow)
+        
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(20, 20, 20, 20)  # Space for shadow
+        main_layout.addWidget(self.container)
+        
+        layout = QVBoxLayout(self.container)
+        layout.setContentsMargins(32, 28, 32, 28)
+        layout.setSpacing(20)
+        
+        # Header with gradient icon and title
+        header_layout = QHBoxLayout()
+        header_layout.setSpacing(16)
+        
+        # Clean icon background
+        icon_label = QLabel("✨")
+        icon_label.setStyleSheet("""
+            font-size: 26px;
+            background-color: #F3EEFF;
+            border-radius: 22px;
+            border: 2px solid #E8DFFF;
+        """)
+        icon_label.setFixedSize(52, 52)
+        icon_label.setAlignment(Qt.AlignCenter)
+        header_layout.addWidget(icon_label)
+        
+        title_label = QLabel(title)
+        title_label.setStyleSheet("""
+            font-family: "Segoe UI", "SF Pro Display", sans-serif;
+            font-size: 20px;
+            font-weight: 700;
+            color: #1A1A2E;
+            letter-spacing: -0.3px;
+        """)
+        header_layout.addWidget(title_label)
+        header_layout.addStretch()
+        
+        # Close button with hover effect
+        close_btn = QPushButton("✕")
+        close_btn.setFixedSize(36, 36)
+        close_btn.setCursor(Qt.PointingHandCursor)
+        close_btn.setStyleSheet("""
+            QPushButton {
+                background-color: transparent;
+                border: none;
+                color: #AAAAAA;
+                font-size: 18px;
+                font-weight: 300;
+                border-radius: 18px;
+            }
+            QPushButton:hover {
+                background-color: rgba(124, 77, 255, 0.1);
+                color: #7C4DFF;
+            }
+        """)
+        close_btn.clicked.connect(self.reject)
+        header_layout.addWidget(close_btn)
+        
+        layout.addLayout(header_layout)
+        
+        # Subtle divider line
+        divider = QFrame()
+        divider.setFixedHeight(1)
+        divider.setStyleSheet("background-color: #EEEEEE;")
+        layout.addWidget(divider)
+        
+        # Main message
+        if message:
+            msg_label = QLabel(message)
+            msg_label.setWordWrap(True)
+            msg_label.setStyleSheet("""
+                font-family: "Segoe UI", sans-serif;
+                font-size: 15px;
+                color: #444444;
+                line-height: 1.6;
+            """)
+            layout.addWidget(msg_label)
+        
+        # Details list (bullet points) - clean solid style
+        if details:
+            details_frame = QFrame()
+            details_frame.setStyleSheet("""
+                QFrame {
+                    background-color: #F8F8FA;
+                    border-radius: 16px;
+                    border: 1px solid #EEEEEE;
+                }
+            """)
+            details_layout = QVBoxLayout(details_frame)
+            details_layout.setContentsMargins(20, 16, 20, 16)
+            details_layout.setSpacing(12)
+            
+            for detail in details:
+                detail_row = QHBoxLayout()
+                detail_row.setSpacing(12)
+                
+                # Purple dot indicator
+                dot = QLabel("•")
+                dot.setStyleSheet("font-size: 18px; color: #7C4DFF;")
+                dot.setFixedWidth(16)
+                detail_row.addWidget(dot)
+                
+                detail_label = QLabel(detail)
+                detail_label.setStyleSheet("""
+                    font-family: "Segoe UI", sans-serif;
+                    font-size: 14px;
+                    color: #333333;
+                    font-weight: 500;
+                """)
+                detail_row.addWidget(detail_label)
+                detail_row.addStretch()
+                
+                details_layout.addLayout(detail_row)
+            
+            layout.addWidget(details_frame)
+        
+        # Highlighted text (purple with glow effect)
+        if highlight_text:
+            highlight_label = QLabel(highlight_text)
+            highlight_label.setWordWrap(True)
+            highlight_label.setStyleSheet("""
+                font-family: "Segoe UI", sans-serif;
+                font-size: 14px;
+                font-weight: 600;
+                color: #7C4DFF;
+                padding: 8px 0px;
+            """)
+            layout.addWidget(highlight_label)
+        
+        # Info text
+        if info_text:
+            info_label = QLabel(info_text)
+            info_label.setWordWrap(True)
+            info_label.setStyleSheet("""
+                font-family: "Segoe UI", sans-serif;
+                font-size: 13px;
+                color: #888888;
+                font-style: italic;
+            """)
+            layout.addWidget(info_label)
+        
+        layout.addSpacing(12)
+        
+        # Buttons with modern styling
+        btn_layout = QHBoxLayout()
+        btn_layout.setSpacing(14)
+        btn_layout.addStretch()
+        
+        no_btn = QPushButton(no_text)
+        no_btn.setMinimumHeight(46)
+        no_btn.setMinimumWidth(120)
+        no_btn.setCursor(Qt.PointingHandCursor)
+        no_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #FFFFFF;
+                color: #666666;
+                border: 2px solid #E8E8E8;
+                border-radius: 12px;
+                font-family: "Segoe UI", sans-serif;
+                font-weight: 600;
+                font-size: 14px;
+                padding: 10px 28px;
+            }
+            QPushButton:hover {
+                background-color: #FAFAFA;
+                border-color: #CCCCCC;
+                color: #444444;
+            }
+        """)
+        no_btn.clicked.connect(self.reject)
+        btn_layout.addWidget(no_btn)
+        
+        yes_btn = QPushButton(yes_text)
+        yes_btn.setMinimumHeight(46)
+        yes_btn.setMinimumWidth(120)
+        yes_btn.setCursor(Qt.PointingHandCursor)
+        yes_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #7C4DFF;
+                color: white;
+                border: none;
+                border-radius: 12px;
+                font-family: "Segoe UI", sans-serif;
+                font-weight: 600;
+                font-size: 14px;
+                padding: 10px 28px;
+            }
+            QPushButton:hover {
+                background-color: #9575FF;
+            }
+        """)
+        yes_btn.clicked.connect(self.accept)
+        btn_layout.addWidget(yes_btn)
+        
+        layout.addLayout(btn_layout)
+    
+    def mousePressEvent(self, event):
+        """Enable dragging the dialog."""
+        if event.button() == Qt.LeftButton:
+            self._drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+            event.accept()
+    
+    def mouseMoveEvent(self, event):
+        """Handle drag movement."""
+        if self._drag_pos is not None and event.buttons() == Qt.LeftButton:
+            self.move(event.globalPosition().toPoint() - self._drag_pos)
+            event.accept()
+    
+    def mouseReleaseEvent(self, event):
+        """End dragging."""
+        self._drag_pos = None
+        event.accept()
+    
+    def accept(self):
+        self.result_accepted = True
+        super().accept()
+    
+    @staticmethod
+    def ask(parent, title: str, message: str, details: list = None, 
+            highlight_text: str = "", info_text: str = "",
+            yes_text: str = "Yes", no_text: str = "No") -> bool:
+        """Show dialog and return True if user clicked Yes."""
+        dialog = ModernConfirmDialog(
+            parent, title, message, details, highlight_text, info_text, yes_text, no_text
+        )
+        dialog.exec()
+        return dialog.result_accepted
 
 
 class WatchConfigDialog(QDialog):
@@ -707,18 +975,107 @@ class OrganizePage(QWidget):
         header.setObjectName("heroHeading")
         layout.addWidget(header)
         
-        subtitle = QLabel(
+        self.subtitle = QLabel(
             "Describe how you want your files organized in plain English. "
             "AI will analyze your indexed files and propose an organization plan."
         )
-        subtitle.setObjectName("heroSubtitle")
-        subtitle.setWordWrap(True)
-        layout.addWidget(subtitle)
+        self.subtitle.setObjectName("heroSubtitle")
+        self.subtitle.setWordWrap(True)
+        layout.addWidget(self.subtitle)
+        
+        # ========== SEGMENTED CONTROL (TAB SWITCHER) ==========
+        tab_container = QHBoxLayout()
+        tab_container.setSpacing(0)
+        tab_container.addStretch()
+        
+        self.tab_organize_now = QPushButton("✨ Organize Now")
+        self.tab_organize_now.setMinimumHeight(44)
+        self.tab_organize_now.setMinimumWidth(160)
+        self.tab_organize_now.setCursor(Qt.PointingHandCursor)
+        self.tab_organize_now.setCheckable(True)
+        self.tab_organize_now.setChecked(True)
+        self.tab_organize_now.setStyleSheet("""
+            QPushButton {
+                background-color: #7C4DFF;
+                color: white;
+                border: 2px solid #7C4DFF;
+                border-top-left-radius: 12px;
+                border-bottom-left-radius: 12px;
+                border-top-right-radius: 0px;
+                border-bottom-right-radius: 0px;
+                font-weight: 600;
+                font-size: 14px;
+                padding: 10px 20px;
+            }
+            QPushButton:checked {
+                background-color: #7C4DFF;
+                color: white;
+            }
+            QPushButton:!checked {
+                background-color: #FFFFFF;
+                color: #7C4DFF;
+                border: 2px solid #E0E0E0;
+            }
+            QPushButton:!checked:hover {
+                background-color: rgba(124, 77, 255, 0.05);
+                border-color: #7C4DFF;
+            }
+        """)
+        tab_container.addWidget(self.tab_organize_now)
+        
+        self.tab_auto_organize = QPushButton("👁️ Auto-Organize")
+        self.tab_auto_organize.setMinimumHeight(44)
+        self.tab_auto_organize.setMinimumWidth(160)
+        self.tab_auto_organize.setCursor(Qt.PointingHandCursor)
+        self.tab_auto_organize.setCheckable(True)
+        self.tab_auto_organize.setChecked(False)
+        self.tab_auto_organize.setStyleSheet("""
+            QPushButton {
+                background-color: #FFFFFF;
+                color: #7C4DFF;
+                border: 2px solid #E0E0E0;
+                border-top-right-radius: 12px;
+                border-bottom-right-radius: 12px;
+                border-top-left-radius: 0px;
+                border-bottom-left-radius: 0px;
+                font-weight: 600;
+                font-size: 14px;
+                padding: 10px 20px;
+            }
+            QPushButton:checked {
+                background-color: #7C4DFF;
+                color: white;
+                border-color: #7C4DFF;
+            }
+            QPushButton:!checked {
+                background-color: #FFFFFF;
+                color: #7C4DFF;
+            }
+            QPushButton:!checked:hover {
+                background-color: rgba(124, 77, 255, 0.05);
+                border-color: #7C4DFF;
+            }
+        """)
+        tab_container.addWidget(self.tab_auto_organize)
+        
+        tab_container.addStretch()
+        layout.addLayout(tab_container)
+        
+        layout.addSpacing(10)
+        
+        # ========== STACKED WIDGET FOR TAB CONTENT ==========
+        self.content_stack = QStackedWidget()
+        
+        # ----- PAGE 0: Organize Now -----
+        organize_now_page = QWidget()
+        organize_now_layout = QVBoxLayout(organize_now_page)
+        organize_now_layout.setContentsMargins(0, 0, 0, 0)
+        organize_now_layout.setSpacing(20)
         
         # Instruction Input Card
-        instruction_card = QFrame()
-        instruction_card.setObjectName("organizeCard")
-        instruction_card.setStyleSheet("""
+        self.instruction_card = QFrame()
+        self.instruction_card.setObjectName("organizeCard")
+        self.instruction_card.setStyleSheet("""
             QFrame#organizeCard {
                 background-color: rgba(124, 77, 255, 0.06);
                 border: 2px dashed rgba(124, 77, 255, 0.5);
@@ -726,7 +1083,7 @@ class OrganizePage(QWidget):
                 padding: 24px;
             }
         """)
-        instruction_layout = QVBoxLayout(instruction_card)
+        instruction_layout = QVBoxLayout(self.instruction_card)
         instruction_layout.setContentsMargins(20, 20, 20, 20)
         instruction_layout.setSpacing(12)
         
@@ -804,19 +1161,19 @@ class OrganizePage(QWidget):
         examples_label.setWordWrap(True)
         instruction_layout.addWidget(examples_label)
         
-        layout.addWidget(instruction_card)
+        organize_now_layout.addWidget(self.instruction_card)
         
         # Destination Folder Card
-        dest_card = QFrame()
-        dest_card.setObjectName("organizeCard")
-        dest_card.setStyleSheet("""
+        self.dest_card = QFrame()
+        self.dest_card.setObjectName("organizeCard")
+        self.dest_card.setStyleSheet("""
             QFrame#organizeCard {
                 background-color: rgba(124, 77, 255, 0.06);
                 border: 2px dashed rgba(124, 77, 255, 0.5);
                 border-radius: 20px;
             }
         """)
-        dest_layout = QHBoxLayout(dest_card)
+        dest_layout = QHBoxLayout(self.dest_card)
         dest_layout.setContentsMargins(20, 16, 20, 16)
         dest_layout.setSpacing(16)
         
@@ -859,7 +1216,7 @@ class OrganizePage(QWidget):
         self.dest_button.clicked.connect(self.select_destination)
         dest_layout.addWidget(self.dest_button)
         
-        layout.addWidget(dest_card)
+        organize_now_layout.addWidget(self.dest_card)
 
         # Action Buttons
         action_layout = QHBoxLayout()
@@ -884,9 +1241,9 @@ class OrganizePage(QWidget):
                 color: white;
             }
             QPushButton:disabled {
-                background-color: transparent;
-                border-color: #3A3A3A;
-                color: #606060;
+                background-color: rgba(124, 77, 255, 0.1);
+                border: 2px solid #7C4DFF;
+                color: #7C4DFF;
             }
         """)
         self.generate_button.clicked.connect(self.generate_plan)
@@ -925,16 +1282,14 @@ class OrganizePage(QWidget):
         self.clear_button.setStyleSheet("""
             QPushButton {
                 background-color: #FFFFFF;
-                color: #666666;
-                border: 2px solid #999999;
+                color: #7C4DFF;
+                border: 2px solid #7C4DFF;
                 border-radius: 12px;
                 font-weight: 600;
                 font-size: 15px;
             }
             QPushButton:hover {
-                border-color: #333333;
-                color: #333333;
-                background-color: #F5F5F5;
+                background-color: #F3EEFF;
             }
         """)
         self.clear_button.clicked.connect(self.clear_plan)
@@ -949,25 +1304,49 @@ class OrganizePage(QWidget):
         self.undo_button.setStyleSheet("""
             QPushButton {
                 background-color: #FFFFFF;
-                color: #FFA726;
-                border: 2px solid #FFA726;
+                color: #9575FF;
+                border: 2px solid #9575FF;
                 border-radius: 12px;
                 font-weight: 600;
                 font-size: 15px;
             }
             QPushButton:hover {
-                background-color: #FFF3E0;
-                color: #F57C00;
-                border-color: #F57C00;
+                background-color: #F3EEFF;
+                color: #7C4DFF;
+                border-color: #7C4DFF;
             }
             QPushButton:disabled {
-                background-color: transparent;
-                border-color: #E0E0E0;
+                background-color: #FAFAFA;
+                border-color: #E8E8E8;
                 color: #CCCCCC;
             }
         """)
         self.undo_button.clicked.connect(self.undo_last_organization)
         action_layout.addWidget(self.undo_button)
+        
+        # Edit button (to show inputs again after plan generation)
+        self.edit_inputs_button = QPushButton("✏️ Edit")
+        self.edit_inputs_button.setMinimumHeight(48)
+        self.edit_inputs_button.setCursor(Qt.PointingHandCursor)
+        self.edit_inputs_button.setStyleSheet("""
+            QPushButton {
+                background-color: #FFFFFF;
+                color: #666666;
+                border: 2px solid #E0E0E0;
+                border-radius: 12px;
+                font-weight: 600;
+                font-size: 15px;
+                padding: 0px 20px;
+            }
+            QPushButton:hover {
+                background-color: #F5F5F5;
+                border-color: #7C4DFF;
+                color: #7C4DFF;
+            }
+        """)
+        self.edit_inputs_button.clicked.connect(self._show_input_cards)
+        self.edit_inputs_button.setVisible(False)
+        action_layout.addWidget(self.edit_inputs_button)
         
         action_layout.addStretch()
         
@@ -976,144 +1355,118 @@ class OrganizePage(QWidget):
         self.clear_button.setVisible(False)
         self.undo_button.setVisible(False)
         
-        layout.addLayout(action_layout)
+        organize_now_layout.addLayout(action_layout)
         
         # Progress and Status
         self.progress_bar = QProgressBar()
         self.progress_bar.setVisible(False)
         self.progress_bar.setMinimumHeight(8)
-        layout.addWidget(self.progress_bar)
+        organize_now_layout.addWidget(self.progress_bar)
         
         self.status_label = QLabel("")
         self.status_label.setStyleSheet("color: #888; font-style: italic; font-size: 13px;")
-        layout.addWidget(self.status_label)
+        organize_now_layout.addWidget(self.status_label)
 
         # Results Area (Splitter: Tree + Details) - Hidden until plan is generated
         self.results_splitter = QSplitter(Qt.Horizontal)
         self.results_splitter.setChildrenCollapsible(False)
         
-        # Left: Plan Tree Card
+        # Plan Tree Card - Matching the clean input card style
         plan_card = QFrame()
-        plan_card.setObjectName("resultsCard")
+        plan_card.setObjectName("planCard")
         plan_card.setStyleSheet("""
-            QFrame#resultsCard {
-                background-color: #FFFFFF;
-                border: 1px solid #E0E0E0;
-                border-radius: 16px;
+            QFrame#planCard {
+                background-color: rgba(124, 77, 255, 0.06);
+                border: 2px dashed rgba(124, 77, 255, 0.5);
+                border-radius: 20px;
             }
         """)
-        plan_layout = QVBoxLayout(plan_card)
-        plan_layout.setContentsMargins(0, 0, 0, 0)
-        plan_layout.setSpacing(0)
         
-        # Modern Header for Tree
-        plan_header = QLabel("  Proposed Organization")
-        plan_header.setStyleSheet("""
-            background-color: #FAFAFA;
-            color: #666666;
+        plan_layout = QVBoxLayout(plan_card)
+        plan_layout.setContentsMargins(20, 20, 20, 20)
+        plan_layout.setSpacing(12)
+        
+        # Simple title matching input card style
+        plan_title = QLabel("📁 Proposed Organization")
+        plan_title.setStyleSheet("""
             font-family: "Segoe UI", sans-serif;
             font-weight: 600;
-            font-size: 12px;
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-            padding: 12px 16px;
-            border-top-left-radius: 16px;
-            border-top-right-radius: 16px;
-            border-bottom: 1px solid #EEEEEE;
+            font-size: 16px;
+            color: #7C4DFF;
+            background: transparent;
         """)
-        plan_layout.addWidget(plan_header)
+        plan_layout.addWidget(plan_title)
         
         self.plan_tree = QTreeWidget()
-        self.plan_tree.setHeaderHidden(True)  # Hide default header
+        self.plan_tree.setHeaderHidden(True)
         self.plan_tree.setIndentation(20)
         self.plan_tree.setAlternatingRowColors(False)
         self.plan_tree.setStyleSheet("""
             QTreeWidget {
-                border: none;
                 background-color: transparent;
-                font-family: "Segoe UI", "Helvetica Neue", sans-serif;
+                border: none;
+                font-family: "Segoe UI", sans-serif;
                 font-size: 14px;
-                padding: 10px;
+                padding: 4px;
                 outline: none;
             }
             QTreeWidget::item {
-                height: 32px;
-                color: #2D2D2D;
-                border-radius: 6px;
-                padding-left: 4px;
+                height: 38px;
+                color: #333333;
+                border-radius: 10px;
+                padding-left: 8px;
+                margin: 2px 0px;
             }
             QTreeWidget::item:hover {
-                background-color: #F5F5F5;
+                background-color: rgba(255, 255, 255, 0.6);
             }
             QTreeWidget::item:selected {
-                background-color: rgba(124, 77, 255, 0.08);
+                background-color: rgba(255, 255, 255, 0.8);
                 color: #7C4DFF;
                 font-weight: 600;
             }
-            /* Explicitly set Black Arrows */
-            QTreeView::branch:has-children:!has-siblings:closed,
-            QTreeView::branch:closed:has-children:has-siblings {
-                image: url(data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxNiIgaGVpZ2h0PSIxNiIgdmlld0JveD0iMCAwIDE2IDE2Ij48cGF0aCBmaWxsPSIjMzMzMzMzIiBkPSZNIDYgNCBMIDYgMTIgTCAxMiA4IFogIi8+PC9zdmc+);
-            }
-            QTreeView::branch:open:has-children:!has-siblings,
-            QTreeView::branch:open:has-children:has-siblings {
-                image: url(data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxNiIgaGVpZ2h0PSIxNiIgdmlld0JveD0iMCAwIDE2IDE2Ij48cGF0aCBmaWxsPSIjMzMzMzMzIiBkPSZNIDQgNiBMIDEyIDYgTCA4IDEyIFogIi8+PC9zdmc+);
+            /* Hide native branch indicators completely */
+            QTreeView::branch {
+                background: transparent;
+                width: 0px;
+                border: none;
+                image: none;
             }
         """)
+        self.plan_tree.setRootIsDecorated(False)  # Remove native expand buttons
         self.plan_tree.itemClicked.connect(self._on_tree_item_clicked)
         plan_layout.addWidget(self.plan_tree)
         
         self.results_splitter.addWidget(plan_card)
         
-        # Right: Details Panel Card
-        details_card = QFrame()
-        details_card.setObjectName("resultsCard")
-        details_card.setStyleSheet("""
-            QFrame#resultsCard {
-                background-color: #FFFFFF;
-                border: 1px solid #E0E0E0;
-                border-radius: 16px;
-            }
-        """)
-        details_layout = QVBoxLayout(details_card)
-        details_layout.setContentsMargins(0, 0, 0, 0)
-        details_layout.setSpacing(0)
-        
-        # Modern Header for Details
-        details_header = QLabel("  Plan Details")
-        details_header.setStyleSheet("""
-            background-color: rgba(124, 77, 255, 0.05);
-            color: #7C4DFF;
-            font-weight: 600;
-            font-size: 13px;
-            padding: 12px;
-            border-top-left-radius: 16px;
-            border-top-right-radius: 16px;
-            border-bottom: 1px solid #E0E0E0;
-        """)
-        details_layout.addWidget(details_header)
-        
-        self.details_text = QTextEdit()
-        self.details_text.setReadOnly(True)
-        self.details_text.setFrameShape(QFrame.NoFrame)
-        self.details_text.setStyleSheet("""
-            QTextEdit {
-                background-color: transparent;
-                color: #333333;
-                font-family: "Segoe UI", "Helvetica Neue", sans-serif;
-                font-size: 14px;
-                line-height: 1.5;
-                padding: 16px;
-                border: none;
-            }
-        """)
-        details_layout.addWidget(self.details_text)
-        
-        self.results_splitter.addWidget(details_card)
-        self.results_splitter.setSizes([500, 300])
-        
         self.results_splitter.setVisible(False)  # Hidden until plan is generated
-        layout.addWidget(self.results_splitter, 1)
+        
+        # Summary line (shown after plan generation) - subtle and clean
+        self.plan_summary_label = QLabel("")
+        self.plan_summary_label.setStyleSheet("""
+            font-family: "Segoe UI", sans-serif;
+            font-size: 13px;
+            font-weight: 500;
+            color: #888888;
+            padding: 4px 0px;
+        """)
+        self.plan_summary_label.setVisible(False)
+        organize_now_layout.addWidget(self.plan_summary_label)
+        
+        # Info note for existing folders (subtle, not alarming)
+        self.existing_folders_note = QLabel("")
+        self.existing_folders_note.setWordWrap(True)
+        self.existing_folders_note.setStyleSheet("""
+            font-family: "Segoe UI", sans-serif;
+            font-size: 12px;
+            color: #999999;
+            font-style: italic;
+            padding: 2px 0px;
+        """)
+        self.existing_folders_note.setVisible(False)
+        organize_now_layout.addWidget(self.existing_folders_note)
+        
+        organize_now_layout.addWidget(self.results_splitter, 1)
         
         # Feedback/Refinement Section (hidden until plan is generated)
         self.feedback_group = QGroupBox("Refine Plan")
@@ -1148,10 +1501,28 @@ class OrganizePage(QWidget):
         self.refine_button.clicked.connect(self.refine_plan)
         feedback_layout.addWidget(self.refine_button)
         
-        layout.addWidget(self.feedback_group)
+        organize_now_layout.addWidget(self.feedback_group)
+        organize_now_layout.addStretch()
+        
+        self.content_stack.addWidget(organize_now_page)
+        
+        # ----- PAGE 1: Auto-Organize -----
+        auto_organize_page = QWidget()
+        auto_organize_layout = QVBoxLayout(auto_organize_page)
+        auto_organize_layout.setContentsMargins(0, 0, 0, 0)
+        auto_organize_layout.setSpacing(20)
         
         # ========== WATCH & AUTO-ORGANIZE SECTION ==========
-        self._create_auto_organize_section(layout)
+        self._create_auto_organize_section(auto_organize_layout)
+        
+        auto_organize_layout.addStretch()
+        self.content_stack.addWidget(auto_organize_page)
+        
+        layout.addWidget(self.content_stack, 1)
+        
+        # Connect tab buttons
+        self.tab_organize_now.clicked.connect(lambda: self._switch_tab(0))
+        self.tab_auto_organize.clicked.connect(lambda: self._switch_tab(1))
         
         # Finalize scroll area
         scroll.setWidget(container)
@@ -1668,6 +2039,59 @@ class OrganizePage(QWidget):
             logger.error(f"Error getting file count: {e}")
             self.status_label.setText("Could not load file count")
     
+    def _switch_tab(self, index: int):
+        """Switch between Organize Now (0) and Auto-Organize (1) tabs."""
+        self.content_stack.setCurrentIndex(index)
+        
+        # Update button checked states
+        self.tab_organize_now.setChecked(index == 0)
+        self.tab_auto_organize.setChecked(index == 1)
+    def _hide_input_cards(self):
+        """Hide instruction and destination cards after plan is generated."""
+        self.instruction_card.setVisible(False)
+        self.dest_card.setVisible(False)
+        self.subtitle.setVisible(False)  # Hide subtitle to save space
+        self.edit_inputs_button.setVisible(True)
+    
+    def _show_input_cards(self):
+        """Show instruction and destination cards, hide plan (return to input view)."""
+        self.instruction_card.setVisible(True)
+        self.dest_card.setVisible(True)
+        self.subtitle.setVisible(True)  # Show subtitle again
+        self.edit_inputs_button.setVisible(False)
+        
+        # Hide the plan completely - return to clean input view
+        self._hide_plan_ui()
+        self.apply_button.setVisible(False)
+        self.clear_button.setVisible(False)
+        self.undo_button.setVisible(False)
+        self.feedback_group.setVisible(False)
+    
+    def _show_plan_summary(self, folder_count: int, file_count: int, total_size_mb: float):
+        """Show the plan summary line."""
+        self.plan_summary_label.setText(f"📊 {folder_count} folders  •  {file_count} files  •  {total_size_mb:.2f} MB")
+        self.plan_summary_label.setVisible(True)
+    
+    def _show_existing_folders_warning(self, folders: list):
+        """Show subtle note for existing folders."""
+        if folders:
+            if len(folders) <= 3:
+                folder_names = ", ".join(folders)
+            else:
+                folder_names = ", ".join(folders[:3]) + f" +{len(folders) - 3} more"
+            self.existing_folders_note.setText(f"Note: {folder_names} already exist — files will be added to them.")
+            self.existing_folders_note.setVisible(True)
+        else:
+            self.existing_folders_note.setVisible(False)
+    
+    def _hide_plan_ui(self):
+        """Hide plan-related UI elements."""
+        self.plan_summary_label.setVisible(False)
+        self.existing_folders_note.setVisible(False)
+        self.results_splitter.setVisible(False)
+        self.edit_inputs_button.setVisible(False)
+
+    
     def select_destination(self):
         """Open folder picker for destination."""
         folder = QFileDialog.getExistingDirectory(
@@ -1952,19 +2376,21 @@ class OrganizePage(QWidget):
         
         # Auto-organize mode: no instruction provided
         if not instruction:
-            reply = QMessageBox.question(
+            confirmed = ModernConfirmDialog.ask(
                 self,
-                "Auto-Organize Mode",
-                "AI will analyze your files and propose an organization structure based on:\n\n"
-                "  - File types and categories\n"
-                "  - AI-generated tags and labels\n"
-                "  - Content analysis\n\n"
-                "The structure will be kept simple with minimal nesting.\n\n"
-                "You will preview the plan before anything is moved.",
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.Yes
+                title="Auto-Organize Mode",
+                message="AI will analyze your files and propose an organization structure based on:",
+                details=[
+                    "File types and categories",
+                    "AI-generated tags and labels", 
+                    "Content analysis"
+                ],
+                highlight_text="The structure will be kept simple with minimal nesting.",
+                info_text="You will preview the plan before anything is moved.",
+                yes_text="Continue",
+                no_text="Cancel"
             )
-            if reply != QMessageBox.Yes:
+            if not confirmed:
                 return
             
             # Use auto-organize instruction - MUST organize ALL files
@@ -2042,7 +2468,7 @@ class OrganizePage(QWidget):
         self.apply_button.setEnabled(False)
         self.status_label.setText(f"Asking AI to organize {len(files)} files...")
         self.plan_tree.clear()
-        self.details_text.clear()
+        # Details panel removed
         
         self.plan_worker = PlanWorker(instruction, files)
         self.plan_worker.finished.connect(self._on_plan_received)
@@ -2158,7 +2584,7 @@ class OrganizePage(QWidget):
             details = f"Validation Errors:\n{'='*40}\n\n{error_text}\n\n"
             details += f"{'='*40}\nAI Response (for debugging):\n"
             details += json.dumps(plan, indent=2, default=str)[:1000]  # Limit length
-            self.details_text.setPlainText(details)
+            # Details panel removed - summary shown in plan_summary_label
             
             # More helpful error message
             first_error = errors[0] if errors else "Unknown error"
@@ -2180,6 +2606,31 @@ class OrganizePage(QWidget):
         self.current_plan = plan
         self.current_moves = plan_to_moves(plan, self.files_by_id, self.destination_path)
         
+        # Calculate plan statistics
+        folder_count = len(plan.get("folders", {}))
+        file_count = sum(len(f_ids) for f_ids in plan.get("folders", {}).values())
+        total_size = sum(
+            self.files_by_id.get(fid, {}).get('file_size', 0) 
+            for folder_files in plan.get("folders", {}).values() 
+            for fid in folder_files
+        )
+        total_size_mb = total_size / (1024 * 1024)
+        
+        # Show plan summary
+        self._show_plan_summary(folder_count, file_count, total_size_mb)
+        
+        # Check for existing folders and show warning
+        existing_folders = []
+        if self.destination_path and self.destination_path.exists():
+            for folder_name in plan.get("folders", {}).keys():
+                proposed_path = self.destination_path / folder_name
+                if proposed_path.exists():
+                    existing_folders.append(folder_name)
+        self._show_existing_folders_warning(existing_folders)
+        
+        # Hide input cards to focus on the plan
+        self._hide_input_cards()
+        
         self._display_plan(plan)
         
         # Check for folders that already exist in destination
@@ -2194,7 +2645,7 @@ class OrganizePage(QWidget):
             folder_list = ", ".join(existing_folders[:3])
             if len(existing_folders) > 3:
                 folder_list += f" and {len(existing_folders) - 3} more"
-            self.details_text.append(f"\n" + "="*50 + f"\nNote: {len(existing_folders)} folder(s) already exist: {folder_list}\nFiles will be added to existing folders.")
+            # self.details_text.append(f"\n" + "="*50 + f"\nNote: {len(existing_folders)} folder(s) already exist: {folder_list}\nFiles will be added to existing folders.")
         
         folder_count = len(plan.get("folders", {}))
         files_in_plan = sum(len(fids) for fids in plan.get("folders", {}).values())
@@ -2242,11 +2693,21 @@ class OrganizePage(QWidget):
         """Show the organization plan in the tree widget."""
         self.plan_tree.clear()
         
+        # Connect expand/collapse signals to update arrows
+        try:
+            self.plan_tree.itemExpanded.disconnect()
+            self.plan_tree.itemCollapsed.disconnect()
+        except:
+            pass
+        self.plan_tree.itemExpanded.connect(self._on_folder_expanded)
+        self.plan_tree.itemCollapsed.connect(self._on_folder_collapsed)
+        
         folders = plan.get("folders", {})
         
         for folder_name, file_ids in sorted(folders.items()):
-            folder_item = QTreeWidgetItem([f"{folder_name}", str(len(file_ids))])
-            folder_item.setExpanded(True)
+            # Add expand arrow prefix - starts collapsed
+            folder_item = QTreeWidgetItem([f"▶  📁 {folder_name}  ({len(file_ids)} files)"])
+            folder_item.setExpanded(False)  # Start collapsed
             folder_item.setData(0, Qt.UserRole, {"type": "folder", "name": folder_name})
             
             display_limit = 25
@@ -2255,14 +2716,14 @@ class OrganizePage(QWidget):
                     fid_int = int(fid)
                     file_info = self.files_by_id.get(fid_int, {})
                     fname = file_info.get("file_name", f"id:{fid}")
-                    file_item = QTreeWidgetItem([f"    {fname}", ""])
+                    file_item = QTreeWidgetItem([fname])  # No icon, just filename
                     file_item.setData(0, Qt.UserRole, {"type": "file", "id": fid_int})
                     folder_item.addChild(file_item)
                 except:
                     pass
             
             if len(file_ids) > display_limit:
-                more_item = QTreeWidgetItem([f"    ... and {len(file_ids) - display_limit} more files", ""])
+                more_item = QTreeWidgetItem([f"+ {len(file_ids) - display_limit} more files..."])
                 more_item.setDisabled(True)
                 folder_item.addChild(more_item)
             
@@ -2284,12 +2745,75 @@ Folders:
         for folder in summary["folders"]:
             details += f"{folder['name']}: {folder['file_count']} files ({folder['size_mb']} MB)\n"
         
-        self.details_text.setPlainText(details)
+        # Details panel removed - summary shown in plan_summary_label
+    
+    def _get_file_icon(self, filename: str) -> str:
+        """Get appropriate emoji icon based on file type."""
+        ext = filename.lower().split('.')[-1] if '.' in filename else ''
+        
+        # Images
+        if ext in ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'svg', 'ico', 'tiff']:
+            return '🖼️'
+        # Videos
+        elif ext in ['mp4', 'mov', 'avi', 'mkv', 'webm', 'flv', 'wmv', 'm4v']:
+            return '🎬'
+        # Audio
+        elif ext in ['mp3', 'wav', 'ogg', 'flac', 'aac', 'm4a', 'wma']:
+            return '🎵'
+        # Documents
+        elif ext in ['pdf']:
+            return '📕'
+        elif ext in ['doc', 'docx']:
+            return '📘'
+        elif ext in ['txt', 'md', 'rtf']:
+            return '📝'
+        # Spreadsheets
+        elif ext in ['xlsx', 'xls', 'csv']:
+            return '📊'
+        # Presentations
+        elif ext in ['ppt', 'pptx']:
+            return '📙'
+        # Code
+        elif ext in ['py', 'js', 'ts', 'html', 'css', 'java', 'cpp', 'c', 'h', 'rb', 'go', 'rs']:
+            return '💻'
+        # Data
+        elif ext in ['json', 'xml', 'yaml', 'yml']:
+            return '📋'
+        # Archives
+        elif ext in ['zip', 'rar', '7z', 'tar', 'gz']:
+            return '📦'
+        # Executables
+        elif ext in ['exe', 'msi', 'app', 'dmg']:
+            return '⚙️'
+        # Default
+        else:
+            return '📄'
+    
+    def _on_folder_expanded(self, item: QTreeWidgetItem):
+        """Update folder arrow when expanded."""
+        data = item.data(0, Qt.UserRole)
+        if data and data.get("type") == "folder":
+            text = item.text(0)
+            if text.startswith("▶"):
+                item.setText(0, "▼" + text[1:])
+    
+    def _on_folder_collapsed(self, item: QTreeWidgetItem):
+        """Update folder arrow when collapsed."""
+        data = item.data(0, Qt.UserRole)
+        if data and data.get("type") == "folder":
+            text = item.text(0)
+            if text.startswith("▼"):
+                item.setText(0, "▶" + text[1:])
     
     def _on_tree_item_clicked(self, item: QTreeWidgetItem, column: int):
-        """Handle tree item click to show details."""
+        """Handle tree item click - toggle expand/collapse for folders."""
         data = item.data(0, Qt.UserRole)
         if not data:
+            return
+        
+        # Toggle expand/collapse for folders
+        if data.get("type") == "folder":
+            item.setExpanded(not item.isExpanded())
             return
         
         if data.get("type") == "file":
@@ -2307,7 +2831,7 @@ Label: {file_info.get('label', 'none')}
 Tags: {', '.join(file_info.get('tags', [])) or 'none'}
 Caption: {file_info.get('caption', 'none')}
 """
-            self.details_text.setPlainText(details)
+            # Details panel removed - summary shown in plan_summary_label
 
     def apply_organization(self):
         """Execute the organization plan after user confirmation."""
@@ -2430,16 +2954,18 @@ Caption: {file_info.get('caption', 'none')}
         self.current_moves = []
         self.original_instruction = None
         self.plan_tree.clear()
-        self.details_text.clear()
         self.apply_button.setEnabled(False)
         self.feedback_group.setVisible(False)
         self.feedback_input.clear()
         
-        # Hide the results section and action buttons (progressive disclosure)
-        self.results_splitter.setVisible(False)
+        # Hide plan UI elements
         self.apply_button.setVisible(False)
         self.clear_button.setVisible(False)
         self.undo_button.setVisible(False)
+        self._hide_plan_ui()
+        
+        # Show input cards again
+        self._show_input_cards()
         
         self._update_file_count()
     
