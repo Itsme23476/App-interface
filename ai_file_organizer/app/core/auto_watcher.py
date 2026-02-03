@@ -55,6 +55,10 @@ class AutoOrganizeWatcher(QObject):
         self._file_check_timer: Optional[QTimer] = None
         self._debounce_seconds = 2.0  # Wait for file to stabilize
         
+        # Counter for periodic cleanup (every N checks)
+        self._check_count = 0
+        self._cleanup_interval = 10  # Run cleanup every 10 checks (~30 seconds)
+        
         # Files to ignore (system files, temp files, etc.)
         self._ignore_patterns = {
             '.DS_Store', 'Thumbs.db', 'desktop.ini', '.git', '.gitignore',
@@ -235,8 +239,13 @@ class AutoOrganizeWatcher(QObject):
         
         # Walk bottom-up to remove nested empty folders
         for dirpath, dirnames, filenames in os.walk(root_folder, topdown=False):
-            if dirpath == root_folder:
-                continue  # Don't remove the root folder
+            # Skip the root folder itself (normalize for comparison)
+            if os.path.normpath(dirpath) == root_folder:
+                continue
+            
+            # Skip hidden folders
+            if os.path.basename(dirpath).startswith('.'):
+                continue
             
             try:
                 # Check if folder is empty (no files or subdirs)
@@ -279,7 +288,7 @@ class AutoOrganizeWatcher(QObject):
         return instruction
     
     def _organize_existing_files(self) -> None:
-        """Organize files already in the watched folders."""
+        """Organize files already in the watched folders (including subfolders)."""
         all_files = []
         
         for folder in self.watched_folders:
@@ -287,26 +296,27 @@ class AutoOrganizeWatcher(QObject):
             if not os.path.isdir(folder):
                 continue
             
-            # Get files in root of this folder (not subfolders)
-            for item in os.listdir(folder):
-                item_path = os.path.join(folder, item)
+            # Get ALL files in this folder AND subfolders
+            for root, dirs, files in os.walk(folder):
+                # Skip hidden directories
+                dirs[:] = [d for d in dirs if not d.startswith('.')]
                 
-                if not os.path.isfile(item_path):
-                    continue
-                
-                if self._should_ignore(item):
-                    continue
-                
-                # Check catch-up filter
-                if self.catch_up_since:
-                    try:
-                        mtime = datetime.fromtimestamp(os.path.getmtime(item_path))
-                        if mtime < self.catch_up_since:
-                            continue  # Skip files older than catch-up time
-                    except Exception:
-                        pass
-                
-                all_files.append((item_path, folder))
+                for item in files:
+                    if self._should_ignore(item):
+                        continue
+                    
+                    item_path = os.path.join(root, item)
+                    
+                    # Check catch-up filter
+                    if self.catch_up_since:
+                        try:
+                            mtime = datetime.fromtimestamp(os.path.getmtime(item_path))
+                            if mtime < self.catch_up_since:
+                                continue  # Skip files older than catch-up time
+                        except Exception:
+                            pass
+                    
+                    all_files.append((item_path, folder))
         
         if not all_files:
             self.status_changed.emit("No existing files to organize")
@@ -350,6 +360,17 @@ class AutoOrganizeWatcher(QObject):
             return
         
         current_time = time.time()
+        
+        # Periodic cleanup of empty folders
+        self._check_count += 1
+        if self._check_count >= self._cleanup_interval:
+            self._check_count = 0
+            for folder in self.watched_folders:
+                folder = os.path.normpath(folder)
+                if os.path.isdir(folder):
+                    deleted = self._cleanup_empty_folders(folder)
+                    if deleted > 0:
+                        logger.info(f"Periodic cleanup: removed {deleted} empty folder(s)")
         
         for folder in self.watched_folders:
             folder = os.path.normpath(folder)
@@ -444,55 +465,38 @@ class AutoOrganizeWatcher(QObject):
                 self.status_changed.emit(f"Indexed {indexed_count} file(s), now organizing...")
                 logger.info(f"Auto-indexed {indexed_count} files successfully")
         
-        # Build file info for AI (now all files should be indexed)
+        # Build file info for AI using SIMPLE SEQUENTIAL IDs
+        # This ensures consistent IDs regardless of database state
         files_info = []
         files_by_id = {}
         
-        for file_path in file_paths:
+        for idx, file_path in enumerate(file_paths, start=1):
             try:
                 file_name = os.path.basename(file_path)
                 file_size = os.path.getsize(file_path)
                 
-                # Check if file is indexed (should be now after auto-indexing)
+                # Use simple sequential ID for reliability
+                file_id = idx
+                
+                # Try to get extra metadata from index if available
                 indexed_info = file_index.get_file_by_path(file_path)
                 
-                if indexed_info:
-                    file_id = indexed_info.get('id')
-                    files_info.append({
-                        'id': file_id,
-                        'file_path': file_path,
-                        'file_name': file_name,
-                        'file_size': file_size,
-                        'label': indexed_info.get('label'),
-                        'caption': indexed_info.get('caption'),
-                        'tags': indexed_info.get('tags', []),
-                        'category': indexed_info.get('category'),
-                    })
-                    files_by_id[file_id] = {
-                        'file_path': file_path,
-                        'file_name': file_name,
-                        'file_size': file_size,
-                    }
-                else:
-                    # File still not indexed (indexing failed) - use basic info
-                    # Generate a temporary ID based on path hash
-                    temp_id = hash(file_path) & 0x7FFFFFFF
-                    files_info.append({
-                        'id': temp_id,
-                        'file_path': file_path,
-                        'file_name': file_name,
-                        'file_size': file_size,
-                        'label': None,
-                        'caption': None,
-                        'tags': [],
-                        'category': None,
-                    })
-                    files_by_id[temp_id] = {
-                        'file_path': file_path,
-                        'file_name': file_name,
-                        'file_size': file_size,
-                    }
-                    logger.warning(f"File not indexed, using basic info: {file_path}")
+                files_info.append({
+                    'id': file_id,
+                    'file_path': file_path,
+                    'file_name': file_name,
+                    'file_size': file_size,
+                    'label': indexed_info.get('label') if indexed_info else None,
+                    'caption': indexed_info.get('caption') if indexed_info else None,
+                    'tags': indexed_info.get('tags', []) if indexed_info else [],
+                    'category': indexed_info.get('category') if indexed_info else None,
+                })
+                files_by_id[file_id] = {
+                    'file_path': file_path,
+                    'file_name': file_name,
+                    'file_size': file_size,
+                    'db_id': indexed_info.get('id') if indexed_info else None,
+                }
                     
             except Exception as e:
                 logger.error(f"Error getting file info for {file_path}: {e}")
@@ -530,20 +534,36 @@ class AutoOrganizeWatcher(QObject):
                 self.status_changed.emit("AI could not generate organization plan")
                 return
             
-            # Deduplicate and ensure all files are included
+            # Deduplicate the plan
             plan = deduplicate_plan(plan)
             valid_ids = set(files_by_id.keys())
-            plan = ensure_all_files_included(plan, valid_ids, files_info)
             
-            is_valid, errors = validate_plan(plan, valid_ids)
+            # Filter plan to only include valid file IDs (ones we actually have)
+            filtered_plan = {"folders": {}}
+            for folder_name, file_ids in plan.get("folders", {}).items():
+                valid_file_ids = []
+                for fid in file_ids:
+                    try:
+                        fid_int = int(fid)
+                        if fid_int in valid_ids:
+                            valid_file_ids.append(fid_int)
+                    except (TypeError, ValueError):
+                        pass
+                if valid_file_ids:
+                    filtered_plan["folders"][folder_name] = valid_file_ids
             
-            if not is_valid:
-                logger.warning(f"Invalid plan: {errors}")
-                self.status_changed.emit(f"Plan validation failed: {errors[0] if errors else 'Unknown error'}")
+            # Ensure all files are included (add missing to 'misc')
+            filtered_plan = ensure_all_files_included(filtered_plan, valid_ids, files_info)
+            
+            if not filtered_plan.get("folders"):
+                logger.warning("No valid files in plan after filtering")
+                self.status_changed.emit("No files to organize")
                 return
             
-            # Execute the plan
-            self._execute_plan(plan, files_by_id, folder)
+            logger.info(f"Filtered plan has {sum(len(v) for v in filtered_plan['folders'].values())} files in {len(filtered_plan['folders'])} folders")
+            
+            # Execute the filtered plan
+            self._execute_plan(filtered_plan, files_by_id, folder)
             
         except Exception as e:
             logger.error(f"AI processing error: {e}")
@@ -613,17 +633,32 @@ class AutoOrganizeWatcher(QObject):
                     logger.info(f"Organized: {source_path} -> {dest_path}")
                     self.file_organized.emit(source_path, dest_path, folder_name)
                     
-                    # Update database if file was indexed
+                    # Update database path using actual DB ID (not sequential ID)
                     from app.core.database import file_index
-                    file_index.update_file_path(file_id_int, dest_path)
+                    db_id = file_info.get('db_id')
+                    if db_id:
+                        file_index.update_file_path(db_id, dest_path)
+                        logger.debug(f"Updated DB path for file {db_id}: {dest_path}")
+                    else:
+                        # File wasn't in DB yet - try to find by old path and update
+                        old_record = file_index.get_file_by_path(source_path)
+                        if old_record:
+                            file_index.update_file_path(old_record['id'], dest_path)
+                            logger.debug(f"Updated DB path for file {old_record['id']}: {dest_path}")
                     
                 except Exception as e:
                     error_count += 1
                     logger.error(f"Error moving file {file_id}: {e}")
                     self.error_occurred.emit(str(file_id), str(e))
         
+        # Clean up empty folders
         if moved_count > 0:
+            deleted_folders = self._cleanup_empty_folders(dest_folder)
+            if deleted_folders > 0:
+                logger.info(f"Deleted {deleted_folders} empty folder(s)")
+            
             self.status_changed.emit(f"Organized {moved_count} file(s)" + 
                                      (f" ({error_count} errors)" if error_count else ""))
         elif error_count > 0:
             self.status_changed.emit(f"Organization failed: {error_count} error(s)")
+    
