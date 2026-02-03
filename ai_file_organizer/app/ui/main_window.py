@@ -1297,83 +1297,185 @@ class MainWindow(QMainWindow):
         settings_widget.setObjectName("settingsContent")
         layout = QVBoxLayout(settings_widget)
         layout.setContentsMargins(40, 30, 40, 30)
-        layout.setSpacing(20)
-
-        # Appearance / Theme
-        appearance_group = QGroupBox("Appearance")
-        appearance_layout = QHBoxLayout(appearance_group)
+        layout.setSpacing(16)
         
-        appearance_layout.addWidget(QLabel("Theme:"))
+        # Style variables for settings (no cascading - applied individually)
+        settings_title_style = "font-size: 15px; font-weight: 600; color: #7C4DFF; background: transparent; border: none;"
+        settings_label_style = "color: #555555; font-size: 13px; background: transparent; border: none;"
+        settings_hint_style = "color: #888888; font-size: 11px; background: transparent; border: none;"
+
+        # ======= APPEARANCE CARD =======
+        appearance_card = QFrame()
+        appearance_card.setObjectName("settingsCard")
+        appearance_card.setStyleSheet("""
+            QFrame#settingsCard {
+                background-color: rgba(124, 77, 255, 0.03);
+                border: 1px dashed rgba(124, 77, 255, 0.25);
+                border-radius: 16px;
+            }
+            QFrame#settingsCard QLabel {
+                border: none;
+                background: transparent;
+            }
+        """)
+        appearance_layout = QVBoxLayout(appearance_card)
+        appearance_layout.setContentsMargins(20, 20, 20, 20)
+        appearance_layout.setSpacing(12)
+        
+        appearance_title = QLabel("🎨 Appearance")
+        appearance_title.setStyleSheet(settings_title_style)
+        appearance_layout.addWidget(appearance_title)
+        
+        theme_row = QHBoxLayout()
+        theme_label = QLabel("Theme:")
+        theme_label.setStyleSheet(settings_label_style)
+        theme_row.addWidget(theme_label)
         self.theme_toggle_btn = QPushButton()
         self.theme_toggle_btn.setCheckable(True)
+        self.theme_toggle_btn.setMinimumHeight(36)
+        self.theme_toggle_btn.setMinimumWidth(120)
+        self.theme_toggle_btn.setCursor(Qt.PointingHandCursor)
+        self.theme_toggle_btn.setStyleSheet("""
+            QPushButton {
+                background-color: white;
+                border: 2px solid #7C4DFF;
+                border-radius: 10px;
+                color: #7C4DFF;
+                font-weight: 600;
+                padding: 0 16px;
+            }
+            QPushButton:hover {
+                background-color: rgba(124, 77, 255, 0.1);
+            }
+            QPushButton:checked {
+                background-color: #7C4DFF;
+                color: white;
+            }
+        """)
         self._update_theme_button()
         self.theme_toggle_btn.clicked.connect(self._on_theme_toggle)
-        appearance_layout.addWidget(self.theme_toggle_btn)
-        appearance_layout.addStretch()
+        theme_row.addWidget(self.theme_toggle_btn)
+        theme_row.addStretch()
+        appearance_layout.addLayout(theme_row)
         
-        layout.addWidget(appearance_group)
+        layout.addWidget(appearance_card)
 
-        # AI Providers section with toggle between Local and OpenAI
-        ai_group = QGroupBox("AI Providers")
-        ai_layout = QVBoxLayout(ai_group)
+        # ======= AI PROVIDERS CARD =======
+        ai_card = QFrame()
+        ai_card.setObjectName("settingsCardAI")
+        ai_card.setStyleSheet("""
+            QFrame#settingsCardAI {
+                background-color: rgba(124, 77, 255, 0.03);
+                border: 1px dashed rgba(124, 77, 255, 0.25);
+                border-radius: 16px;
+            }
+            QFrame#settingsCardAI > QLabel {
+                border: none;
+                background: transparent;
+            }
+        """)
+        ai_layout = QVBoxLayout(ai_card)
+        ai_layout.setContentsMargins(20, 20, 20, 20)
+        ai_layout.setSpacing(12)
+        
+        ai_title = QLabel("🤖 AI Providers")
+        ai_title.setStyleSheet(settings_title_style)
+        ai_layout.addWidget(ai_title)
 
         # Provider selection row
         provider_row = QHBoxLayout()
-        provider_row.addWidget(QLabel("AI Provider:"))
+        provider_label = QLabel("AI Provider:")
+        provider_label.setStyleSheet(settings_label_style)
+        provider_row.addWidget(provider_label)
         self.ai_provider_combo = QComboBox()
-        # OpenAI first (recommended), then Local, then None
+        self.ai_provider_combo.setMinimumHeight(36)
+        self.ai_provider_combo.setStyleSheet("""
+            QComboBox {
+                background-color: white;
+                border: 1px solid #E0E0E0;
+                border-radius: 8px;
+                padding: 6px 12px;
+                min-width: 200px;
+            }
+            QComboBox:hover {
+                border-color: #7C4DFF;
+            }
+            QComboBox::drop-down {
+                border: none;
+                padding-right: 8px;
+            }
+        """)
         self.ai_provider_combo.addItems([
             "OpenAI (Recommended)",
             "Local (Ollama - Advanced)",
             "None (Basic metadata only)"
         ])
-        # Set current selection based on settings.ai_provider
         provider_map = {'openai': 0, 'local': 1, 'none': 2}
         current_idx = provider_map.get(settings.ai_provider, 0)
         self.ai_provider_combo.setCurrentIndex(current_idx)
-        self.ai_provider_combo.setMinimumWidth(220)
         provider_row.addWidget(self.ai_provider_combo)
         provider_row.addStretch()
         ai_layout.addLayout(provider_row)
         
-        # Cost info for OpenAI
         cost_info = QLabel("💡 OpenAI costs ~$0.0002 per file (pennies per month for typical usage)")
-        cost_info.setStyleSheet("color: #888; font-size: 11px;")
+        cost_info.setStyleSheet(settings_hint_style)
         ai_layout.addWidget(cost_info)
 
-        # Local AI Settings group (Advanced)
-        self.local_ai_group = QGroupBox("Local AI Settings (Advanced - Requires Ollama)")
+        # Local AI Settings (collapsible subsection)
+        self.local_ai_group = QFrame()
+        self.local_ai_group.setStyleSheet("QFrame { background: rgba(255,255,255,0.5); border: 1px solid #E0E0E0; border-radius: 12px; }")
         local_ai_layout = QVBoxLayout(self.local_ai_group)
+        local_ai_layout.setContentsMargins(16, 16, 16, 16)
+        local_ai_layout.setSpacing(10)
         
-        # Warning about RAM requirements
-        warning_label = QLabel("⚠️ Local models require 8-16GB RAM. OpenAI is recommended for most users.")
-        warning_label.setStyleSheet("color: #cc7700; font-size: 11px;")
+        local_title = QLabel("⚙️ Local AI Settings (Advanced)")
+        local_title.setStyleSheet("font-size: 13px; font-weight: 600; color: #666666; background: transparent;")
+        local_ai_layout.addWidget(local_title)
+        
+        warning_label = QLabel("⚠️ Requires 8-16GB RAM. OpenAI recommended for most users.")
+        warning_label.setStyleSheet("color: #cc7700; font-size: 11px; background: transparent;")
         local_ai_layout.addWidget(warning_label)
         
-        # Check Ollama Status button
         ollama_row = QHBoxLayout()
         self.check_ollama_btn = QPushButton("Check Ollama Status")
         self.check_ollama_btn.setMinimumWidth(140)
+        self.check_ollama_btn.setMinimumHeight(32)
+        self.check_ollama_btn.setCursor(Qt.PointingHandCursor)
+        self.check_ollama_btn.setStyleSheet("""
+            QPushButton {
+                background-color: transparent;
+                border: 1px solid #7C4DFF;
+                border-radius: 8px;
+                color: #7C4DFF;
+                font-weight: 500;
+                padding: 0 12px;
+            }
+            QPushButton:hover {
+                background-color: rgba(124, 77, 255, 0.1);
+            }
+        """)
         ollama_row.addWidget(self.check_ollama_btn)
         ollama_row.addStretch()
         local_ai_layout.addLayout(ollama_row)
         
-        # Info label about unified model
-        info_label = QLabel("Qwen 2.5-VL handles both text AND images in one model")
-        info_label.setStyleSheet("color: #888; font-style: italic;")
-        local_ai_layout.addWidget(info_label)
-        
-        # Single model row (Qwen 2.5-VL does both text and vision)
         local_model_row = QHBoxLayout()
-        local_model_row.addWidget(QLabel("Local Model:"))
+        local_model_label = QLabel("Local Model:")
+        local_model_label.setStyleSheet(settings_label_style)
+        local_model_row.addWidget(local_model_label)
         self.local_model_combo = QComboBox()
         self.local_model_combo.setEditable(True)
+        self.local_model_combo.setMinimumHeight(32)
+        self.local_model_combo.setStyleSheet("""
+            QComboBox {
+                background-color: white;
+                border: 1px solid #E0E0E0;
+                border-radius: 8px;
+                padding: 4px 10px;
+                min-width: 180px;
+            }
+        """)
         local_model_options = [
-            "qwen2.5vl:3b",      # Recommended: handles both text AND vision (lighter)
-            "qwen2.5vl:7b",      # Larger version (needs 12+ GB RAM)
-            "llava:7b",          # Vision + some text
-            "llava:13b",         # Larger vision model
-            "minicpm-v",         # Vision-focused
+            "qwen2.5vl:3b", "qwen2.5vl:7b", "llava:7b", "llava:13b", "minicpm-v",
         ]
         self.local_model_combo.addItems(local_model_options)
         current_local_model = settings.local_model
@@ -1384,72 +1486,132 @@ class MainWindow(QMainWindow):
             self.local_model_combo.setCurrentIndex(idx)
         else:
             self.local_model_combo.setEditText(current_local_model)
-        self.local_model_combo.setMinimumWidth(200)
         local_model_row.addWidget(self.local_model_combo)
         local_model_row.addStretch()
         local_ai_layout.addLayout(local_model_row)
         
-        # Save local settings button
         local_save_row = QHBoxLayout()
-        self.save_local_ai_btn = QPushButton("Save Local AI Settings")
+        self.save_local_ai_btn = QPushButton("Save")
+        self.save_local_ai_btn.setMinimumHeight(32)
+        self.save_local_ai_btn.setMinimumWidth(80)
+        self.save_local_ai_btn.setCursor(Qt.PointingHandCursor)
+        self.save_local_ai_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #7C4DFF;
+                border: none;
+                border-radius: 8px;
+                color: white;
+                font-weight: 600;
+                padding: 0 16px;
+            }
+            QPushButton:hover {
+                background-color: #9575FF;
+            }
+        """)
         local_save_row.addWidget(self.save_local_ai_btn)
         local_save_row.addStretch()
         local_ai_layout.addLayout(local_save_row)
         
         ai_layout.addWidget(self.local_ai_group)
 
-        # OpenAI Settings group
-        self.openai_group = QGroupBox("OpenAI Settings (Cloud)")
-        self.openai_group.setMinimumHeight(180)  # More height for both rows
+        # OpenAI Settings subsection
+        self.openai_group = QFrame()
+        self.openai_group.setStyleSheet("QFrame { background: rgba(255,255,255,0.5); border: 1px solid #E0E0E0; border-radius: 12px; }")
         openai_layout = QVBoxLayout(self.openai_group)
-        openai_layout.setSpacing(16)  # Spacing between rows
-        openai_layout.setContentsMargins(16, 36, 16, 20)  # Much more top padding to clear title
+        openai_layout.setContentsMargins(16, 16, 16, 16)
+        openai_layout.setSpacing(12)
+        
+        openai_title = QLabel("☁️ OpenAI Settings (Cloud)")
+        openai_title.setStyleSheet("font-size: 13px; font-weight: 600; color: #666666; background: transparent;")
+        openai_layout.addWidget(openai_title)
 
         # API Key row
-        row2 = QHBoxLayout()
-        row2.setSpacing(10)
+        api_key_row = QHBoxLayout()
+        api_key_row.setSpacing(10)
         api_key_label = QLabel("API Key:")
-        api_key_label.setFixedWidth(95)
-        api_key_label.setFixedHeight(34)
-        row2.addWidget(api_key_label)
+        api_key_label.setStyleSheet(settings_label_style)
+        api_key_label.setFixedWidth(90)
+        api_key_row.addWidget(api_key_label)
         self.openai_key_input = QLineEdit()
         self.openai_key_input.setEchoMode(QLineEdit.Password)
         self.openai_key_input.setPlaceholderText("Enter OpenAI API key")
-        self.openai_key_input.setFixedHeight(34)
+        self.openai_key_input.setMinimumHeight(36)
+        self.openai_key_input.setStyleSheet("""
+            QLineEdit {
+                background-color: white;
+                border: 1px solid #E0E0E0;
+                border-radius: 8px;
+                padding: 6px 12px;
+            }
+            QLineEdit:focus {
+                border-color: #7C4DFF;
+            }
+        """)
         if settings.openai_api_key:
             self.openai_key_input.setText(settings.openai_api_key)
-        row2.addWidget(self.openai_key_input)
+        api_key_row.addWidget(self.openai_key_input)
         self.save_ai_settings_button = QPushButton("Save")
-        self.save_ai_settings_button.setFixedHeight(34)
-        self.save_ai_settings_button.setFixedWidth(75)
-        self.delete_ai_key_button = QPushButton("Delete Key")
-        self.delete_ai_key_button.setFixedHeight(34)
-        self.delete_ai_key_button.setFixedWidth(110)  # Wider to fit text
-        row2.addWidget(self.save_ai_settings_button)
-        row2.addWidget(self.delete_ai_key_button)
-        openai_layout.addLayout(row2)
+        self.save_ai_settings_button.setMinimumHeight(36)
+        self.save_ai_settings_button.setMinimumWidth(70)
+        self.save_ai_settings_button.setCursor(Qt.PointingHandCursor)
+        self.save_ai_settings_button.setStyleSheet("""
+            QPushButton {
+                background-color: #7C4DFF;
+                border: none;
+                border-radius: 8px;
+                color: white;
+                font-weight: 600;
+            }
+            QPushButton:hover {
+                background-color: #9575FF;
+            }
+        """)
+        self.delete_ai_key_button = QPushButton("Delete")
+        self.delete_ai_key_button.setMinimumHeight(36)
+        self.delete_ai_key_button.setMinimumWidth(70)
+        self.delete_ai_key_button.setCursor(Qt.PointingHandCursor)
+        self.delete_ai_key_button.setStyleSheet("""
+            QPushButton {
+                background-color: transparent;
+                border: 1px solid #CCCCCC;
+                border-radius: 8px;
+                color: #666666;
+                font-weight: 500;
+            }
+            QPushButton:hover {
+                background-color: #FFEBEE;
+                border-color: #D32F2F;
+                color: #D32F2F;
+            }
+        """)
+        api_key_row.addWidget(self.save_ai_settings_button)
+        api_key_row.addWidget(self.delete_ai_key_button)
+        openai_layout.addLayout(api_key_row)
 
         # Vision Model row
-        row3 = QHBoxLayout()
-        row3.setSpacing(10)
+        model_row = QHBoxLayout()
+        model_row.setSpacing(10)
         vision_label = QLabel("Vision Model:")
-        vision_label.setFixedWidth(95)
-        vision_label.setFixedHeight(34)
-        row3.addWidget(vision_label)
+        vision_label.setStyleSheet(settings_label_style)
+        vision_label.setFixedWidth(90)
+        model_row.addWidget(vision_label)
         self.openai_model_combo = QComboBox()
         self.openai_model_combo.setEditable(True)
-        self.openai_model_combo.setFixedHeight(34)
+        self.openai_model_combo.setMinimumHeight(36)
         self.openai_model_combo.setMinimumWidth(200)
-        # Pre-populate common vision-capable models
-        model_options = [
-            "gpt-4o",
-            "gpt-4o-mini",
-            "gpt-4.1",
-            "gpt-4.1-mini",
-            "gpt-4.1-nano",
-        ]
+        self.openai_model_combo.setStyleSheet("""
+            QComboBox {
+                background-color: white;
+                border: 1px solid #E0E0E0;
+                border-radius: 8px;
+                padding: 6px 12px;
+            }
+            QComboBox:hover {
+                border-color: #7C4DFF;
+            }
+        """)
+        model_options = ["gpt-4o", "gpt-4o-mini", "gpt-4.1", "gpt-4.1-mini", "gpt-4.1-nano"]
         self.openai_model_combo.addItems(model_options)
-        # Ensure current setting is present/selected
         current_model = settings.openai_vision_model
         if current_model and current_model not in model_options:
             self.openai_model_combo.addItem(current_model)
@@ -1458,7 +1620,6 @@ class MainWindow(QMainWindow):
             self.openai_model_combo.setCurrentIndex(idx)
         else:
             self.openai_model_combo.setEditText(current_model)
-        # Improve search in the dropdown
         completer = self.openai_model_combo.completer()
         if completer:
             completer.setCaseSensitivity(Qt.CaseInsensitive)
@@ -1466,161 +1627,440 @@ class MainWindow(QMainWindow):
                 completer.setFilterMode(Qt.MatchContains)
             except Exception:
                 pass
-        row3.addWidget(self.openai_model_combo)
-        row3.addStretch()
-        openai_layout.addLayout(row3)
+        model_row.addWidget(self.openai_model_combo)
+        model_row.addStretch()
+        openai_layout.addLayout(model_row)
         
         ai_layout.addWidget(self.openai_group)
         
         # Update visibility based on current selection
         self._update_ai_provider_visibility()
 
-        layout.addWidget(ai_group)
-        
-        # Legacy checkbox removed - using ai_provider dropdown now
+        layout.addWidget(ai_card)
 
-        # Quick Search settings
-        qs_group = QGroupBox("Quick Search")
-        qs_layout = QVBoxLayout(qs_group)
+        # ======= QUICK SEARCH CARD =======
+        qs_card = QFrame()
+        qs_card.setObjectName("settingsCardQS")
+        qs_card.setStyleSheet("""
+            QFrame#settingsCardQS {
+                background-color: rgba(124, 77, 255, 0.03);
+                border: 1px dashed rgba(124, 77, 255, 0.25);
+                border-radius: 16px;
+            }
+            QFrame#settingsCardQS > QLabel {
+                border: none;
+                background: transparent;
+            }
+        """)
+        qs_layout = QVBoxLayout(qs_card)
+        qs_layout.setContentsMargins(20, 20, 20, 20)
+        qs_layout.setSpacing(12)
+        
+        qs_title = QLabel("🔍 Quick Search")
+        qs_title.setStyleSheet(settings_title_style)
+        qs_layout.addWidget(qs_title)
+        
+        toggle_btn_style = """
+            QPushButton {
+                background-color: white;
+                border: 2px solid #7C4DFF;
+                border-radius: 10px;
+                color: #7C4DFF;
+                font-weight: 600;
+                padding: 8px 16px;
+            }
+            QPushButton:hover {
+                background-color: rgba(124, 77, 255, 0.1);
+            }
+            QPushButton:checked {
+                background-color: #7C4DFF;
+                color: white;
+            }
+        """
 
         qs_row1 = QHBoxLayout()
         self.qs_autopaste_btn = QPushButton("Auto-Paste: ON" if settings.quick_search_autopaste else "Auto-Paste: OFF")
-        self.qs_autopaste_btn.setObjectName("settingsToggle")
         self.qs_autopaste_btn.setCheckable(True)
         self.qs_autopaste_btn.setChecked(settings.quick_search_autopaste)
-        self.qs_autopaste_btn.setMinimumWidth(160)
+        self.qs_autopaste_btn.setMinimumHeight(36)
+        self.qs_autopaste_btn.setMinimumWidth(140)
+        self.qs_autopaste_btn.setCursor(Qt.PointingHandCursor)
+        self.qs_autopaste_btn.setStyleSheet(toggle_btn_style)
         qs_row1.addWidget(self.qs_autopaste_btn)
+        
         self.qs_autoconfirm_btn = QPushButton("Auto-Confirm: ON" if settings.quick_search_auto_confirm else "Auto-Confirm: OFF")
-        self.qs_autoconfirm_btn.setObjectName("settingsToggle")
         self.qs_autoconfirm_btn.setCheckable(True)
         self.qs_autoconfirm_btn.setChecked(settings.quick_search_auto_confirm)
-        self.qs_autoconfirm_btn.setMinimumWidth(160)
+        self.qs_autoconfirm_btn.setMinimumHeight(36)
+        self.qs_autoconfirm_btn.setMinimumWidth(150)
+        self.qs_autoconfirm_btn.setCursor(Qt.PointingHandCursor)
+        self.qs_autoconfirm_btn.setStyleSheet(toggle_btn_style)
         qs_row1.addWidget(self.qs_autoconfirm_btn)
         qs_row1.addStretch()
         qs_layout.addLayout(qs_row1)
 
         qs_row2 = QHBoxLayout()
-        qs_row2.addWidget(QLabel("Shortcut:"))
+        qs_row2.setSpacing(10)
+        shortcut_label = QLabel("Shortcut:")
+        shortcut_label.setStyleSheet(settings_label_style)
+        qs_row2.addWidget(shortcut_label)
         self.qs_shortcut_input = QLineEdit(settings.quick_search_shortcut)
-        self.qs_shortcut_input.setMaximumWidth(200)
+        self.qs_shortcut_input.setMinimumHeight(36)
+        self.qs_shortcut_input.setMaximumWidth(180)
+        self.qs_shortcut_input.setStyleSheet("""
+            QLineEdit {
+                background-color: white;
+                border: 1px solid #E0E0E0;
+                border-radius: 8px;
+                padding: 6px 12px;
+            }
+            QLineEdit:focus {
+                border-color: #7C4DFF;
+            }
+        """)
         qs_row2.addWidget(self.qs_shortcut_input)
-        self.qs_shortcut_save = QPushButton("Save Shortcut")
-        self.qs_shortcut_save.setMinimumWidth(120)
+        self.qs_shortcut_save = QPushButton("Save")
+        self.qs_shortcut_save.setMinimumHeight(36)
+        self.qs_shortcut_save.setMinimumWidth(80)
+        self.qs_shortcut_save.setCursor(Qt.PointingHandCursor)
+        self.qs_shortcut_save.setStyleSheet("""
+            QPushButton {
+                background-color: #7C4DFF;
+                border: none;
+                border-radius: 8px;
+                color: white;
+                font-weight: 600;
+            }
+            QPushButton:hover {
+                background-color: #9575FF;
+            }
+        """)
         qs_row2.addWidget(self.qs_shortcut_save)
         qs_row2.addStretch()
         qs_layout.addLayout(qs_row2)
 
-        layout.addWidget(qs_group)
+        layout.addWidget(qs_card)
         
-        # Search Enhancements section
-        search_group = QGroupBox("Search Enhancements")
-        search_layout = QVBoxLayout(search_group)
+        # ======= SEARCH ENHANCEMENTS CARD =======
+        search_card = QFrame()
+        search_card.setObjectName("settingsCardSearch")
+        search_card.setStyleSheet("""
+            QFrame#settingsCardSearch {
+                background-color: rgba(124, 77, 255, 0.03);
+                border: 1px dashed rgba(124, 77, 255, 0.25);
+                border-radius: 16px;
+            }
+            QFrame#settingsCardSearch > QLabel {
+                border: none;
+                background: transparent;
+            }
+        """)
+        search_layout = QVBoxLayout(search_card)
+        search_layout.setContentsMargins(20, 20, 20, 20)
+        search_layout.setSpacing(12)
         
-        # Smart Rerank toggle (moved from search area for cleaner UI)
+        search_title = QLabel("✨ Search Enhancements")
+        search_title.setStyleSheet(settings_title_style)
+        search_layout.addWidget(search_title)
+        
+        # Smart Rerank toggle
         gpt_row = QHBoxLayout()
         self.gpt_rerank_button = QPushButton(
             "Smart Rerank: ON" if settings.use_openai_search_rerank else "Smart Rerank: OFF"
         )
-        self.gpt_rerank_button.setObjectName("settingsToggle")
         self.gpt_rerank_button.setCheckable(True)
         self.gpt_rerank_button.setChecked(settings.use_openai_search_rerank)
-        self.gpt_rerank_button.setMinimumWidth(180)
-        self.gpt_rerank_button.setToolTip(
-            "When ON, uses GPT to re-rank search results for better relevance.\n"
-            "Requires OpenAI API key. Adds a small cost per search."
-        )
+        self.gpt_rerank_button.setMinimumHeight(36)
+        self.gpt_rerank_button.setMinimumWidth(160)
+        self.gpt_rerank_button.setCursor(Qt.PointingHandCursor)
+        self.gpt_rerank_button.setStyleSheet(toggle_btn_style)
+        self.gpt_rerank_button.setToolTip("Uses GPT to re-rank search results for better relevance")
         gpt_row.addWidget(self.gpt_rerank_button)
-        gpt_row.addStretch()
-        search_layout.addLayout(gpt_row)
         
-        # Single toggle: Spell Check (controls fuzzy + spell correction)
-        row = QHBoxLayout()
+        # Spell Check toggle
         self.spell_check_btn = QPushButton(
             "Spell Check: ON" if settings.enable_spell_check else "Spell Check: OFF"
         )
-        self.spell_check_btn.setObjectName("settingsToggle")
         self.spell_check_btn.setCheckable(True)
         self.spell_check_btn.setChecked(settings.enable_spell_check)
-        self.spell_check_btn.setMinimumWidth(180)
-        self.spell_check_btn.setToolTip(
-            "When ON, the app fixes typos automatically:\n"
-            "• Fuzzy matching for dates/types (e.g., 'yestarday' → 'yesterday')\n"
-            "• Spell correction for general words"
-        )
+        self.spell_check_btn.setMinimumHeight(36)
+        self.spell_check_btn.setMinimumWidth(150)
+        self.spell_check_btn.setCursor(Qt.PointingHandCursor)
+        self.spell_check_btn.setStyleSheet(toggle_btn_style)
+        self.spell_check_btn.setToolTip("Fixes typos automatically in search queries")
         self.spell_check_btn.clicked.connect(self.on_spell_check_toggle)
-        row.addWidget(self.spell_check_btn)
-        row.addStretch()
-        search_layout.addLayout(row)
+        gpt_row.addWidget(self.spell_check_btn)
+        gpt_row.addStretch()
+        search_layout.addLayout(gpt_row)
         
-        # Info label
-        search_info = QLabel("💡 Spell Check fixes typos in both dates/file types and general words.")
-        search_info.setStyleSheet("color: #888; font-size: 11px;")
+        search_info = QLabel("💡 Smart Rerank uses AI. Spell Check fixes typos in queries.")
+        search_info.setStyleSheet(settings_hint_style)
         search_layout.addWidget(search_info)
         
-        layout.addWidget(search_group)
+        layout.addWidget(search_card)
         
-        # Account Management section
-        account_group = QGroupBox("Account")
-        account_layout = QVBoxLayout(account_group)
+        # ======= ACCOUNT CARD =======
+        account_card = QFrame()
+        account_card.setObjectName("settingsCardAccount")
+        account_card.setStyleSheet("""
+            QFrame#settingsCardAccount {
+                background-color: rgba(124, 77, 255, 0.03);
+                border: 1px dashed rgba(124, 77, 255, 0.25);
+                border-radius: 16px;
+            }
+            QFrame#settingsCardAccount > QLabel {
+                border: none;
+                background: transparent;
+            }
+        """)
+        account_layout = QVBoxLayout(account_card)
+        account_layout.setContentsMargins(20, 20, 20, 20)
+        account_layout.setSpacing(12)
+        
+        account_title = QLabel("👤 Account")
+        account_title.setStyleSheet(settings_title_style)
+        account_layout.addWidget(account_title)
         
         # Email display
         email_row = QHBoxLayout()
-        email_row.addWidget(QLabel("Email:"))
+        email_label = QLabel("Email:")
+        email_label.setStyleSheet(settings_label_style)
+        email_row.addWidget(email_label)
         self.account_email_label = QLabel("Not logged in")
-        self.account_email_label.setObjectName("secondaryLabel")
+        self.account_email_label.setStyleSheet("color: #7C4DFF; font-weight: 500; font-size: 13px; background: transparent;")
         email_row.addWidget(self.account_email_label)
         email_row.addStretch()
         account_layout.addLayout(email_row)
         
         # Subscription status
         sub_row = QHBoxLayout()
-        sub_row.addWidget(QLabel("Subscription:"))
+        sub_label = QLabel("Subscription:")
+        sub_label.setStyleSheet(settings_label_style)
+        sub_row.addWidget(sub_label)
         self.account_sub_label = QLabel("No subscription")
-        self.account_sub_label.setObjectName("secondaryLabel")
+        self.account_sub_label.setStyleSheet("color: #888888; font-size: 13px; background: transparent;")
         sub_row.addWidget(self.account_sub_label)
         sub_row.addStretch()
         account_layout.addLayout(sub_row)
         
         # Buttons row
         button_row = QHBoxLayout()
-        self.refresh_account_btn = QPushButton("Refresh Account Info")
-        self.refresh_account_btn.setMinimumWidth(160)
+        button_row.setSpacing(10)
+        self.refresh_account_btn = QPushButton("Refresh")
+        self.refresh_account_btn.setMinimumHeight(36)
+        self.refresh_account_btn.setMinimumWidth(100)
+        self.refresh_account_btn.setCursor(Qt.PointingHandCursor)
+        self.refresh_account_btn.setStyleSheet("""
+            QPushButton {
+                background-color: transparent;
+                border: 1px solid #7C4DFF;
+                border-radius: 8px;
+                color: #7C4DFF;
+                font-weight: 500;
+            }
+            QPushButton:hover {
+                background-color: rgba(124, 77, 255, 0.1);
+            }
+        """)
         self.refresh_account_btn.clicked.connect(self._refresh_account_info)
         button_row.addWidget(self.refresh_account_btn)
         
         self.signout_btn = QPushButton("Sign Out")
+        self.signout_btn.setMinimumHeight(36)
         self.signout_btn.setMinimumWidth(100)
+        self.signout_btn.setCursor(Qt.PointingHandCursor)
+        self.signout_btn.setStyleSheet("""
+            QPushButton {
+                background-color: transparent;
+                border: 1px solid #CCCCCC;
+                border-radius: 8px;
+                color: #666666;
+                font-weight: 500;
+            }
+            QPushButton:hover {
+                background-color: #FFEBEE;
+                border-color: #D32F2F;
+                color: #D32F2F;
+            }
+        """)
         self.signout_btn.clicked.connect(self._sign_out)
         button_row.addWidget(self.signout_btn)
         button_row.addStretch()
         account_layout.addLayout(button_row)
         
-        layout.addWidget(account_group)
+        layout.addWidget(account_card)
         
-        # Database Maintenance section
-        db_group = QGroupBox("Database Maintenance")
-        db_layout = QVBoxLayout(db_group)
+        # ======= EXCLUSIONS SECTION (Collapsible) =======
+        exclusions_container = QFrame()
+        exclusions_container.setObjectName("settingsCardExclusions")
+        exclusions_container.setStyleSheet("""
+            QFrame#settingsCardExclusions {
+                background-color: rgba(124, 77, 255, 0.03);
+                border: 1px dashed rgba(124, 77, 255, 0.25);
+                border-radius: 16px;
+            }
+            QFrame#settingsCardExclusions > QLabel {
+                border: none;
+                background: transparent;
+            }
+        """)
+        exclusions_container_layout = QVBoxLayout(exclusions_container)
+        exclusions_container_layout.setContentsMargins(0, 0, 0, 0)
+        exclusions_container_layout.setSpacing(0)
         
-        # FTS Rebuild button
-        fts_row = QHBoxLayout()
-        self.rebuild_fts_btn = QPushButton("Rebuild Search Index")
-        self.rebuild_fts_btn.setMinimumWidth(180)
-        self.rebuild_fts_btn.setToolTip(
-            "Rebuild the full-text search index.\n"
-            "Use this if you see 'database disk image is malformed' errors.\n"
-            "Your indexed files and tags will be preserved."
-        )
-        self.rebuild_fts_btn.clicked.connect(self._rebuild_fts_index)
-        fts_row.addWidget(self.rebuild_fts_btn)
-        fts_row.addStretch()
-        db_layout.addLayout(fts_row)
+        # Collapsible header button
+        self.exclusions_toggle_btn = QPushButton("▶ 🛡️ Exclusions (Advanced)")
+        self.exclusions_toggle_btn.setCheckable(True)
+        self.exclusions_toggle_btn.setChecked(False)
+        self.exclusions_toggle_btn.setMinimumHeight(50)
+        self.exclusions_toggle_btn.setCursor(Qt.PointingHandCursor)
+        self.exclusions_toggle_btn.setStyleSheet("""
+            QPushButton {
+                text-align: left;
+                padding-left: 20px;
+                font-size: 15px;
+                font-weight: 600;
+                background-color: transparent;
+                border: none;
+                border-radius: 20px;
+                color: #7C4DFF;
+            }
+            QPushButton:hover {
+                background-color: rgba(124, 77, 255, 0.08);
+            }
+        """)
+        self.exclusions_toggle_btn.clicked.connect(self._toggle_exclusions_section)
+        exclusions_container_layout.addWidget(self.exclusions_toggle_btn)
         
-        # Info label
-        db_info = QLabel("💡 Use 'Rebuild Search Index' if search stops working or you see database errors.")
-        db_info.setStyleSheet("color: #888; font-size: 11px;")
-        db_layout.addWidget(db_info)
+        # Collapsible content
+        self.exclusions_content = QWidget()
+        self.exclusions_content.setVisible(False)
+        exclusions_layout = QVBoxLayout(self.exclusions_content)
+        exclusions_layout.setContentsMargins(20, 0, 20, 20)
+        exclusions_layout.setSpacing(12)
         
-        layout.addWidget(db_group)
+        # Description
+        exclusions_desc = QLabel("Files and folders matching these patterns will be skipped during organization.")
+        exclusions_desc.setStyleSheet(settings_hint_style)
+        exclusions_desc.setWordWrap(True)
+        exclusions_layout.addWidget(exclusions_desc)
+        
+        # List widget for patterns
+        self.exclusions_list = QListWidget()
+        self.exclusions_list.setMinimumHeight(150)
+        self.exclusions_list.setMaximumHeight(200)
+        self.exclusions_list.setStyleSheet("""
+            QListWidget {
+                background-color: white;
+                border: 1px solid #E0E0E0;
+                border-radius: 10px;
+                padding: 6px;
+            }
+            QListWidget::item {
+                padding: 8px 12px;
+                border-radius: 6px;
+                color: #555555;
+            }
+            QListWidget::item:hover {
+                background-color: #F8F6FF;
+            }
+            QListWidget::item:selected {
+                background-color: rgba(124, 77, 255, 0.12);
+                color: #7C4DFF;
+            }
+        """)
+        self._refresh_exclusions_list()
+        exclusions_layout.addWidget(self.exclusions_list)
+        
+        # Add/Remove row
+        exclusions_btn_row = QHBoxLayout()
+        exclusions_btn_row.setSpacing(8)
+        
+        self.exclusion_input = QLineEdit()
+        self.exclusion_input.setPlaceholderText("Enter pattern (e.g., node_modules, *.tmp, .env)")
+        self.exclusion_input.setMinimumHeight(36)
+        self.exclusion_input.setStyleSheet("""
+            QLineEdit {
+                background-color: white;
+                border: 1px solid #E0E0E0;
+                border-radius: 8px;
+                padding: 6px 12px;
+            }
+            QLineEdit:focus {
+                border-color: #7C4DFF;
+            }
+        """)
+        self.exclusion_input.returnPressed.connect(self._add_exclusion_pattern)
+        exclusions_btn_row.addWidget(self.exclusion_input, 1)
+        
+        add_exclusion_btn = QPushButton("+ Add")
+        add_exclusion_btn.setMinimumHeight(36)
+        add_exclusion_btn.setMinimumWidth(70)
+        add_exclusion_btn.setCursor(Qt.PointingHandCursor)
+        add_exclusion_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #7C4DFF;
+                border: none;
+                border-radius: 8px;
+                color: white;
+                font-weight: 600;
+            }
+            QPushButton:hover {
+                background-color: #9575FF;
+            }
+        """)
+        add_exclusion_btn.clicked.connect(self._add_exclusion_pattern)
+        exclusions_btn_row.addWidget(add_exclusion_btn)
+        
+        remove_exclusion_btn = QPushButton("Remove")
+        remove_exclusion_btn.setMinimumHeight(36)
+        remove_exclusion_btn.setMinimumWidth(80)
+        remove_exclusion_btn.setCursor(Qt.PointingHandCursor)
+        remove_exclusion_btn.setStyleSheet("""
+            QPushButton {
+                background-color: transparent;
+                border: 1px solid #CCCCCC;
+                border-radius: 8px;
+                color: #666666;
+                font-weight: 500;
+            }
+            QPushButton:hover {
+                background-color: #FFEBEE;
+                border-color: #D32F2F;
+                color: #D32F2F;
+            }
+        """)
+        remove_exclusion_btn.clicked.connect(self._remove_exclusion_pattern)
+        exclusions_btn_row.addWidget(remove_exclusion_btn)
+        
+        reset_exclusions_btn = QPushButton("Reset")
+        reset_exclusions_btn.setMinimumHeight(36)
+        reset_exclusions_btn.setMinimumWidth(80)
+        reset_exclusions_btn.setCursor(Qt.PointingHandCursor)
+        reset_exclusions_btn.setStyleSheet("""
+            QPushButton {
+                background-color: transparent;
+                border: 1px solid #7C4DFF;
+                border-radius: 8px;
+                color: #7C4DFF;
+                font-weight: 500;
+            }
+            QPushButton:hover {
+                background-color: rgba(124, 77, 255, 0.1);
+            }
+        """)
+        reset_exclusions_btn.clicked.connect(self._reset_exclusions)
+        exclusions_btn_row.addWidget(reset_exclusions_btn)
+        
+        exclusions_layout.addLayout(exclusions_btn_row)
+        
+        # Help text
+        exclusions_help = QLabel("💡 Use * as wildcard. Examples: *.log, backup_*, .env.*")
+        exclusions_help.setStyleSheet(settings_hint_style)
+        exclusions_layout.addWidget(exclusions_help)
+        
+        exclusions_container_layout.addWidget(self.exclusions_content)
+        layout.addWidget(exclusions_container)
         
         # Load account info on startup
         self._refresh_account_info()
@@ -1762,6 +2202,53 @@ class MainWindow(QMainWindow):
                 "Error",
                 f"Failed to rebuild search index:\n\n{e}"
             )
+    
+    def _refresh_exclusions_list(self):
+        """Refresh the exclusions list widget with current patterns."""
+        self.exclusions_list.clear()
+        for pattern in settings.exclusion_patterns:
+            self.exclusions_list.addItem(pattern)
+    
+    def _add_exclusion_pattern(self):
+        """Add a new exclusion pattern."""
+        pattern = self.exclusion_input.text().strip()
+        if pattern:
+            settings.add_exclusion_pattern(pattern)
+            self._refresh_exclusions_list()
+            self.exclusion_input.clear()
+            self.status_bar.showMessage(f"Added exclusion: {pattern}", 3000)
+    
+    def _remove_exclusion_pattern(self):
+        """Remove the selected exclusion pattern."""
+        current_item = self.exclusions_list.currentItem()
+        if current_item:
+            pattern = current_item.text()
+            settings.remove_exclusion_pattern(pattern)
+            self._refresh_exclusions_list()
+            self.status_bar.showMessage(f"Removed exclusion: {pattern}", 3000)
+    
+    def _reset_exclusions(self):
+        """Reset exclusions to default patterns."""
+        reply = QMessageBox.question(
+            self,
+            "Reset Exclusions",
+            "Reset all exclusion patterns to defaults?\n\nThis will remove any custom patterns you've added.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        if reply == QMessageBox.Yes:
+            settings.reset_exclusions_to_defaults()
+            self._refresh_exclusions_list()
+            self.status_bar.showMessage("Exclusions reset to defaults", 3000)
+    
+    def _toggle_exclusions_section(self):
+        """Toggle the collapsible exclusions section."""
+        is_expanded = self.exclusions_toggle_btn.isChecked()
+        self.exclusions_content.setVisible(is_expanded)
+        if is_expanded:
+            self.exclusions_toggle_btn.setText("▼ 🛡️ Exclusions (Advanced)")
+        else:
+            self.exclusions_toggle_btn.setText("▶ 🛡️ Exclusions (Advanced)")
     
     def _sign_out(self):
         """Sign out the current user and show login dialog."""

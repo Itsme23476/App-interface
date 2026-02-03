@@ -58,6 +58,10 @@ class Settings:
         # Last active timestamp (ISO format) for catch-up feature
         self.auto_organize_last_active: str = ''
         
+        # ======= EXCLUSIONS SETTINGS =======
+        # Patterns to exclude from organization (folders, files, wildcards)
+        self.exclusion_patterns: List[str] = self._get_default_exclusions()
+        
         # Load persisted config if available
         try:
             self._load_config()
@@ -101,6 +105,46 @@ class Settings:
             "audio/": "Audio/Recordings",
             "application/pdf": "Documents/PDFs"
         }
+    
+    def _get_default_exclusions(self) -> List[str]:
+        """Get default exclusion patterns for files/folders that should not be organized."""
+        return [
+            # Version control
+            ".git",
+            ".svn",
+            ".hg",
+            # Dependencies & packages
+            "node_modules",
+            "vendor",
+            "packages",
+            # Python
+            "__pycache__",
+            "venv",
+            ".venv",
+            "*.pyc",
+            ".eggs",
+            "*.egg-info",
+            # Build & cache
+            "build",
+            "dist",
+            ".cache",
+            ".tox",
+            # Config files
+            ".env",
+            ".env.*",
+            # IDE & editors
+            ".vscode",
+            ".idea",
+            "*.sublime-*",
+            # System files
+            "Thumbs.db",
+            ".DS_Store",
+            "desktop.ini",
+            # Temp files
+            "*.tmp",
+            "*.temp",
+            "~$*",
+        ]
     
     def get_app_data_dir(self) -> Path:
         """Get application data directory."""
@@ -251,6 +295,12 @@ class Settings:
             self.auto_organize_folders = auto_folders
         self.auto_organize_auto_start = bool(data.get('auto_organize_auto_start', True))
         self.auto_organize_last_active = data.get('auto_organize_last_active', '')
+        
+        # Exclusion patterns
+        exclusions = data.get('exclusion_patterns')
+        if isinstance(exclusions, list):
+            self.exclusion_patterns = exclusions
+        # If not in config, keep defaults (already set in __init__)
 
     def _save_config(self) -> None:
         cfg = {
@@ -278,6 +328,8 @@ class Settings:
             'auto_organize_folders': self.auto_organize_folders,
             'auto_organize_auto_start': self.auto_organize_auto_start,
             'auto_organize_last_active': self.auto_organize_last_active,
+            # Exclusion patterns
+            'exclusion_patterns': self.exclusion_patterns,
         }
         try:
             with open(self._config_file(), 'w', encoding='utf-8') as f:
@@ -411,6 +463,68 @@ class Settings:
         """Clear the last active timestamp."""
         self.auto_organize_last_active = ''
         self._save_config()
+
+    # ======= EXCLUSION METHODS =======
+    
+    def add_exclusion_pattern(self, pattern: str) -> None:
+        """Add an exclusion pattern."""
+        pattern = pattern.strip()
+        if pattern and pattern not in self.exclusion_patterns:
+            self.exclusion_patterns.append(pattern)
+            self._save_config()
+    
+    def remove_exclusion_pattern(self, pattern: str) -> None:
+        """Remove an exclusion pattern."""
+        if pattern in self.exclusion_patterns:
+            self.exclusion_patterns.remove(pattern)
+            self._save_config()
+    
+    def reset_exclusions_to_defaults(self) -> None:
+        """Reset exclusion patterns to defaults."""
+        self.exclusion_patterns = self._get_default_exclusions()
+        self._save_config()
+    
+    def should_exclude(self, file_path: str) -> bool:
+        """Check if a file/folder should be excluded based on patterns.
+        
+        Supports:
+        - Exact folder/file names: "node_modules", ".git"
+        - Wildcards: "*.pyc", "*.tmp", "~$*"
+        - Prefix wildcards: ".env.*"
+        - File extensions: ".json" is automatically treated as "*.json"
+        """
+        import fnmatch
+        
+        # Get the file/folder name (case-insensitive matching)
+        name = os.path.basename(file_path)
+        name_lower = name.lower()
+        file_path_lower = file_path.lower()
+        
+        for pattern in self.exclusion_patterns:
+            pattern_lower = pattern.lower()
+            
+            # Check if pattern matches the name directly
+            if fnmatch.fnmatch(name_lower, pattern_lower):
+                return True
+            
+            # Handle patterns like ".json" - treat as "*.json" for file extensions
+            # This makes it user-friendly (no need to type the asterisk)
+            if pattern_lower.startswith('.') and not pattern_lower.startswith('.*') and not '*' in pattern_lower:
+                ext_pattern = '*' + pattern_lower
+                if fnmatch.fnmatch(name_lower, ext_pattern):
+                    return True
+            
+            # Also check if pattern matches the full path (for folder paths)
+            if fnmatch.fnmatch(file_path_lower, f"*/{pattern_lower}") or fnmatch.fnmatch(file_path_lower, f"*\\{pattern_lower}"):
+                return True
+            
+            # Check if any path component matches (for nested exclusions)
+            path_parts = file_path.replace('\\', '/').split('/')
+            for part in path_parts:
+                if fnmatch.fnmatch(part.lower(), pattern_lower):
+                    return True
+        
+        return False
 
 
 # Global settings instance

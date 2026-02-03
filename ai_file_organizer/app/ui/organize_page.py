@@ -2548,9 +2548,10 @@ class OrganizePage(QWidget):
         self.mic_button.setToolTip("Click to speak your instruction (click again to stop)")
 
     def _load_files_from_db(self) -> List[Dict[str, Any]]:
-        """Load all indexed files from the database."""
+        """Load all indexed files from the database, filtering out excluded patterns."""
         files = []
         self.files_by_id = {}
+        excluded_count = 0
         
         try:
             with sqlite3.connect(file_index.db_path) as conn:
@@ -2560,9 +2561,16 @@ class OrganizePage(QWidget):
                 rows = cursor.fetchall()
             
             for row in rows:
+                file_path = row["file_path"]
+                
+                # Skip files matching exclusion patterns
+                if settings.should_exclude(file_path):
+                    excluded_count += 1
+                    continue
+                
                 f = {
                     "id": row["id"],
-                    "file_path": row["file_path"],
+                    "file_path": file_path,
                     "file_name": row["file_name"],
                     "file_size": row["file_size"] or 0,
                     "label": row["label"] if "label" in row.keys() else None,
@@ -2572,10 +2580,63 @@ class OrganizePage(QWidget):
                 }
                 files.append(f)
                 self.files_by_id[row["id"]] = f
+            
+            if excluded_count > 0:
+                logger.info(f"Excluded {excluded_count} files based on exclusion patterns")
+                
         except Exception as e:
             logger.error(f"Error loading files: {e}")
         
         return files
+    
+    def _check_instruction_for_exclusions(self, instruction: str) -> List[str]:
+        """Check if the instruction mentions file types that are in the exclusion list.
+        
+        Returns a list of matched exclusion patterns, or empty list if none.
+        """
+        instruction_lower = instruction.lower()
+        matched_exclusions = []
+        
+        # Common file type keywords to check
+        file_type_keywords = {
+            '.json': ['json', '.json'],
+            '.py': ['python', '.py', 'py files'],
+            '.js': ['javascript', '.js', 'js files'],
+            '.ts': ['typescript', '.ts', 'ts files'],
+            '.csv': ['csv', '.csv'],
+            '.xml': ['xml', '.xml'],
+            '.yaml': ['yaml', '.yaml', '.yml'],
+            '.md': ['markdown', '.md', 'md files'],
+            '.txt': ['text', '.txt', 'txt files'],
+            '.log': ['log', '.log', 'log files'],
+            '.env': ['env', '.env', 'environment'],
+            '.git': ['git', '.git'],
+            '.pyc': ['pyc', '.pyc', 'compiled python'],
+        }
+        
+        for exclusion_pattern in settings.exclusion_patterns:
+            pattern_lower = exclusion_pattern.lower()
+            
+            # Check if pattern is mentioned directly in instruction
+            # Remove * from pattern for matching (*.json -> .json or json)
+            clean_pattern = pattern_lower.replace('*', '').strip('.')
+            
+            if clean_pattern and len(clean_pattern) >= 2:
+                # Check direct mention
+                if clean_pattern in instruction_lower:
+                    matched_exclusions.append(exclusion_pattern)
+                    continue
+                
+                # Check if it's a known file type with alternative keywords
+                for ext, keywords in file_type_keywords.items():
+                    if clean_pattern in ext or ext.strip('.') == clean_pattern:
+                        for keyword in keywords:
+                            if keyword in instruction_lower:
+                                matched_exclusions.append(exclusion_pattern)
+                                break
+                        break
+        
+        return list(set(matched_exclusions))  # Remove duplicates
     
     def _parse_tags(self, raw) -> List[str]:
         """Parse tags from DB storage format."""
@@ -2718,6 +2779,22 @@ class OrganizePage(QWidget):
         if not self.destination_path:
             return
         
+        # Check if instruction mentions excluded file types
+        if instruction:
+            excluded_types_mentioned = self._check_instruction_for_exclusions(instruction)
+            if excluded_types_mentioned:
+                # Show warning and don't proceed
+                excluded_list = ", ".join(excluded_types_mentioned)
+                QMessageBox.warning(
+                    self,
+                    "Excluded File Types",
+                    f"Your instruction mentions file types that are in your exclusion list:\n\n"
+                    f"• {excluded_list}\n\n"
+                    f"These files are protected from organization.\n\n"
+                    f"To organize them, go to Settings → Exclusions and remove the pattern."
+                )
+                return
+        
         # Auto-organize mode: no instruction provided
         if not instruction:
             confirmed = ModernConfirmDialog.ask(
@@ -2794,6 +2871,19 @@ class OrganizePage(QWidget):
         self.status_label.setText("Verifying file paths...")
         original_count = len(files)
         files = self._verify_and_fix_paths(files)
+        
+        # Re-filter exclusions after path verification (paths may have changed)
+        excluded_after_verify = 0
+        filtered_files = []
+        for f in files:
+            if settings.should_exclude(f["file_path"]):
+                excluded_after_verify += 1
+                logger.info(f"Excluding file after path verify: {f['file_name']} (matches exclusion pattern)")
+            else:
+                filtered_files.append(f)
+        files = filtered_files
+        if excluded_after_verify > 0:
+            logger.info(f"Excluded {excluded_after_verify} files based on exclusion patterns (post-verification)")
         
         # Update files_by_id with verified files only
         self.files_by_id = {f["id"]: f for f in files}
@@ -3210,8 +3300,28 @@ Caption: {file_info.get('caption', 'none')}
         if reply != QMessageBox.Yes:
             return
         
-        move_plan = []
+        # Final safety check: filter out any excluded files before moving
+        filtered_moves = []
+        excluded_count = 0
         for m in self.current_moves:
+            if settings.should_exclude(m["source_path"]):
+                excluded_count += 1
+                logger.info(f"Skipping excluded file in apply: {m['file_name']}")
+            else:
+                filtered_moves.append(m)
+        
+        if excluded_count > 0:
+            logger.info(f"Excluded {excluded_count} files from final move (matched exclusion patterns)")
+        
+        if not filtered_moves:
+            QMessageBox.information(
+                self, "No Files to Move",
+                f"All {excluded_count} files matched exclusion patterns and were skipped."
+            )
+            return
+        
+        move_plan = []
+        for m in filtered_moves:
             move_plan.append({
                 "source_path": m["source_path"],
                 "destination_path": m["destination_path"],

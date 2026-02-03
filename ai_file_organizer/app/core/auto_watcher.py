@@ -258,8 +258,16 @@ class AutoOrganizeWatcher(QObject):
         
         return removed_count
     
-    def _should_ignore(self, file_name: str) -> bool:
-        """Check if a file should be ignored."""
+    def _should_ignore(self, file_path: str) -> bool:
+        """Check if a file should be ignored.
+        
+        Args:
+            file_path: Full path or just filename to check
+        """
+        from app.core.settings import settings
+        
+        file_name = os.path.basename(file_path)
+        
         # Check exact names
         if file_name in self._ignore_patterns:
             return True
@@ -276,6 +284,11 @@ class AutoOrganizeWatcher(QObject):
         
         # Ignore hidden files (starting with .)
         if file_name.startswith('.'):
+            return True
+        
+        # Check user-defined exclusions from settings
+        if settings.should_exclude(file_path):
+            logger.debug(f"Excluding {file_path} (matches user exclusion pattern)")
             return True
         
         return False
