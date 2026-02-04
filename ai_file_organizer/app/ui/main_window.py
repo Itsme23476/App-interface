@@ -283,6 +283,10 @@ class MainWindow(QMainWindow):
         # Auto-load indexed files on startup
         QTimer.singleShot(100, self.refresh_debug_view)
         
+        # Run database cleanup in background to remove stale entries
+        # This prevents UNIQUE constraint errors from orphaned records
+        QTimer.singleShot(2000, self._run_background_db_cleanup)
+        
         logger.info("Main window initialized")
     
     def setup_ui(self):
@@ -1360,283 +1364,12 @@ class MainWindow(QMainWindow):
         
         layout.addWidget(appearance_card)
 
-        # ======= AI PROVIDERS CARD =======
-        ai_card = QFrame()
-        ai_card.setObjectName("settingsCardAI")
-        ai_card.setStyleSheet("""
-            QFrame#settingsCardAI {
-                background-color: rgba(124, 77, 255, 0.03);
-                border: 1px dashed rgba(124, 77, 255, 0.25);
-                border-radius: 16px;
-            }
-            QFrame#settingsCardAI > QLabel {
-                border: none;
-                background: transparent;
-            }
-        """)
-        ai_layout = QVBoxLayout(ai_card)
-        ai_layout.setContentsMargins(20, 20, 20, 20)
-        ai_layout.setSpacing(12)
-        
-        ai_title = QLabel("🤖 AI Providers")
-        ai_title.setStyleSheet(settings_title_style)
-        ai_layout.addWidget(ai_title)
-
-        # Provider selection row
-        provider_row = QHBoxLayout()
-        provider_label = QLabel("AI Provider:")
-        provider_label.setStyleSheet(settings_label_style)
-        provider_row.addWidget(provider_label)
-        self.ai_provider_combo = QComboBox()
-        self.ai_provider_combo.setMinimumHeight(36)
-        self.ai_provider_combo.setStyleSheet("""
-            QComboBox {
-                background-color: white;
-                border: 1px solid #E0E0E0;
-                border-radius: 8px;
-                padding: 6px 12px;
-                min-width: 200px;
-            }
-            QComboBox:hover {
-                border-color: #7C4DFF;
-            }
-            QComboBox::drop-down {
-                border: none;
-                padding-right: 8px;
-            }
-        """)
-        self.ai_provider_combo.addItems([
-            "OpenAI (Recommended)",
-            "Local (Ollama - Advanced)",
-            "None (Basic metadata only)"
-        ])
-        provider_map = {'openai': 0, 'local': 1, 'none': 2}
-        current_idx = provider_map.get(settings.ai_provider, 0)
-        self.ai_provider_combo.setCurrentIndex(current_idx)
-        provider_row.addWidget(self.ai_provider_combo)
-        provider_row.addStretch()
-        ai_layout.addLayout(provider_row)
-        
-        cost_info = QLabel("💡 OpenAI costs ~$0.0002 per file (pennies per month for typical usage)")
-        cost_info.setStyleSheet(settings_hint_style)
-        ai_layout.addWidget(cost_info)
-
-        # Local AI Settings (collapsible subsection)
+        # AI Providers section removed - app covers AI costs for users
+        # (Hidden placeholder widgets to prevent AttributeError in event handlers)
         self.local_ai_group = QFrame()
-        self.local_ai_group.setStyleSheet("QFrame { background: rgba(255,255,255,0.5); border: 1px solid #E0E0E0; border-radius: 12px; }")
-        local_ai_layout = QVBoxLayout(self.local_ai_group)
-        local_ai_layout.setContentsMargins(16, 16, 16, 16)
-        local_ai_layout.setSpacing(10)
-        
-        local_title = QLabel("⚙️ Local AI Settings (Advanced)")
-        local_title.setStyleSheet("font-size: 13px; font-weight: 600; color: #666666; background: transparent;")
-        local_ai_layout.addWidget(local_title)
-        
-        warning_label = QLabel("⚠️ Requires 8-16GB RAM. OpenAI recommended for most users.")
-        warning_label.setStyleSheet("color: #cc7700; font-size: 11px; background: transparent;")
-        local_ai_layout.addWidget(warning_label)
-        
-        ollama_row = QHBoxLayout()
-        self.check_ollama_btn = QPushButton("Check Ollama Status")
-        self.check_ollama_btn.setMinimumWidth(140)
-        self.check_ollama_btn.setMinimumHeight(32)
-        self.check_ollama_btn.setCursor(Qt.PointingHandCursor)
-        self.check_ollama_btn.setStyleSheet("""
-            QPushButton {
-                background-color: transparent;
-                border: 1px solid #7C4DFF;
-                border-radius: 8px;
-                color: #7C4DFF;
-                font-weight: 500;
-                padding: 0 12px;
-            }
-            QPushButton:hover {
-                background-color: rgba(124, 77, 255, 0.1);
-            }
-        """)
-        ollama_row.addWidget(self.check_ollama_btn)
-        ollama_row.addStretch()
-        local_ai_layout.addLayout(ollama_row)
-        
-        local_model_row = QHBoxLayout()
-        local_model_label = QLabel("Local Model:")
-        local_model_label.setStyleSheet(settings_label_style)
-        local_model_row.addWidget(local_model_label)
-        self.local_model_combo = QComboBox()
-        self.local_model_combo.setEditable(True)
-        self.local_model_combo.setMinimumHeight(32)
-        self.local_model_combo.setStyleSheet("""
-            QComboBox {
-                background-color: white;
-                border: 1px solid #E0E0E0;
-                border-radius: 8px;
-                padding: 4px 10px;
-                min-width: 180px;
-            }
-        """)
-        local_model_options = [
-            "qwen2.5vl:3b", "qwen2.5vl:7b", "llava:7b", "llava:13b", "minicpm-v",
-        ]
-        self.local_model_combo.addItems(local_model_options)
-        current_local_model = settings.local_model
-        if current_local_model and current_local_model not in local_model_options:
-            self.local_model_combo.addItem(current_local_model)
-        idx = self.local_model_combo.findText(current_local_model)
-        if idx >= 0:
-            self.local_model_combo.setCurrentIndex(idx)
-        else:
-            self.local_model_combo.setEditText(current_local_model)
-        local_model_row.addWidget(self.local_model_combo)
-        local_model_row.addStretch()
-        local_ai_layout.addLayout(local_model_row)
-        
-        local_save_row = QHBoxLayout()
-        self.save_local_ai_btn = QPushButton("Save")
-        self.save_local_ai_btn.setMinimumHeight(32)
-        self.save_local_ai_btn.setMinimumWidth(80)
-        self.save_local_ai_btn.setCursor(Qt.PointingHandCursor)
-        self.save_local_ai_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #7C4DFF;
-                border: none;
-                border-radius: 8px;
-                color: white;
-                font-weight: 600;
-                padding: 0 16px;
-            }
-            QPushButton:hover {
-                background-color: #9575FF;
-            }
-        """)
-        local_save_row.addWidget(self.save_local_ai_btn)
-        local_save_row.addStretch()
-        local_ai_layout.addLayout(local_save_row)
-        
-        ai_layout.addWidget(self.local_ai_group)
-
-        # OpenAI Settings subsection
+        self.local_ai_group.setVisible(False)
         self.openai_group = QFrame()
-        self.openai_group.setStyleSheet("QFrame { background: rgba(255,255,255,0.5); border: 1px solid #E0E0E0; border-radius: 12px; }")
-        openai_layout = QVBoxLayout(self.openai_group)
-        openai_layout.setContentsMargins(16, 16, 16, 16)
-        openai_layout.setSpacing(12)
-        
-        openai_title = QLabel("☁️ OpenAI Settings (Cloud)")
-        openai_title.setStyleSheet("font-size: 13px; font-weight: 600; color: #666666; background: transparent;")
-        openai_layout.addWidget(openai_title)
-
-        # API Key row
-        api_key_row = QHBoxLayout()
-        api_key_row.setSpacing(10)
-        api_key_label = QLabel("API Key:")
-        api_key_label.setStyleSheet(settings_label_style)
-        api_key_label.setFixedWidth(90)
-        api_key_row.addWidget(api_key_label)
-        self.openai_key_input = QLineEdit()
-        self.openai_key_input.setEchoMode(QLineEdit.Password)
-        self.openai_key_input.setPlaceholderText("Enter OpenAI API key")
-        self.openai_key_input.setMinimumHeight(36)
-        self.openai_key_input.setStyleSheet("""
-            QLineEdit {
-                background-color: white;
-                border: 1px solid #E0E0E0;
-                border-radius: 8px;
-                padding: 6px 12px;
-            }
-            QLineEdit:focus {
-                border-color: #7C4DFF;
-            }
-        """)
-        if settings.openai_api_key:
-            self.openai_key_input.setText(settings.openai_api_key)
-        api_key_row.addWidget(self.openai_key_input)
-        self.save_ai_settings_button = QPushButton("Save")
-        self.save_ai_settings_button.setMinimumHeight(36)
-        self.save_ai_settings_button.setMinimumWidth(70)
-        self.save_ai_settings_button.setCursor(Qt.PointingHandCursor)
-        self.save_ai_settings_button.setStyleSheet("""
-            QPushButton {
-                background-color: #7C4DFF;
-                border: none;
-                border-radius: 8px;
-                color: white;
-                font-weight: 600;
-            }
-            QPushButton:hover {
-                background-color: #9575FF;
-            }
-        """)
-        self.delete_ai_key_button = QPushButton("Delete")
-        self.delete_ai_key_button.setMinimumHeight(36)
-        self.delete_ai_key_button.setMinimumWidth(70)
-        self.delete_ai_key_button.setCursor(Qt.PointingHandCursor)
-        self.delete_ai_key_button.setStyleSheet("""
-            QPushButton {
-                background-color: transparent;
-                border: 1px solid #CCCCCC;
-                border-radius: 8px;
-                color: #666666;
-                font-weight: 500;
-            }
-            QPushButton:hover {
-                background-color: #FFEBEE;
-                border-color: #D32F2F;
-                color: #D32F2F;
-            }
-        """)
-        api_key_row.addWidget(self.save_ai_settings_button)
-        api_key_row.addWidget(self.delete_ai_key_button)
-        openai_layout.addLayout(api_key_row)
-
-        # Vision Model row
-        model_row = QHBoxLayout()
-        model_row.setSpacing(10)
-        vision_label = QLabel("Vision Model:")
-        vision_label.setStyleSheet(settings_label_style)
-        vision_label.setFixedWidth(90)
-        model_row.addWidget(vision_label)
-        self.openai_model_combo = QComboBox()
-        self.openai_model_combo.setEditable(True)
-        self.openai_model_combo.setMinimumHeight(36)
-        self.openai_model_combo.setMinimumWidth(200)
-        self.openai_model_combo.setStyleSheet("""
-            QComboBox {
-                background-color: white;
-                border: 1px solid #E0E0E0;
-                border-radius: 8px;
-                padding: 6px 12px;
-            }
-            QComboBox:hover {
-                border-color: #7C4DFF;
-            }
-        """)
-        model_options = ["gpt-4o", "gpt-4o-mini", "gpt-4.1", "gpt-4.1-mini", "gpt-4.1-nano"]
-        self.openai_model_combo.addItems(model_options)
-        current_model = settings.openai_vision_model
-        if current_model and current_model not in model_options:
-            self.openai_model_combo.addItem(current_model)
-        idx = self.openai_model_combo.findText(current_model)
-        if idx >= 0:
-            self.openai_model_combo.setCurrentIndex(idx)
-        else:
-            self.openai_model_combo.setEditText(current_model)
-        completer = self.openai_model_combo.completer()
-        if completer:
-            completer.setCaseSensitivity(Qt.CaseInsensitive)
-            try:
-                completer.setFilterMode(Qt.MatchContains)
-            except Exception:
-                pass
-        model_row.addWidget(self.openai_model_combo)
-        model_row.addStretch()
-        openai_layout.addLayout(model_row)
-        
-        ai_layout.addWidget(self.openai_group)
-        
-        # Update visibility based on current selection
-        self._update_ai_provider_visibility()
-
-        layout.addWidget(ai_card)
+        self.openai_group.setVisible(False)
 
         # ======= QUICK SEARCH CARD =======
         qs_card = QFrame()
@@ -4075,15 +3808,18 @@ Move Plan Summary:
         self.apply_button.setEnabled(False)
         self.scan_button.setEnabled(False)
         
-        success, errors, log_file = apply_moves(self.move_plan)
+        success, errors, log_file, renamed_count = apply_moves(self.move_plan)
         
         self.progress_bar.setVisible(False)
         self.scan_button.setEnabled(True)
         
         if success:
+            renamed_msg = ""
+            if renamed_count > 0:
+                renamed_msg = f"\n\n{renamed_count} file(s) renamed to avoid duplicates."
             QMessageBox.information(
                 self, "Success",
-                f"Successfully moved {len(self.move_plan)} files!\n\n"
+                f"Successfully moved {len(self.move_plan)} files!{renamed_msg}\n\n"
                 f"Move log saved to: {log_file}"
             )
             self.status_bar.showMessage("Moves completed successfully")
@@ -6658,3 +6394,28 @@ Move Plan Summary:
             logger.error(f"[QS] Error in debug_comprehensive_state: {e}")
             self.status_bar.showMessage("Debug logging failed")
 
+    def _run_background_db_cleanup(self):
+        """Run database cleanup in background to remove stale entries."""
+        try:
+            from app.core.database import file_index
+            
+            logger.info("Starting background database cleanup...")
+            
+            # Run cleanup in a thread to avoid blocking UI
+            def do_cleanup():
+                try:
+                    stats = file_index.cleanup_stale_entries()
+                    if stats['removed'] > 0:
+                        logger.info(f"Database cleanup complete: removed {stats['removed']} stale entries")
+                    else:
+                        logger.debug("Database cleanup complete: no stale entries found")
+                except Exception as e:
+                    logger.error(f"Database cleanup error: {e}")
+            
+            # Run in thread
+            import threading
+            cleanup_thread = threading.Thread(target=do_cleanup, daemon=True)
+            cleanup_thread.start()
+            
+        except Exception as e:
+            logger.error(f"Failed to start database cleanup: {e}")

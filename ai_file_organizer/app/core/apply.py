@@ -14,15 +14,48 @@ from .settings import settings
 logger = logging.getLogger(__name__)
 
 
-def apply_moves(move_plan: List[Dict[str, Any]]) -> Tuple[bool, List[str], str]:
+def _get_unique_path(dest_path: Path) -> Path:
+    """
+    Generate a unique file path by adding (1), (2), etc. if file exists.
+    
+    Example: document.pdf → document (1).pdf → document (2).pdf
+    
+    Args:
+        dest_path: The desired destination path
+        
+    Returns:
+        A unique path that doesn't exist yet
+    """
+    if not dest_path.exists():
+        return dest_path
+    
+    stem = dest_path.stem  # filename without extension
+    suffix = dest_path.suffix  # .pdf, .jpg, etc.
+    parent = dest_path.parent
+    
+    counter = 1
+    while True:
+        new_name = f"{stem} ({counter}){suffix}"
+        new_path = parent / new_name
+        if not new_path.exists():
+            logger.info(f"Duplicate detected: {dest_path.name} → {new_name}")
+            return new_path
+        counter += 1
+        if counter > 1000:  # Safety limit
+            raise ValueError(f"Could not find unique name for {dest_path.name} after 1000 attempts")
+
+
+def apply_moves(move_plan: List[Dict[str, Any]]) -> Tuple[bool, List[str], str, int]:
     """
     Apply the move plan to actually move files.
+    
+    Handles duplicate files by auto-renaming (e.g., file.pdf → file (1).pdf).
     
     Args:
         move_plan: List of move plan dictionaries
         
     Returns:
-        Tuple of (success, list_of_errors, log_file_path)
+        Tuple of (success, list_of_errors, log_file_path, renamed_count)
     """
     errors = []
     successful_moves = []
@@ -31,8 +64,10 @@ def apply_moves(move_plan: List[Dict[str, Any]]) -> Tuple[bool, List[str], str]:
     move_log = {
         "timestamp": datetime.now().isoformat(),
         "total_files": len(move_plan),
-        "moves": []
+        "moves": [],
+        "renamed_files": []  # Track files that were auto-renamed
     }
+    renamed_count = 0
     
     try:
         for i, move in enumerate(move_plan):
@@ -49,6 +84,19 @@ def apply_moves(move_plan: List[Dict[str, Any]]) -> Tuple[bool, List[str], str]:
                 
                 # Create destination directory if needed
                 dest_path.parent.mkdir(parents=True, exist_ok=True)
+                
+                # Handle duplicate files - auto-rename if destination already exists
+                original_dest = dest_path
+                if dest_path.exists():
+                    dest_path = _get_unique_path(dest_path)
+                    # Update the move entry with new destination path
+                    move['destination_path'] = str(dest_path)
+                    renamed_count += 1
+                    move_log["renamed_files"].append({
+                        "original_name": original_dest.name,
+                        "new_name": dest_path.name,
+                        "folder": str(dest_path.parent)
+                    })
                 
                 # Move the file
                 shutil.move(str(source_path), str(dest_path))
@@ -74,15 +122,16 @@ def apply_moves(move_plan: List[Dict[str, Any]]) -> Tuple[bool, List[str], str]:
         log_file_path = _save_move_log(move_log)
         
         success = len(errors) == 0
-        logger.info(f"Move operation completed. {len(successful_moves)} successful, {len(errors)} errors")
+        renamed_msg = f", {renamed_count} renamed to avoid duplicates" if renamed_count > 0 else ""
+        logger.info(f"Move operation completed. {len(successful_moves)} successful{renamed_msg}, {len(errors)} errors")
         
-        return success, errors, log_file_path
+        return success, errors, log_file_path, renamed_count
         
     except Exception as e:
         error_msg = f"Critical error during move operation: {e}"
         errors.append(error_msg)
         logger.error(error_msg)
-        return False, errors, ""
+        return False, errors, "", 0
 
 
 def _save_move_log(move_log: Dict[str, Any]) -> str:

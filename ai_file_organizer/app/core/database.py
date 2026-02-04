@@ -213,6 +213,21 @@ class FileIndex:
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
                 
+                # IMPORTANT: Before updating, remove any stale entry that has the same path
+                # This prevents UNIQUE constraint errors when a file is moved to a path
+                # that was previously occupied by another file (now moved/deleted)
+                cursor.execute(
+                    "DELETE FROM files WHERE file_path = ? AND id != ?",
+                    (new_path, file_id)
+                )
+                stale_deleted = cursor.rowcount
+                if stale_deleted > 0:
+                    logger.info(f"Removed {stale_deleted} stale entry/entries for path: {new_path}")
+                    # Also clean up FTS entries for deleted records
+                    cursor.execute(
+                        "DELETE FROM files_fts WHERE rowid NOT IN (SELECT id FROM files)"
+                    )
+                
                 # Update file_path in main table
                 cursor.execute(
                     "UPDATE files SET file_path = ? WHERE id = ?",
@@ -260,6 +275,129 @@ class FileIndex:
         except Exception as e:
             logger.error(f"Error updating file path for {file_id}: {e}")
             return False
+    
+    def delete_file(self, file_id: int) -> bool:
+        """
+        Delete a file entry from the database.
+        
+        Args:
+            file_id: The ID of the file to delete
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                
+                # Delete from main table
+                cursor.execute("DELETE FROM files WHERE id = ?", (file_id,))
+                deleted = cursor.rowcount
+                
+                # Delete from FTS table
+                cursor.execute("DELETE FROM files_fts WHERE rowid = ?", (file_id,))
+                
+                # Delete from embeddings if exists
+                cursor.execute("DELETE FROM embeddings WHERE file_id = ?", (file_id,))
+                
+                conn.commit()
+                
+                if deleted > 0:
+                    logger.info(f"Deleted file entry with ID {file_id}")
+                    return True
+                return False
+                
+        except Exception as e:
+            logger.error(f"Error deleting file {file_id}: {e}")
+            return False
+    
+    def delete_file_by_path(self, file_path: str) -> bool:
+        """
+        Delete a file entry from the database by path.
+        
+        Args:
+            file_path: The path of the file to delete
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                
+                # Get the file ID first
+                cursor.execute("SELECT id FROM files WHERE file_path = ?", (file_path,))
+                row = cursor.fetchone()
+                if not row:
+                    return False
+                
+                file_id = row[0]
+                
+                # Delete from all tables
+                cursor.execute("DELETE FROM files WHERE id = ?", (file_id,))
+                cursor.execute("DELETE FROM files_fts WHERE rowid = ?", (file_id,))
+                cursor.execute("DELETE FROM embeddings WHERE file_id = ?", (file_id,))
+                
+                conn.commit()
+                logger.info(f"Deleted file entry for path: {file_path}")
+                return True
+                
+        except Exception as e:
+            logger.error(f"Error deleting file by path {file_path}: {e}")
+            return False
+    
+    def cleanup_stale_entries(self, progress_callback=None) -> Dict[str, int]:
+        """
+        Remove database entries for files that no longer exist on disk.
+        This helps prevent UNIQUE constraint errors and keeps the database clean.
+        
+        Args:
+            progress_callback: Optional callback(current, total) for progress updates
+            
+        Returns:
+            Dictionary with 'checked', 'removed', and 'errors' counts
+        """
+        stats = {'checked': 0, 'removed': 0, 'errors': 0}
+        
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                
+                # Get all file paths and IDs
+                cursor.execute("SELECT id, file_path FROM files")
+                all_files = cursor.fetchall()
+                stats['checked'] = len(all_files)
+                
+                stale_ids = []
+                
+                for i, (file_id, file_path) in enumerate(all_files):
+                    if progress_callback and i % 100 == 0:
+                        progress_callback(i, len(all_files))
+                    
+                    # Check if file exists
+                    if not Path(file_path).exists():
+                        stale_ids.append(file_id)
+                
+                # Batch delete stale entries
+                if stale_ids:
+                    placeholders = ','.join('?' * len(stale_ids))
+                    
+                    cursor.execute(f"DELETE FROM files WHERE id IN ({placeholders})", stale_ids)
+                    cursor.execute(f"DELETE FROM files_fts WHERE rowid IN ({placeholders})", stale_ids)
+                    cursor.execute(f"DELETE FROM embeddings WHERE file_id IN ({placeholders})", stale_ids)
+                    
+                    stats['removed'] = len(stale_ids)
+                    conn.commit()
+                    logger.info(f"Cleanup: removed {len(stale_ids)} stale entries out of {len(all_files)} checked")
+                
+                if progress_callback:
+                    progress_callback(len(all_files), len(all_files))
+                    
+        except Exception as e:
+            logger.error(f"Error during stale entry cleanup: {e}")
+            stats['errors'] = 1
+        
+        return stats
     
     def add_file(self, file_data: Dict[str, Any]) -> bool:
         """

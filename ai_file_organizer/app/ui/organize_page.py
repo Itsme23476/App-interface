@@ -198,49 +198,198 @@ class IndexBeforeOrganizeWorker(QThread):
 
 
 class EmptyFolderDialog(QDialog):
-    """Dialog to let user choose which empty folders to delete."""
+    """Modern dialog to let user choose which empty folders to delete."""
     
     def __init__(self, empty_folders: list, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Empty Folders Found")
-        self.setMinimumWidth(500)
-        self.setMinimumHeight(350)
+        self.setWindowTitle("Empty Folders")
+        self.setMinimumSize(520, 400)
+        self.setModal(True)
+        self._drag_pos = None
         
         self.empty_folders = empty_folders
         self.folders_to_delete = []
         
-        layout = QVBoxLayout(self)
+        # Remove default window frame for custom styling
+        self.setWindowFlags(self.windowFlags() | Qt.FramelessWindowHint)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        
+        # Main container
+        self.container = QFrame(self)
+        self.container.setObjectName("emptyFolderContainer")
+        self.container.setStyleSheet("""
+            QFrame#emptyFolderContainer {
+                background-color: #FFFFFF;
+                border-radius: 24px;
+                border: 1px solid #E0E0E0;
+            }
+        """)
+        
+        # Add drop shadow
+        from PySide6.QtWidgets import QGraphicsDropShadowEffect
+        from PySide6.QtGui import QColor
+        shadow = QGraphicsDropShadowEffect(self)
+        shadow.setBlurRadius(30)
+        shadow.setXOffset(0)
+        shadow.setYOffset(5)
+        shadow.setColor(QColor(0, 0, 0, 50))
+        self.container.setGraphicsEffect(shadow)
+        
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(20, 20, 20, 20)
+        main_layout.addWidget(self.container)
+        
+        layout = QVBoxLayout(self.container)
+        layout.setContentsMargins(28, 24, 28, 24)
+        layout.setSpacing(16)
         
         # Header
-        header = QLabel(
-            "The following folders are now empty after organization.\n"
-            "Select which ones you want to delete:"
-        )
-        header.setWordWrap(True)
-        layout.addWidget(header)
+        header_layout = QHBoxLayout()
+        header_layout.setSpacing(14)
+        
+        icon_label = QLabel("🗑️")
+        icon_label.setStyleSheet("""
+            font-size: 24px;
+            background-color: #FFF3E0;
+            border-radius: 20px;
+            border: 2px solid #FFE0B2;
+        """)
+        icon_label.setFixedSize(48, 48)
+        icon_label.setAlignment(Qt.AlignCenter)
+        header_layout.addWidget(icon_label)
+        
+        title_label = QLabel("Empty Folders Found")
+        title_label.setStyleSheet("""
+            font-family: "Segoe UI", "SF Pro Display", sans-serif;
+            font-size: 20px;
+            font-weight: 700;
+            color: #1A1A2E;
+        """)
+        header_layout.addWidget(title_label)
+        header_layout.addStretch()
+        
+        close_btn = QPushButton("X")
+        close_btn.setFixedSize(36, 36)
+        close_btn.setCursor(Qt.PointingHandCursor)
+        close_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #E53935;
+                color: white;
+                border: none;
+                border-radius: 18px;
+                font-size: 20px;
+                font-weight: bold;
+                font-family: Arial, Helvetica, sans-serif;
+                padding: 0px;
+                margin: 0px;
+            }
+            QPushButton:hover {
+                background-color: #C62828;
+            }
+        """)
+        close_btn.clicked.connect(self.reject)
+        header_layout.addWidget(close_btn)
+        
+        layout.addLayout(header_layout)
+        
+        # Description
+        desc = QLabel("These folders are now empty. Select which ones to delete:")
+        desc.setStyleSheet("""
+            font-family: "Segoe UI", sans-serif;
+            font-size: 13px;
+            color: #666666;
+        """)
+        layout.addWidget(desc)
+        
+        # Divider
+        divider = QFrame()
+        divider.setFixedHeight(1)
+        divider.setStyleSheet("background-color: #EEEEEE;")
+        layout.addWidget(divider)
         
         # Folder list with checkboxes
         self.folder_list = QListWidget()
-        self.folder_list.setAlternatingRowColors(True)
+        self.folder_list.setStyleSheet("""
+            QListWidget {
+                border: 1px solid #E8DFFF;
+                border-radius: 12px;
+                background-color: #FAFAFA;
+                padding: 8px;
+            }
+            QListWidget::item {
+                padding: 10px 12px;
+                border-radius: 8px;
+                font-family: "Segoe UI", sans-serif;
+                font-size: 13px;
+            }
+            QListWidget::item:hover {
+                background-color: #F5F0FF;
+            }
+            QListWidget::item:selected {
+                background-color: #E8DFFF;
+                color: #7C4DFF;
+            }
+        """)
         
         for folder_path in empty_folders:
+            # Show just the folder name with path hint
+            from pathlib import Path
+            folder = Path(folder_path)
+            display_text = f"📁 {folder.name}"
+            
             item = QListWidgetItem()
             item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
             item.setCheckState(Qt.Checked)  # Default to checked
-            item.setText(folder_path)
+            item.setText(display_text)
+            item.setToolTip(folder_path)  # Full path on hover
             item.setData(Qt.UserRole, folder_path)
             self.folder_list.addItem(item)
         
-        layout.addWidget(self.folder_list)
+        layout.addWidget(self.folder_list, 1)
         
-        # Selection buttons
+        # Selection buttons row
         selection_layout = QHBoxLayout()
+        selection_layout.setSpacing(10)
         
         select_all_btn = QPushButton("Select All")
+        select_all_btn.setMinimumHeight(36)
+        select_all_btn.setCursor(Qt.PointingHandCursor)
+        select_all_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #F5F5F5;
+                color: #666666;
+                border: 1px solid #E0E0E0;
+                border-radius: 8px;
+                font-size: 12px;
+                padding: 6px 16px;
+            }
+            QPushButton:hover {
+                background-color: #E8DFFF;
+                border-color: #7C4DFF;
+                color: #7C4DFF;
+            }
+        """)
         select_all_btn.clicked.connect(self._select_all)
         selection_layout.addWidget(select_all_btn)
         
         deselect_all_btn = QPushButton("Deselect All")
+        deselect_all_btn.setMinimumHeight(36)
+        deselect_all_btn.setCursor(Qt.PointingHandCursor)
+        deselect_all_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #F5F5F5;
+                color: #666666;
+                border: 1px solid #E0E0E0;
+                border-radius: 8px;
+                font-size: 12px;
+                padding: 6px 16px;
+            }
+            QPushButton:hover {
+                background-color: #FFEBEE;
+                border-color: #EF9A9A;
+                color: #D32F2F;
+            }
+        """)
         deselect_all_btn.clicked.connect(self._deselect_all)
         selection_layout.addWidget(deselect_all_btn)
         
@@ -249,20 +398,51 @@ class EmptyFolderDialog(QDialog):
         
         # Action buttons
         button_layout = QHBoxLayout()
-        
-        delete_selected_btn = QPushButton("Delete Selected")
-        delete_selected_btn.setStyleSheet("background-color: #d9534f; color: white;")
-        delete_selected_btn.clicked.connect(self._delete_selected)
-        button_layout.addWidget(delete_selected_btn)
-        
-        delete_all_btn = QPushButton("Delete All")
-        delete_all_btn.setStyleSheet("background-color: #c9302c; color: white;")
-        delete_all_btn.clicked.connect(self._delete_all)
-        button_layout.addWidget(delete_all_btn)
+        button_layout.setSpacing(12)
         
         keep_all_btn = QPushButton("Keep All")
+        keep_all_btn.setMinimumHeight(44)
+        keep_all_btn.setCursor(Qt.PointingHandCursor)
+        keep_all_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #FFFFFF;
+                color: #666666;
+                border: 2px solid #E0E0E0;
+                border-radius: 10px;
+                font-weight: 600;
+                font-size: 14px;
+                padding: 8px 24px;
+            }
+            QPushButton:hover {
+                background-color: #F5F5F5;
+                border-color: #7C4DFF;
+                color: #7C4DFF;
+            }
+        """)
         keep_all_btn.clicked.connect(self.reject)
         button_layout.addWidget(keep_all_btn)
+        
+        button_layout.addStretch()
+        
+        delete_selected_btn = QPushButton("🗑️ Delete Selected")
+        delete_selected_btn.setMinimumHeight(44)
+        delete_selected_btn.setCursor(Qt.PointingHandCursor)
+        delete_selected_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #7C4DFF;
+                color: white;
+                border: none;
+                border-radius: 10px;
+                font-weight: 600;
+                font-size: 14px;
+                padding: 8px 24px;
+            }
+            QPushButton:hover {
+                background-color: #9575FF;
+            }
+        """)
+        delete_selected_btn.clicked.connect(self._delete_selected)
+        button_layout.addWidget(delete_selected_btn)
         
         layout.addLayout(button_layout)
     
@@ -289,6 +469,20 @@ class EmptyFolderDialog(QDialog):
     
     def get_folders_to_delete(self) -> list:
         return self.folders_to_delete
+    
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+            event.accept()
+    
+    def mouseMoveEvent(self, event):
+        if self._drag_pos is not None and event.buttons() == Qt.LeftButton:
+            self.move(event.globalPosition().toPoint() - self._drag_pos)
+            event.accept()
+    
+    def mouseReleaseEvent(self, event):
+        self._drag_pos = None
+        event.accept()
 
 
 class ModernConfirmDialog(QDialog):
@@ -367,22 +561,24 @@ class ModernConfirmDialog(QDialog):
         header_layout.addWidget(title_label)
         header_layout.addStretch()
         
-        # Close button with hover effect
-        close_btn = QPushButton("✕")
+        # Close button - solid purple with white X (ALWAYS visible)
+        close_btn = QPushButton("X")
         close_btn.setFixedSize(36, 36)
         close_btn.setCursor(Qt.PointingHandCursor)
         close_btn.setStyleSheet("""
             QPushButton {
-                background-color: transparent;
+                background-color: #7C4DFF;
+                color: white;
                 border: none;
-                color: #AAAAAA;
-                font-size: 18px;
-                font-weight: 300;
                 border-radius: 18px;
+                font-size: 20px;
+                font-weight: bold;
+                font-family: Arial, Helvetica, sans-serif;
+                padding: 0px;
+                margin: 0px;
             }
             QPushButton:hover {
-                background-color: rgba(124, 77, 255, 0.1);
-                color: #7C4DFF;
+                background-color: #5E35B1;
             }
         """)
         close_btn.clicked.connect(self.reject)
@@ -559,6 +755,1209 @@ class ModernConfirmDialog(QDialog):
         return dialog.result_accepted
 
 
+class ModernInfoDialog(QDialog):
+    """
+    Modern styled info/warning dialog with single OK button.
+    Matches the app's purple theme with clean, minimal design.
+    """
+    
+    def __init__(self, parent=None, title: str = "Information", message: str = "",
+                 details: list = None, info_text: str = "", icon: str = "ℹ️",
+                 ok_text: str = "OK", is_warning: bool = False):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setMinimumWidth(480)
+        self.setModal(True)
+        self._drag_pos = None
+        
+        # Remove default window frame for custom styling
+        self.setWindowFlags(self.windowFlags() | Qt.FramelessWindowHint)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        
+        # Main container with rounded corners and shadow
+        self.container = QFrame(self)
+        self.container.setObjectName("modernInfoContainer")
+        self.container.setStyleSheet("""
+            QFrame#modernInfoContainer {
+                background-color: #FFFFFF;
+                border-radius: 24px;
+                border: 1px solid #E0E0E0;
+            }
+        """)
+        
+        # Add subtle drop shadow effect
+        from PySide6.QtWidgets import QGraphicsDropShadowEffect
+        from PySide6.QtGui import QColor
+        shadow = QGraphicsDropShadowEffect(self)
+        shadow.setBlurRadius(25)
+        shadow.setXOffset(0)
+        shadow.setYOffset(4)
+        shadow.setColor(QColor(0, 0, 0, 40))
+        self.container.setGraphicsEffect(shadow)
+        
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(20, 20, 20, 20)
+        main_layout.addWidget(self.container)
+        
+        layout = QVBoxLayout(self.container)
+        layout.setContentsMargins(32, 28, 32, 28)
+        layout.setSpacing(18)
+        
+        # Header with icon and title
+        header_layout = QHBoxLayout()
+        header_layout.setSpacing(16)
+        
+        # Icon with appropriate color
+        icon_bg = "#FFF3E0" if is_warning else "#F3EEFF"
+        icon_border = "#FFE0B2" if is_warning else "#E8DFFF"
+        icon_label = QLabel(icon)
+        icon_label.setStyleSheet(f"""
+            font-size: 24px;
+            background-color: {icon_bg};
+            border-radius: 22px;
+            border: 2px solid {icon_border};
+        """)
+        icon_label.setFixedSize(52, 52)
+        icon_label.setAlignment(Qt.AlignCenter)
+        header_layout.addWidget(icon_label)
+        
+        title_label = QLabel(title)
+        title_label.setStyleSheet("""
+            font-family: "Segoe UI", "SF Pro Display", sans-serif;
+            font-size: 20px;
+            font-weight: 700;
+            color: #1A1A2E;
+            letter-spacing: -0.3px;
+        """)
+        header_layout.addWidget(title_label)
+        header_layout.addStretch()
+        
+        # Close button - solid purple with white X (ALWAYS visible)
+        close_btn = QPushButton("X")
+        close_btn.setFixedSize(36, 36)
+        close_btn.setCursor(Qt.PointingHandCursor)
+        close_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #7C4DFF;
+                color: white;
+                border: none;
+                border-radius: 18px;
+                font-size: 20px;
+                font-weight: bold;
+                font-family: Arial, Helvetica, sans-serif;
+                padding: 0px;
+                margin: 0px;
+            }
+            QPushButton:hover {
+                background-color: #5E35B1;
+            }
+        """)
+        close_btn.clicked.connect(self.accept)
+        header_layout.addWidget(close_btn)
+        
+        layout.addLayout(header_layout)
+        
+        # Subtle divider
+        divider = QFrame()
+        divider.setFixedHeight(1)
+        divider.setStyleSheet("background-color: #EEEEEE;")
+        layout.addWidget(divider)
+        
+        # Main message
+        if message:
+            msg_label = QLabel(message)
+            msg_label.setWordWrap(True)
+            msg_label.setStyleSheet("""
+                font-family: "Segoe UI", sans-serif;
+                font-size: 15px;
+                color: #444444;
+                line-height: 1.6;
+            """)
+            layout.addWidget(msg_label)
+        
+        # Details list (bullet points)
+        if details:
+            details_frame = QFrame()
+            details_frame.setStyleSheet("""
+                QFrame {
+                    background-color: #F8F8FA;
+                    border-radius: 14px;
+                    border: 1px solid #EEEEEE;
+                }
+            """)
+            details_layout = QVBoxLayout(details_frame)
+            details_layout.setContentsMargins(18, 14, 18, 14)
+            details_layout.setSpacing(10)
+            
+            for detail in details:
+                detail_row = QHBoxLayout()
+                detail_row.setSpacing(10)
+                
+                dot = QLabel("•")
+                dot.setStyleSheet("font-size: 16px; color: #7C4DFF;")
+                dot.setFixedWidth(14)
+                detail_row.addWidget(dot)
+                
+                detail_label = QLabel(detail)
+                detail_label.setWordWrap(True)
+                detail_label.setStyleSheet("""
+                    font-family: "Segoe UI", sans-serif;
+                    font-size: 14px;
+                    color: #555555;
+                """)
+                detail_row.addWidget(detail_label)
+                detail_row.addStretch()
+                
+                details_layout.addLayout(detail_row)
+            
+            layout.addWidget(details_frame)
+        
+        # Info text
+        if info_text:
+            info_label = QLabel(info_text)
+            info_label.setWordWrap(True)
+            info_label.setStyleSheet("""
+                font-family: "Segoe UI", sans-serif;
+                font-size: 13px;
+                color: #888888;
+                font-style: italic;
+            """)
+            layout.addWidget(info_label)
+        
+        layout.addSpacing(8)
+        
+        # Single OK button
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+        
+        ok_btn = QPushButton(ok_text)
+        ok_btn.setMinimumHeight(46)
+        ok_btn.setMinimumWidth(140)
+        ok_btn.setCursor(Qt.PointingHandCursor)
+        ok_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #7C4DFF;
+                color: white;
+                border: none;
+                border-radius: 12px;
+                font-family: "Segoe UI", sans-serif;
+                font-weight: 600;
+                font-size: 14px;
+                padding: 10px 32px;
+            }
+            QPushButton:hover {
+                background-color: #9575FF;
+            }
+        """)
+        ok_btn.clicked.connect(self.accept)
+        btn_layout.addWidget(ok_btn)
+        
+        layout.addLayout(btn_layout)
+    
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+            event.accept()
+    
+    def mouseMoveEvent(self, event):
+        if self._drag_pos is not None and event.buttons() == Qt.LeftButton:
+            self.move(event.globalPosition().toPoint() - self._drag_pos)
+            event.accept()
+    
+    def mouseReleaseEvent(self, event):
+        self._drag_pos = None
+        event.accept()
+    
+    @staticmethod
+    def show_warning(parent, title: str, message: str, details: list = None, 
+                     info_text: str = "", ok_text: str = "OK"):
+        """Show a warning dialog."""
+        dialog = ModernInfoDialog(
+            parent, title, message, details, info_text, 
+            icon="⚠️", ok_text=ok_text, is_warning=True
+        )
+        dialog.exec()
+    
+    @staticmethod
+    def show_info(parent, title: str, message: str, details: list = None,
+                  info_text: str = "", ok_text: str = "OK"):
+        """Show an info dialog."""
+        dialog = ModernInfoDialog(
+            parent, title, message, details, info_text,
+            icon="ℹ️", ok_text=ok_text, is_warning=False
+        )
+        dialog.exec()
+
+
+class HistoryDialog(QDialog):
+    """
+    Modern dialog showing organization history with undo capability.
+    Displays recent file organization operations in a clean, scrollable list.
+    """
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.parent_page = parent
+        self.setWindowTitle("Organization History")
+        self.setMinimumSize(600, 500)
+        self.setModal(True)
+        self._drag_pos = None
+        
+        # Remove default window frame for custom styling
+        self.setWindowFlags(self.windowFlags() | Qt.FramelessWindowHint)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        
+        # Main container
+        self.container = QFrame(self)
+        self.container.setObjectName("historyDialogContainer")
+        self.container.setStyleSheet("""
+            QFrame#historyDialogContainer {
+                background-color: #FFFFFF;
+                border-radius: 24px;
+                border: 1px solid #E0E0E0;
+            }
+        """)
+        
+        # Add drop shadow
+        from PySide6.QtWidgets import QGraphicsDropShadowEffect
+        from PySide6.QtGui import QColor
+        shadow = QGraphicsDropShadowEffect(self)
+        shadow.setBlurRadius(30)
+        shadow.setXOffset(0)
+        shadow.setYOffset(5)
+        shadow.setColor(QColor(0, 0, 0, 50))
+        self.container.setGraphicsEffect(shadow)
+        
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(20, 20, 20, 20)
+        main_layout.addWidget(self.container)
+        
+        layout = QVBoxLayout(self.container)
+        layout.setContentsMargins(28, 24, 28, 24)
+        layout.setSpacing(16)
+        
+        # Header
+        header_layout = QHBoxLayout()
+        header_layout.setSpacing(14)
+        
+        icon_label = QLabel("📋")
+        icon_label.setStyleSheet("""
+            font-size: 24px;
+            background-color: #F3EEFF;
+            border-radius: 20px;
+            border: 2px solid #E8DFFF;
+        """)
+        icon_label.setFixedSize(48, 48)
+        icon_label.setAlignment(Qt.AlignCenter)
+        header_layout.addWidget(icon_label)
+        
+        title_label = QLabel("Organization History")
+        title_label.setStyleSheet("""
+            font-family: "Segoe UI", "SF Pro Display", sans-serif;
+            font-size: 20px;
+            font-weight: 700;
+            color: #1A1A2E;
+        """)
+        header_layout.addWidget(title_label)
+        header_layout.addStretch()
+        
+        close_btn = QPushButton("X")
+        close_btn.setFixedSize(36, 36)
+        close_btn.setCursor(Qt.PointingHandCursor)
+        close_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #7C4DFF;
+                color: white;
+                border: none;
+                border-radius: 18px;
+                font-size: 20px;
+                font-weight: bold;
+                font-family: Arial, Helvetica, sans-serif;
+                padding: 0px;
+                margin: 0px;
+            }
+            QPushButton:hover {
+                background-color: #5E35B1;
+            }
+        """)
+        close_btn.clicked.connect(self.accept)
+        header_layout.addWidget(close_btn)
+        
+        layout.addLayout(header_layout)
+        
+        # Divider
+        divider = QFrame()
+        divider.setFixedHeight(1)
+        divider.setStyleSheet("background-color: #EEEEEE;")
+        layout.addWidget(divider)
+        
+        # History list container
+        self.history_list = QWidget()
+        self.history_layout = QVBoxLayout(self.history_list)
+        self.history_layout.setContentsMargins(0, 0, 0, 0)
+        self.history_layout.setSpacing(10)
+        
+        # Scroll area for history items
+        scroll = QScrollArea()
+        scroll.setWidget(self.history_list)
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet("""
+            QScrollArea {
+                border: none;
+                background-color: transparent;
+            }
+            QScrollBar:vertical {
+                border: none;
+                background: #F5F5F5;
+                width: 8px;
+                border-radius: 4px;
+            }
+            QScrollBar::handle:vertical {
+                background: #CCCCCC;
+                border-radius: 4px;
+                min-height: 30px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background: #AAAAAA;
+            }
+        """)
+        layout.addWidget(scroll, 1)
+        
+        # Load history
+        self._load_history()
+        
+        # Footer with clear button
+        footer_layout = QHBoxLayout()
+        footer_layout.addStretch()
+        
+        clear_btn = QPushButton("Clear History")
+        clear_btn.setMinimumHeight(40)
+        clear_btn.setCursor(Qt.PointingHandCursor)
+        clear_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #FFFFFF;
+                color: #999999;
+                border: 1px solid #E0E0E0;
+                border-radius: 10px;
+                font-size: 13px;
+                padding: 8px 20px;
+            }
+            QPushButton:hover {
+                background-color: #FFF0F0;
+                border-color: #FFCCCC;
+                color: #CC6666;
+            }
+        """)
+        clear_btn.clicked.connect(self._clear_history)
+        footer_layout.addWidget(clear_btn)
+        
+        close_dialog_btn = QPushButton("Close")
+        close_dialog_btn.setMinimumHeight(40)
+        close_dialog_btn.setCursor(Qt.PointingHandCursor)
+        close_dialog_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #7C4DFF;
+                color: white;
+                border: none;
+                border-radius: 10px;
+                font-weight: 600;
+                font-size: 14px;
+                padding: 8px 28px;
+            }
+            QPushButton:hover {
+                background-color: #9575FF;
+            }
+        """)
+        close_dialog_btn.clicked.connect(self.accept)
+        footer_layout.addWidget(close_dialog_btn)
+        
+        layout.addLayout(footer_layout)
+    
+    def _load_history(self):
+        """Load move history from log files."""
+        from app.core.apply import get_move_history
+        
+        history = get_move_history()
+        
+        if not history:
+            # Show empty state
+            empty_label = QLabel("No organization history yet")
+            empty_label.setAlignment(Qt.AlignCenter)
+            empty_label.setStyleSheet("""
+                font-family: "Segoe UI", sans-serif;
+                font-size: 15px;
+                color: #AAAAAA;
+                padding: 40px;
+            """)
+            self.history_layout.addWidget(empty_label)
+            self.history_layout.addStretch()
+            return
+        
+        # Add history items (most recent first, limit to 20)
+        for item in history[:20]:
+            self._add_history_item(item)
+        
+        self.history_layout.addStretch()
+    
+    def _add_history_item(self, item: dict):
+        """Add a single history item to the list."""
+        from datetime import datetime
+        
+        item_frame = QFrame()
+        item_frame.setStyleSheet("""
+            QFrame {
+                background-color: #FAFAFA;
+                border-radius: 12px;
+                border: 1px solid #EEEEEE;
+            }
+            QFrame:hover {
+                background-color: #F5F0FF;
+                border-color: #E8DFFF;
+            }
+        """)
+        
+        item_layout = QHBoxLayout(item_frame)
+        item_layout.setContentsMargins(16, 14, 16, 14)
+        item_layout.setSpacing(14)
+        
+        # Icon
+        icon = QLabel("📁")
+        icon.setStyleSheet("font-size: 20px; background: transparent; border: none;")
+        icon.setFixedWidth(28)
+        item_layout.addWidget(icon)
+        
+        # Info section
+        info_layout = QVBoxLayout()
+        info_layout.setSpacing(4)
+        
+        # Parse timestamp
+        timestamp_str = item.get("timestamp", "")
+        try:
+            dt = datetime.fromisoformat(timestamp_str)
+            formatted_date = dt.strftime("%b %d, %Y at %I:%M %p")
+        except:
+            formatted_date = timestamp_str[:19] if timestamp_str else "Unknown date"
+        
+        date_label = QLabel(formatted_date)
+        date_label.setStyleSheet("""
+            font-family: "Segoe UI", sans-serif;
+            font-size: 14px;
+            font-weight: 600;
+            color: #333333;
+            background: transparent;
+            border: none;
+        """)
+        info_layout.addWidget(date_label)
+        
+        files_count = item.get("successful_moves", item.get("total_files", 0))
+        details_label = QLabel(f"{files_count} file(s) organized")
+        details_label.setStyleSheet("""
+            font-family: "Segoe UI", sans-serif;
+            font-size: 12px;
+            color: #888888;
+            background: transparent;
+            border: none;
+        """)
+        info_layout.addWidget(details_label)
+        
+        item_layout.addLayout(info_layout, 1)
+        
+        # View button
+        view_btn = QPushButton("View")
+        view_btn.setFixedSize(70, 32)
+        view_btn.setCursor(Qt.PointingHandCursor)
+        view_btn.setStyleSheet("""
+            QPushButton {
+                background-color: transparent;
+                color: #7C4DFF;
+                border: 1px solid #7C4DFF;
+                border-radius: 8px;
+                font-size: 12px;
+                font-weight: 600;
+            }
+            QPushButton:hover {
+                background-color: #7C4DFF;
+                color: white;
+            }
+        """)
+        log_file = item.get("log_file", "")
+        view_btn.clicked.connect(lambda checked, lf=log_file: self._view_details(lf))
+        item_layout.addWidget(view_btn)
+        
+        self.history_layout.addWidget(item_frame)
+    
+    def _view_details(self, log_file: str):
+        """Show details of a specific organization operation in a scrollable dialog."""
+        import json
+        from pathlib import Path
+        
+        try:
+            with open(log_file, 'r', encoding='utf-8') as f:
+                log_data = json.load(f)
+            
+            moves = log_data.get("moves", [])
+            renamed = log_data.get("renamed_files", [])
+            
+            # Create a custom scrollable details dialog
+            dialog = QDialog(self)
+            dialog.setWindowTitle("Operation Details")
+            dialog.setMinimumSize(550, 450)
+            dialog.setModal(True)
+            dialog._drag_pos = None
+            
+            # Remove frame for custom styling
+            dialog.setWindowFlags(dialog.windowFlags() | Qt.FramelessWindowHint)
+            dialog.setAttribute(Qt.WA_TranslucentBackground)
+            
+            # Container
+            container = QFrame(dialog)
+            container.setObjectName("detailsContainer")
+            container.setStyleSheet("""
+                QFrame#detailsContainer {
+                    background-color: #FFFFFF;
+                    border-radius: 20px;
+                    border: 1px solid #E0E0E0;
+                }
+            """)
+            
+            # Shadow
+            from PySide6.QtWidgets import QGraphicsDropShadowEffect
+            from PySide6.QtGui import QColor
+            shadow = QGraphicsDropShadowEffect(dialog)
+            shadow.setBlurRadius(25)
+            shadow.setXOffset(0)
+            shadow.setYOffset(4)
+            shadow.setColor(QColor(0, 0, 0, 40))
+            container.setGraphicsEffect(shadow)
+            
+            main_layout = QVBoxLayout(dialog)
+            main_layout.setContentsMargins(15, 15, 15, 15)
+            main_layout.addWidget(container)
+            
+            layout = QVBoxLayout(container)
+            layout.setContentsMargins(24, 20, 24, 20)
+            layout.setSpacing(14)
+            
+            # Header
+            header = QHBoxLayout()
+            header.setSpacing(12)
+            
+            icon = QLabel("📋")
+            icon.setStyleSheet("font-size: 22px; background: #F3EEFF; border-radius: 18px; border: 2px solid #E8DFFF;")
+            icon.setFixedSize(44, 44)
+            icon.setAlignment(Qt.AlignCenter)
+            header.addWidget(icon)
+            
+            title = QLabel(f"Organized {len(moves)} file(s)")
+            title.setStyleSheet("font-family: 'Segoe UI'; font-size: 18px; font-weight: 700; color: #1A1A2E;")
+            header.addWidget(title)
+            header.addStretch()
+            
+            close_btn = QPushButton("X")
+            close_btn.setFixedSize(32, 32)
+            close_btn.setCursor(Qt.PointingHandCursor)
+            close_btn.setStyleSheet("""
+                QPushButton { background: #7C4DFF; border: none; color: white; font-size: 18px; font-weight: bold; font-family: Arial, Helvetica, sans-serif; border-radius: 16px; padding: 0px; margin: 0px; }
+                QPushButton:hover { background: #5E35B1; }
+            """)
+            close_btn.clicked.connect(dialog.accept)
+            header.addWidget(close_btn)
+            
+            layout.addLayout(header)
+            
+            # Divider
+            divider = QFrame()
+            divider.setFixedHeight(1)
+            divider.setStyleSheet("background: #EEEEEE;")
+            layout.addWidget(divider)
+            
+            # Scrollable file list
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setStyleSheet("""
+                QScrollArea { border: none; background: transparent; }
+                QScrollBar:vertical { border: none; background: #F5F5F5; width: 6px; border-radius: 3px; }
+                QScrollBar::handle:vertical { background: #CCC; border-radius: 3px; min-height: 20px; }
+                QScrollBar::handle:vertical:hover { background: #AAA; }
+            """)
+            
+            list_widget = QWidget()
+            list_layout = QVBoxLayout(list_widget)
+            list_layout.setContentsMargins(0, 8, 0, 8)
+            list_layout.setSpacing(6)
+            
+            # Add ALL moves to the list
+            for move in moves:
+                from_name = Path(move.get("from", "")).name
+                to_folder = Path(move.get("to", "")).parent.name
+                
+                item = QLabel(f"📄 {from_name}  →  {to_folder}/")
+                item.setStyleSheet("""
+                    font-family: 'Segoe UI'; font-size: 13px; color: #444;
+                    padding: 8px 12px; background: #FAFAFA; border-radius: 8px;
+                """)
+                item.setWordWrap(True)
+                list_layout.addWidget(item)
+            
+            # Show renamed files if any
+            if renamed:
+                spacer = QLabel("")
+                spacer.setFixedHeight(10)
+                list_layout.addWidget(spacer)
+                
+                renamed_header = QLabel(f"📝 {len(renamed)} file(s) renamed to avoid duplicates:")
+                renamed_header.setStyleSheet("font-family: 'Segoe UI'; font-size: 13px; font-weight: 600; color: #7C4DFF; padding: 4px 0;")
+                list_layout.addWidget(renamed_header)
+                
+                for r in renamed:
+                    orig = r.get("original_name", "?")
+                    new = r.get("new_name", "?")
+                    rename_item = QLabel(f"  {orig}  →  {new}")
+                    rename_item.setStyleSheet("font-family: 'Segoe UI'; font-size: 12px; color: #666; padding: 4px 12px;")
+                    list_layout.addWidget(rename_item)
+            
+            list_layout.addStretch()
+            scroll.setWidget(list_widget)
+            layout.addWidget(scroll, 1)
+            
+            # Footer
+            footer = QHBoxLayout()
+            footer.addStretch()
+            
+            ok_btn = QPushButton("Close")
+            ok_btn.setMinimumHeight(40)
+            ok_btn.setCursor(Qt.PointingHandCursor)
+            ok_btn.setStyleSheet("""
+                QPushButton { background: #7C4DFF; color: white; border: none; border-radius: 10px;
+                              font-weight: 600; font-size: 14px; padding: 8px 28px; }
+                QPushButton:hover { background: #9575FF; }
+            """)
+            ok_btn.clicked.connect(dialog.accept)
+            footer.addWidget(ok_btn)
+            
+            layout.addLayout(footer)
+            
+            # Make dialog draggable
+            def mousePressEvent(event):
+                if event.button() == Qt.LeftButton:
+                    dialog._drag_pos = event.globalPosition().toPoint() - dialog.frameGeometry().topLeft()
+                    event.accept()
+            def mouseMoveEvent(event):
+                if dialog._drag_pos and event.buttons() == Qt.LeftButton:
+                    dialog.move(event.globalPosition().toPoint() - dialog._drag_pos)
+                    event.accept()
+            def mouseReleaseEvent(event):
+                dialog._drag_pos = None
+                event.accept()
+            
+            dialog.mousePressEvent = mousePressEvent
+            dialog.mouseMoveEvent = mouseMoveEvent
+            dialog.mouseReleaseEvent = mouseReleaseEvent
+            
+            dialog.exec()
+            
+        except Exception as e:
+            ModernInfoDialog.show_warning(
+                self,
+                title="Error",
+                message="Could not load operation details.",
+                details=[str(e)]
+            )
+    
+    def _clear_history(self):
+        """Clear all history log files."""
+        from app.core.settings import settings
+        import shutil
+        
+        confirmed = ModernConfirmDialog.ask(
+            self,
+            title="Clear History",
+            message="Delete all organization history?",
+            details=["This cannot be undone", "Undo operations will no longer be possible for past moves"],
+            yes_text="Clear All",
+            no_text="Cancel"
+        )
+        
+        if confirmed:
+            try:
+                moves_dir = settings.get_moves_dir()
+                for log_file in moves_dir.glob("moves-*.json"):
+                    log_file.unlink()
+                
+                # Refresh the list
+                # Clear existing items
+                while self.history_layout.count() > 0:
+                    item = self.history_layout.takeAt(0)
+                    if item.widget():
+                        item.widget().deleteLater()
+                
+                # Show empty state
+                empty_label = QLabel("No organization history yet")
+                empty_label.setAlignment(Qt.AlignCenter)
+                empty_label.setStyleSheet("""
+                    font-family: "Segoe UI", sans-serif;
+                    font-size: 15px;
+                    color: #AAAAAA;
+                    padding: 40px;
+                """)
+                self.history_layout.addWidget(empty_label)
+                self.history_layout.addStretch()
+                
+            except Exception as e:
+                ModernInfoDialog.show_warning(
+                    self,
+                    title="Error",
+                    message="Could not clear history.",
+                    details=[str(e)]
+                )
+    
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+            event.accept()
+    
+    def mouseMoveEvent(self, event):
+        if self._drag_pos is not None and event.buttons() == Qt.LeftButton:
+            self.move(event.globalPosition().toPoint() - self._drag_pos)
+            event.accept()
+    
+    def mouseReleaseEvent(self, event):
+        self._drag_pos = None
+        event.accept()
+
+
+class PinnedDialog(QDialog):
+    """
+    Modern dialog for managing pinned files/folders that won't be organized.
+    """
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.parent_page = parent
+        self.setWindowTitle("Pinned Items")
+        self.setMinimumSize(550, 450)
+        self.setModal(True)
+        self._drag_pos = None
+        
+        # Remove default window frame for custom styling
+        self.setWindowFlags(self.windowFlags() | Qt.FramelessWindowHint)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        
+        # Main container
+        self.container = QFrame(self)
+        self.container.setObjectName("pinnedDialogContainer")
+        self.container.setStyleSheet("""
+            QFrame#pinnedDialogContainer {
+                background-color: #FFFFFF;
+                border-radius: 24px;
+                border: 1px solid #E0E0E0;
+            }
+        """)
+        
+        # Add drop shadow
+        from PySide6.QtWidgets import QGraphicsDropShadowEffect
+        from PySide6.QtGui import QColor
+        shadow = QGraphicsDropShadowEffect(self)
+        shadow.setBlurRadius(30)
+        shadow.setXOffset(0)
+        shadow.setYOffset(5)
+        shadow.setColor(QColor(0, 0, 0, 50))
+        self.container.setGraphicsEffect(shadow)
+        
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(20, 20, 20, 20)
+        main_layout.addWidget(self.container)
+        
+        layout = QVBoxLayout(self.container)
+        layout.setContentsMargins(28, 24, 28, 24)
+        layout.setSpacing(16)
+        
+        # Header
+        header_layout = QHBoxLayout()
+        header_layout.setSpacing(14)
+        
+        icon_label = QLabel("📌")
+        icon_label.setStyleSheet("""
+            font-size: 24px;
+            background-color: #F3EEFF;
+            border-radius: 20px;
+            border: 2px solid #E8DFFF;
+        """)
+        icon_label.setFixedSize(48, 48)
+        icon_label.setAlignment(Qt.AlignCenter)
+        header_layout.addWidget(icon_label)
+        
+        title_label = QLabel("Pinned Items")
+        title_label.setStyleSheet("""
+            font-family: "Segoe UI", "SF Pro Display", sans-serif;
+            font-size: 20px;
+            font-weight: 700;
+            color: #1A1A2E;
+        """)
+        header_layout.addWidget(title_label)
+        header_layout.addStretch()
+        
+        close_btn = QPushButton("X")
+        close_btn.setFixedSize(36, 36)
+        close_btn.setCursor(Qt.PointingHandCursor)
+        close_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #7C4DFF;
+                color: white;
+                border: none;
+                border-radius: 18px;
+                font-size: 20px;
+                font-weight: bold;
+                font-family: Arial, Helvetica, sans-serif;
+                padding: 0px;
+                margin: 0px;
+            }
+            QPushButton:hover {
+                background-color: #5E35B1;
+            }
+        """)
+        close_btn.clicked.connect(self.accept)
+        header_layout.addWidget(close_btn)
+        
+        layout.addLayout(header_layout)
+        
+        # Description
+        desc = QLabel("Pinned files and folders will never be organized.")
+        desc.setStyleSheet("""
+            font-family: "Segoe UI", sans-serif;
+            font-size: 13px;
+            color: #888888;
+        """)
+        layout.addWidget(desc)
+        
+        # Divider
+        divider = QFrame()
+        divider.setFixedHeight(1)
+        divider.setStyleSheet("background-color: #EEEEEE;")
+        layout.addWidget(divider)
+        
+        # Pinned items list container
+        self.pinned_list = QWidget()
+        self.pinned_layout = QVBoxLayout(self.pinned_list)
+        self.pinned_layout.setContentsMargins(0, 0, 0, 0)
+        self.pinned_layout.setSpacing(8)
+        
+        # Scroll area for pinned items
+        scroll = QScrollArea()
+        scroll.setWidget(self.pinned_list)
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet("""
+            QScrollArea {
+                border: none;
+                background-color: transparent;
+            }
+            QScrollBar:vertical {
+                border: none;
+                background: #F5F5F5;
+                width: 8px;
+                border-radius: 4px;
+            }
+            QScrollBar::handle:vertical {
+                background: #CCCCCC;
+                border-radius: 4px;
+                min-height: 30px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background: #AAAAAA;
+            }
+        """)
+        layout.addWidget(scroll, 1)
+        
+        # Load pinned items
+        self._load_pinned_items()
+        
+        # Add new item section
+        add_layout = QHBoxLayout()
+        add_layout.setSpacing(10)
+        
+        add_file_btn = QPushButton("📄 Pin File")
+        add_file_btn.setMinimumHeight(40)
+        add_file_btn.setCursor(Qt.PointingHandCursor)
+        add_file_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #F5F0FF;
+                color: #7C4DFF;
+                border: 1px solid #E8DFFF;
+                border-radius: 10px;
+                font-size: 13px;
+                font-weight: 600;
+                padding: 8px 16px;
+            }
+            QPushButton:hover {
+                background-color: #E8DFFF;
+                border-color: #7C4DFF;
+            }
+        """)
+        add_file_btn.clicked.connect(self._add_pinned_file)
+        add_layout.addWidget(add_file_btn)
+        
+        add_folder_btn = QPushButton("📁 Pin Folder")
+        add_folder_btn.setMinimumHeight(40)
+        add_folder_btn.setCursor(Qt.PointingHandCursor)
+        add_folder_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #F5F0FF;
+                color: #7C4DFF;
+                border: 1px solid #E8DFFF;
+                border-radius: 10px;
+                font-size: 13px;
+                font-weight: 600;
+                padding: 8px 16px;
+            }
+            QPushButton:hover {
+                background-color: #E8DFFF;
+                border-color: #7C4DFF;
+            }
+        """)
+        add_folder_btn.clicked.connect(self._add_pinned_folder)
+        add_layout.addWidget(add_folder_btn)
+        
+        add_layout.addStretch()
+        layout.addLayout(add_layout)
+        
+        # Footer
+        footer_layout = QHBoxLayout()
+        footer_layout.addStretch()
+        
+        clear_btn = QPushButton("Unpin All")
+        clear_btn.setMinimumHeight(40)
+        clear_btn.setCursor(Qt.PointingHandCursor)
+        clear_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #FFFFFF;
+                color: #999999;
+                border: 1px solid #E0E0E0;
+                border-radius: 10px;
+                font-size: 13px;
+                padding: 8px 20px;
+            }
+            QPushButton:hover {
+                background-color: #FFF0F0;
+                border-color: #FFCCCC;
+                color: #CC6666;
+            }
+        """)
+        clear_btn.clicked.connect(self._clear_all_pinned)
+        footer_layout.addWidget(clear_btn)
+        
+        close_dialog_btn = QPushButton("Done")
+        close_dialog_btn.setMinimumHeight(40)
+        close_dialog_btn.setCursor(Qt.PointingHandCursor)
+        close_dialog_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #7C4DFF;
+                color: white;
+                border: none;
+                border-radius: 10px;
+                font-weight: 600;
+                font-size: 14px;
+                padding: 8px 28px;
+            }
+            QPushButton:hover {
+                background-color: #9575FF;
+            }
+        """)
+        close_dialog_btn.clicked.connect(self.accept)
+        footer_layout.addWidget(close_dialog_btn)
+        
+        layout.addLayout(footer_layout)
+    
+    def _load_pinned_items(self):
+        """Load pinned items from settings."""
+        pinned_paths = settings.get_pinned_paths()
+        
+        if not pinned_paths:
+            # Show empty state
+            empty_label = QLabel("No pinned items yet.\nPin files or folders to protect them from organization.")
+            empty_label.setAlignment(Qt.AlignCenter)
+            empty_label.setStyleSheet("""
+                font-family: "Segoe UI", sans-serif;
+                font-size: 14px;
+                color: #AAAAAA;
+                padding: 30px;
+            """)
+            self.pinned_layout.addWidget(empty_label)
+            self.pinned_layout.addStretch()
+            return
+        
+        # Add pinned items
+        for path in pinned_paths:
+            self._add_pinned_item_row(path)
+        
+        self.pinned_layout.addStretch()
+    
+    def _add_pinned_item_row(self, path: str):
+        """Add a single pinned item row."""
+        from pathlib import Path
+        
+        item_frame = QFrame()
+        item_frame.setStyleSheet("""
+            QFrame {
+                background-color: #FAFAFA;
+                border-radius: 12px;
+                border: 1px solid #EEEEEE;
+            }
+            QFrame:hover {
+                background-color: #F5F0FF;
+                border-color: #E8DFFF;
+            }
+        """)
+        
+        item_layout = QHBoxLayout(item_frame)
+        item_layout.setContentsMargins(14, 12, 14, 12)
+        item_layout.setSpacing(12)
+        
+        # Icon - folder or file
+        p = Path(path)
+        is_folder = p.is_dir() if p.exists() else ('.' not in p.name)
+        icon = QLabel("📁" if is_folder else "📄")
+        icon.setStyleSheet("font-size: 18px; background: transparent; border: none;")
+        icon.setFixedWidth(26)
+        item_layout.addWidget(icon)
+        
+        # Path info
+        info_layout = QVBoxLayout()
+        info_layout.setSpacing(2)
+        
+        name_label = QLabel(p.name)
+        name_label.setStyleSheet("""
+            font-family: "Segoe UI", sans-serif;
+            font-size: 14px;
+            font-weight: 600;
+            color: #333333;
+            background: transparent;
+            border: none;
+        """)
+        info_layout.addWidget(name_label)
+        
+        # Show parent folder
+        parent_str = str(p.parent)
+        if len(parent_str) > 45:
+            parent_str = "..." + parent_str[-42:]
+        parent_label = QLabel(parent_str)
+        parent_label.setStyleSheet("""
+            font-family: "Segoe UI", sans-serif;
+            font-size: 11px;
+            color: #999999;
+            background: transparent;
+            border: none;
+        """)
+        info_layout.addWidget(parent_label)
+        
+        item_layout.addLayout(info_layout, 1)
+        
+        # Status indicator - exists or not
+        if not p.exists():
+            status = QLabel("⚠️")
+            status.setToolTip("File/folder no longer exists")
+            status.setStyleSheet("font-size: 14px; background: transparent; border: none;")
+            item_layout.addWidget(status)
+        
+        # Unpin button - solid red with white X (ALWAYS visible)
+        unpin_btn = QPushButton("X")
+        unpin_btn.setFixedSize(28, 28)
+        unpin_btn.setCursor(Qt.PointingHandCursor)
+        unpin_btn.setToolTip("Unpin this item")
+        unpin_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #E53935;
+                color: white;
+                border: none;
+                border-radius: 14px;
+                font-size: 16px;
+                font-weight: bold;
+                font-family: Arial, Helvetica, sans-serif;
+                padding: 0px;
+                margin: 0px;
+            }
+            QPushButton:hover {
+                background-color: #C62828;
+            }
+        """)
+        unpin_btn.clicked.connect(lambda checked, p=path: self._unpin_item(p))
+        item_layout.addWidget(unpin_btn)
+        
+        self.pinned_layout.addWidget(item_frame)
+    
+    def _add_pinned_file(self):
+        """Add a file to pinned list via file dialog."""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select File to Pin",
+            "",
+            "All Files (*)"
+        )
+        
+        if file_path:
+            if settings.add_pinned_path(file_path):
+                self._refresh_list()
+    
+    def _add_pinned_folder(self):
+        """Add a folder to pinned list via folder dialog."""
+        folder_path = QFileDialog.getExistingDirectory(
+            self,
+            "Select Folder to Pin",
+            ""
+        )
+        
+        if folder_path:
+            if settings.add_pinned_path(folder_path):
+                self._refresh_list()
+    
+    def _unpin_item(self, path: str):
+        """Remove a path from pinned list."""
+        settings.remove_pinned_path(path)
+        self._refresh_list()
+    
+    def _clear_all_pinned(self):
+        """Clear all pinned items."""
+        if not settings.get_pinned_paths():
+            return
+        
+        confirmed = ModernConfirmDialog.ask(
+            self,
+            title="Unpin All Items",
+            message="Remove all pinned items?",
+            details=["These files/folders will be subject to organization again"],
+            yes_text="Unpin All",
+            no_text="Cancel"
+        )
+        
+        if confirmed:
+            settings.clear_all_pinned()
+            self._refresh_list()
+    
+    def _refresh_list(self):
+        """Refresh the pinned items list."""
+        # Clear existing items
+        while self.pinned_layout.count() > 0:
+            item = self.pinned_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        
+        # Reload
+        self._load_pinned_items()
+    
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+            event.accept()
+    
+    def mouseMoveEvent(self, event):
+        if self._drag_pos is not None and event.buttons() == Qt.LeftButton:
+            self.move(event.globalPosition().toPoint() - self._drag_pos)
+            event.accept()
+    
+    def mouseReleaseEvent(self, event):
+        self._drag_pos = None
+        event.accept()
+
+
 class ApplyInstructionsDialog(QDialog):
     """
     Modern dialog for choosing how to apply new instructions to existing files.
@@ -636,20 +2035,23 @@ class ApplyInstructionsDialog(QDialog):
         header_layout.addWidget(title_label)
         header_layout.addStretch()
         
-        close_btn = QPushButton("✕")
+        close_btn = QPushButton("X")
         close_btn.setFixedSize(32, 32)
         close_btn.setCursor(Qt.PointingHandCursor)
         close_btn.setStyleSheet("""
             QPushButton {
-                background-color: transparent;
+                background-color: #7C4DFF;
+                color: white;
                 border: none;
-                color: #AAAAAA;
-                font-size: 16px;
                 border-radius: 16px;
+                font-size: 18px;
+                font-weight: bold;
+                font-family: Arial, Helvetica, sans-serif;
+                padding: 0px;
+                margin: 0px;
             }
             QPushButton:hover {
-                background-color: rgba(124, 77, 255, 0.1);
-                color: #7C4DFF;
+                background-color: #5E35B1;
             }
         """)
         close_btn.clicked.connect(self._on_continue)
@@ -1706,6 +3108,54 @@ class OrganizePage(QWidget):
         self.undo_button.clicked.connect(self.undo_last_organization)
         action_layout.addWidget(self.undo_button)
         
+        # History button - shows past organization operations
+        self.history_button = QPushButton("📋 History")
+        self.history_button.setMinimumHeight(48)
+        self.history_button.setMinimumWidth(130)
+        self.history_button.setCursor(Qt.PointingHandCursor)
+        self.history_button.setToolTip("View past organization operations")
+        self.history_button.setStyleSheet("""
+            QPushButton {
+                background-color: #FFFFFF;
+                color: #666666;
+                border: 2px solid #E0E0E0;
+                border-radius: 12px;
+                font-weight: 600;
+                font-size: 15px;
+            }
+            QPushButton:hover {
+                background-color: #F5F5F5;
+                border-color: #7C4DFF;
+                color: #7C4DFF;
+            }
+        """)
+        self.history_button.clicked.connect(self._show_history_dialog)
+        action_layout.addWidget(self.history_button)
+        
+        # Pinned button - manage pinned files/folders
+        self.pinned_button = QPushButton("📌 Pinned")
+        self.pinned_button.setMinimumHeight(48)
+        self.pinned_button.setMinimumWidth(130)
+        self.pinned_button.setCursor(Qt.PointingHandCursor)
+        self.pinned_button.setToolTip("View and manage pinned files/folders that won't be organized")
+        self.pinned_button.setStyleSheet("""
+            QPushButton {
+                background-color: #FFFFFF;
+                color: #666666;
+                border: 2px solid #E0E0E0;
+                border-radius: 12px;
+                font-weight: 600;
+                font-size: 15px;
+            }
+            QPushButton:hover {
+                background-color: #F5F5F5;
+                border-color: #7C4DFF;
+                color: #7C4DFF;
+            }
+        """)
+        self.pinned_button.clicked.connect(self._show_pinned_dialog)
+        action_layout.addWidget(self.pinned_button)
+        
         # Edit button (to show inputs again after plan generation)
         self.edit_inputs_button = QPushButton("✏️ Edit")
         self.edit_inputs_button.setMinimumHeight(48)
@@ -1730,14 +3180,50 @@ class OrganizePage(QWidget):
         self.edit_inputs_button.setVisible(False)
         action_layout.addWidget(self.edit_inputs_button)
         
-        action_layout.addStretch()
+        # No stretch - let buttons stay left-aligned
         
         # Hide these buttons initially - shown after plan is generated
         self.apply_button.setVisible(False)
         self.clear_button.setVisible(False)
         self.undo_button.setVisible(False)
         
-        organize_now_layout.addLayout(action_layout)
+        # Wrap action buttons in a scroll area to prevent cutoff on small windows
+        action_widget = QWidget()
+        action_widget.setLayout(action_layout)
+        action_widget.setStyleSheet("background: transparent;")
+        
+        action_scroll = QScrollArea()
+        action_scroll.setWidget(action_widget)
+        action_scroll.setWidgetResizable(True)
+        action_scroll.setFixedHeight(70)  # Fixed height for the button row + scrollbar space
+        action_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        action_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        action_scroll.setStyleSheet("""
+            QScrollArea {
+                border: none;
+                background: transparent;
+            }
+            QScrollBar:horizontal {
+                border: none;
+                background: #F0F0F0;
+                height: 8px;
+                border-radius: 4px;
+                margin-top: 4px;
+            }
+            QScrollBar::handle:horizontal {
+                background: #C0C0C0;
+                border-radius: 4px;
+                min-width: 40px;
+            }
+            QScrollBar::handle:horizontal:hover {
+                background: #7C4DFF;
+            }
+            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+                width: 0px;
+            }
+        """)
+        
+        organize_now_layout.addWidget(action_scroll)
         
         # Progress and Status
         self.progress_bar = QProgressBar()
@@ -1817,6 +3303,8 @@ class OrganizePage(QWidget):
         """)
         self.plan_tree.setRootIsDecorated(False)  # Remove native expand buttons
         self.plan_tree.itemClicked.connect(self._on_tree_item_clicked)
+        self.plan_tree.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.plan_tree.customContextMenuRequested.connect(self._show_tree_context_menu)
         plan_layout.addWidget(self.plan_tree)
         
         self.results_splitter.addWidget(plan_card)
@@ -2548,10 +4036,20 @@ class OrganizePage(QWidget):
         self.mic_button.setToolTip("Click to speak your instruction (click again to stop)")
 
     def _load_files_from_db(self) -> List[Dict[str, Any]]:
-        """Load all indexed files from the database, filtering out excluded patterns."""
+        """Load indexed files from the database, filtering to destination folder only.
+        
+        CRITICAL: Only loads files that are WITHIN the destination folder.
+        This prevents accidentally moving files from other locations.
+        """
         files = []
         self.files_by_id = {}
         excluded_count = 0
+        outside_folder_count = 0
+        
+        # Get destination path for filtering (normalized, case-insensitive on Windows)
+        dest_path_str = None
+        if self.destination_path:
+            dest_path_str = os.path.normpath(str(self.destination_path)).lower()
         
         try:
             with sqlite3.connect(file_index.db_path) as conn:
@@ -2562,6 +4060,14 @@ class OrganizePage(QWidget):
             
             for row in rows:
                 file_path = row["file_path"]
+                
+                # CRITICAL: Only include files within the destination folder
+                # This prevents files from other indexed locations being moved
+                if dest_path_str:
+                    normalized_file_path = os.path.normpath(file_path).lower()
+                    if not normalized_file_path.startswith(dest_path_str + os.sep) and normalized_file_path != dest_path_str:
+                        outside_folder_count += 1
+                        continue  # Skip files outside destination folder
                 
                 # Skip files matching exclusion patterns
                 if settings.should_exclude(file_path):
@@ -2581,6 +4087,8 @@ class OrganizePage(QWidget):
                 files.append(f)
                 self.files_by_id[row["id"]] = f
             
+            if outside_folder_count > 0:
+                logger.info(f"Filtered out {outside_folder_count} files outside destination folder")
             if excluded_count > 0:
                 logger.info(f"Excluded {excluded_count} files based on exclusion patterns")
                 
@@ -2772,12 +4280,74 @@ class OrganizePage(QWidget):
         
         return verified_files
     
+    def _check_for_unindexed_files(self) -> List[str]:
+        """
+        Scan destination folder for files not in the database.
+        
+        Returns list of unindexed file paths.
+        """
+        if not self.destination_path or not self.destination_path.exists():
+            return []
+        
+        unindexed_files = []
+        
+        try:
+            # Get all indexed file paths (normalized for comparison)
+            indexed_paths = set()
+            with sqlite3.connect(file_index.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT file_path FROM files")
+                for row in cursor.fetchall():
+                    indexed_paths.add(os.path.normpath(row[0]).lower())
+            
+            # Scan destination folder for files
+            for root, dirs, filenames in os.walk(str(self.destination_path)):
+                for filename in filenames:
+                    file_path = os.path.join(root, filename)
+                    normalized_path = os.path.normpath(file_path).lower()
+                    
+                    # Skip if already indexed or matches exclusion
+                    if normalized_path in indexed_paths:
+                        continue
+                    if settings.should_exclude(file_path):
+                        continue
+                    
+                    unindexed_files.append(file_path)
+            
+        except Exception as e:
+            logger.error(f"Error checking for unindexed files: {e}")
+        
+        return unindexed_files
+    
     def generate_plan(self):
         """Request organization plan from LLM."""
         instruction = self.instruction_input.text().strip()
         
         if not self.destination_path:
             return
+        
+        # Check for unindexed files and offer to index them with full AI analysis
+        unindexed_files = self._check_for_unindexed_files()
+        if unindexed_files:
+            # Ask user if they want to index new files first
+            confirmed = ModernConfirmDialog.ask(
+                self,
+                title="New Files Detected",
+                message=f"Found {len(unindexed_files)} new file(s) that haven't been analyzed yet.",
+                details=[
+                    "AI analysis provides better organization",
+                    "Files will be tagged and categorized",
+                    "This only takes a moment"
+                ],
+                info_text="Indexing ensures the AI can make smart organization decisions.",
+                yes_text="Index Now",
+                no_text="Skip"
+            )
+            
+            if confirmed:
+                # Trigger full AI indexing, then continue with plan
+                self._index_folder_before_organize(self.destination_path)
+                return  # Will call generate_plan again after indexing
         
         # Check if instruction mentions excluded file types
         if instruction:
@@ -3090,14 +4660,16 @@ class OrganizePage(QWidget):
         if valid_moves == 0 and files_in_plan > 0:
             self.status_label.setText(f"Plan has {files_in_plan} files but none can be moved")
             self.apply_button.setEnabled(False)
-            QMessageBox.warning(
-                self, "No Files to Move",
-                f"The AI proposed organizing {files_in_plan} files, but none need to be moved.\n\n"
-                "Possible reasons:\n"
-                "• Files are already in the destination folder\n"
-                "• Files were already moved or deleted\n"
-                "• Files no longer exist at their indexed paths\n\n"
-                "If files have been moved, please re-index to update the database."
+            ModernInfoDialog.show_warning(
+                self,
+                title="No Files to Move",
+                message=f"The AI proposed organizing {files_in_plan} file(s), but none need to be moved.",
+                details=[
+                    "Files are already in the destination folder",
+                    "Files were already moved or deleted",
+                    "Files no longer exist at their indexed paths"
+                ],
+                info_text="If files have been moved, please re-index to update the database."
             )
         elif valid_moves < files_in_plan:
             self.status_label.setText(f"Plan ready: {valid_moves}/{files_in_plan} files can be moved to {folder_count} folders")
@@ -3266,6 +4838,127 @@ Tags: {', '.join(file_info.get('tags', [])) or 'none'}
 Caption: {file_info.get('caption', 'none')}
 """
             # Details panel removed - summary shown in plan_summary_label
+    
+    def _show_tree_context_menu(self, position):
+        """Show right-click context menu for tree items with pin option."""
+        from PySide6.QtWidgets import QMenu
+        from PySide6.QtGui import QAction
+        
+        item = self.plan_tree.itemAt(position)
+        if not item:
+            return
+        
+        data = item.data(0, Qt.UserRole)
+        if not data:
+            return
+        
+        menu = QMenu(self)
+        menu.setStyleSheet("""
+            QMenu {
+                background-color: #FFFFFF;
+                border: 1px solid #E0E0E0;
+                border-radius: 8px;
+                padding: 6px 4px;
+            }
+            QMenu::item {
+                padding: 8px 20px;
+                border-radius: 6px;
+                font-family: "Segoe UI", sans-serif;
+                font-size: 13px;
+            }
+            QMenu::item:selected {
+                background-color: #F5F0FF;
+                color: #7C4DFF;
+            }
+        """)
+        
+        if data.get("type") == "file":
+            fid = data.get("id")
+            file_info = self.files_by_id.get(fid, {})
+            file_path = file_info.get("file_path", "")
+            file_name = file_info.get("file_name", "Unknown")
+            
+            if file_path:
+                is_pinned = settings.is_pinned(file_path)
+                
+                if is_pinned:
+                    unpin_action = QAction(f"📌 Unpin '{file_name}'", self)
+                    unpin_action.triggered.connect(lambda: self._unpin_from_tree(file_path, fid))
+                    menu.addAction(unpin_action)
+                else:
+                    pin_action = QAction(f"📌 Pin '{file_name}' (never organize)", self)
+                    pin_action.triggered.connect(lambda: self._pin_from_tree(file_path, fid))
+                    menu.addAction(pin_action)
+        
+        elif data.get("type") == "folder":
+            folder_name = data.get("name", "Unknown")
+            if self.destination_path:
+                folder_path = str(self.destination_path / folder_name)
+                is_pinned = settings.is_pinned(folder_path)
+                
+                if is_pinned:
+                    unpin_action = QAction(f"📌 Unpin folder '{folder_name}'", self)
+                    unpin_action.triggered.connect(lambda: self._unpin_folder_from_tree(folder_path, item))
+                    menu.addAction(unpin_action)
+                else:
+                    pin_action = QAction(f"📌 Pin folder '{folder_name}' (never organize contents)", self)
+                    pin_action.triggered.connect(lambda: self._pin_folder_from_tree(folder_path, item))
+                    menu.addAction(pin_action)
+        
+        if menu.actions():
+            menu.exec(self.plan_tree.viewport().mapToGlobal(position))
+    
+    def _pin_from_tree(self, file_path: str, file_id: int):
+        """Pin a file from the tree view and remove it from current plan."""
+        if settings.add_pinned_path(file_path):
+            # Remove from current moves
+            self.current_moves = [m for m in self.current_moves if m.get("file_id") != file_id]
+            
+            # Regenerate tree display
+            if self.current_plan:
+                # Remove the file from the plan
+                for folder_name, file_ids in self.current_plan.get("folders", {}).items():
+                    if file_id in file_ids:
+                        file_ids.remove(file_id)
+                    if str(file_id) in file_ids:
+                        file_ids.remove(str(file_id))
+                
+                # Redisplay the plan
+                self._display_plan(self.current_plan)
+            
+            logger.info(f"Pinned file: {file_path}")
+            self.status_label.setText(f"📌 Pinned '{Path(file_path).name}' - removed from plan")
+    
+    def _unpin_from_tree(self, file_path: str, file_id: int):
+        """Unpin a file from the tree view."""
+        settings.remove_pinned_path(file_path)
+        logger.info(f"Unpinned file: {file_path}")
+        self.status_label.setText(f"Unpinned '{Path(file_path).name}'")
+    
+    def _pin_folder_from_tree(self, folder_path: str, item: QTreeWidgetItem):
+        """Pin a folder from the tree view."""
+        if settings.add_pinned_path(folder_path):
+            # Remove all files in this folder from current moves
+            folder_name = Path(folder_path).name
+            if folder_name in self.current_plan.get("folders", {}):
+                file_ids = self.current_plan["folders"][folder_name]
+                self.current_moves = [m for m in self.current_moves 
+                                      if m.get("file_id") not in file_ids 
+                                      and str(m.get("file_id")) not in file_ids]
+                del self.current_plan["folders"][folder_name]
+            
+            # Redisplay the plan
+            self._display_plan(self.current_plan)
+            
+            logger.info(f"Pinned folder: {folder_path}")
+            self.status_label.setText(f"📌 Pinned folder '{folder_name}' - removed from plan")
+    
+    def _unpin_folder_from_tree(self, folder_path: str, item: QTreeWidgetItem):
+        """Unpin a folder from the tree view."""
+        settings.remove_pinned_path(folder_path)
+        folder_name = Path(folder_path).name
+        logger.info(f"Unpinned folder: {folder_path}")
+        self.status_label.setText(f"Unpinned folder '{folder_name}'")
 
     def apply_organization(self):
         """Execute the organization plan after user confirmation."""
@@ -3273,31 +4966,33 @@ Caption: {file_info.get('caption', 'none')}
         
         if not self.current_moves:
             logger.warning("Apply clicked but current_moves is empty")
-            QMessageBox.warning(
-                self, "No Files to Move",
-                "No files can be moved.\n\n"
-                "This usually happens when:\n"
-                "Files have already been moved/deleted\n"
-                "Files no longer exist at their indexed paths\n\n"
-                "Try re-indexing your files in Index Files first."
+            ModernInfoDialog.show_warning(
+                self,
+                title="No Files to Move",
+                message="No files can be moved.",
+                details=[
+                    "Files have already been moved or deleted",
+                    "Files no longer exist at their indexed paths"
+                ],
+                info_text="Try re-indexing your files in Index Files first."
             )
             return
         
         folder_count = len(self.current_plan.get("folders", {}))
         file_count = len(self.current_moves)
         
-        reply = QMessageBox.question(
-            self,
-            "Confirm Organization",
-            f"Move {file_count} files into {folder_count} folders?\n\n"
-            f"Destination: {self.destination_path}\n\n"
-            "This will physically move the files.\n"
-            "A log will be saved for reference.",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No
+        # Use modern styled dialog matching app theme
+        dialog = ModernConfirmDialog(
+            parent=self,
+            title="Confirm Organization",
+            message=f"Move {file_count} files into {folder_count} folders?",
+            highlight_text=str(self.destination_path),
+            info_text="This will physically move the files.\nA log will be saved for reference.",
+            yes_text="Move Files",
+            no_text="Cancel"
         )
         
-        if reply != QMessageBox.Yes:
+        if not dialog.exec():
             return
         
         # Final safety check: filter out any excluded files before moving
@@ -3314,9 +5009,11 @@ Caption: {file_info.get('caption', 'none')}
             logger.info(f"Excluded {excluded_count} files from final move (matched exclusion patterns)")
         
         if not filtered_moves:
-            QMessageBox.information(
-                self, "No Files to Move",
-                f"All {excluded_count} files matched exclusion patterns and were skipped."
+            ModernInfoDialog.show_info(
+                self,
+                title="No Files to Move",
+                message=f"All {excluded_count} file(s) matched exclusion patterns and were skipped.",
+                info_text="You can modify exclusion patterns in Settings."
             )
             return
         
@@ -3336,7 +5033,7 @@ Caption: {file_info.get('caption', 'none')}
         self.generate_button.setEnabled(False)
         self.status_label.setText("Moving files...")
         
-        success, errors, log_file = apply_moves(move_plan)
+        success, errors, log_file, renamed_count = apply_moves(move_plan)
         
         self.progress_bar.setVisible(False)
         self.generate_button.setEnabled(True)
@@ -3370,12 +5067,23 @@ Caption: {file_info.get('caption', 'none')}
                 if removed_count > 0:
                     cleanup_msg = f"\n\nDeleted {removed_count} empty folder(s)."
             
-            QMessageBox.information(
-                self, "Success",
-                f"Successfully organized {len(move_plan)} files!\n\n"
-                f"File paths updated in database (no re-indexing needed).\n\n"
-                f"You can use Undo Last to reverse this if needed.{cleanup_msg}\n\n"
-                f"Log saved to:\n{log_file}"
+            # Build details list for success dialog
+            details = [
+                f"Organized {len(move_plan)} file(s)",
+                "File paths updated in database"
+            ]
+            if renamed_count > 0:
+                details.append(f"{renamed_count} file(s) renamed to avoid duplicates")
+            if cleanup_msg:
+                details.append(cleanup_msg.strip())
+            
+            ModernInfoDialog.show_info(
+                self,
+                title="Organization Complete",
+                message="Your files have been organized successfully!",
+                details=details,
+                info_text=f"You can use Undo to reverse this. Log saved to:\n{log_file}",
+                ok_text="Done"
             )
             self.status_label.setText("Organization complete! (Undo available)")
             self.clear_plan()
@@ -3390,14 +5098,17 @@ Caption: {file_info.get('caption', 'none')}
             
             logger.info(f"Partial success: Updated {paths_updated} file paths in database")
             
-            error_text = "\n".join(errors[:5])
+            # Build error details (first 5 errors)
+            error_details = errors[:5]
             if len(errors) > 5:
-                error_text += f"\n... and {len(errors) - 5} more errors"
+                error_details.append(f"... and {len(errors) - 5} more errors")
             
-            QMessageBox.warning(
-                self, "Partial Failure",
-                f"Some files could not be moved:\n\n{error_text}\n\n"
-                f"({paths_updated} files were moved and their paths updated)"
+            ModernInfoDialog.show_warning(
+                self,
+                title="Partial Failure",
+                message=f"Some files could not be moved. {paths_updated} file(s) were successfully organized.",
+                details=error_details,
+                info_text="Check the log file for more details."
             )
             self.status_label.setText(f"Completed with {len(errors)} errors")
             self.apply_button.setEnabled(True)
@@ -3463,6 +5174,16 @@ Caption: {file_info.get('caption', 'none')}
         self.plan_worker.finished.connect(lambda _: self.refine_button.setEnabled(True))
         self.plan_worker.error.connect(lambda _: self.refine_button.setEnabled(True))
         self.plan_worker.start()
+    
+    def _show_history_dialog(self):
+        """Show the organization history dialog."""
+        dialog = HistoryDialog(self)
+        dialog.exec()
+    
+    def _show_pinned_dialog(self):
+        """Show the pinned items management dialog."""
+        dialog = PinnedDialog(self)
+        dialog.exec()
     
     def undo_last_organization(self):
         """Undo the last organization by moving files back to their original locations."""

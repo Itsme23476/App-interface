@@ -62,6 +62,10 @@ class Settings:
         # Patterns to exclude from organization (folders, files, wildcards)
         self.exclusion_patterns: List[str] = self._get_default_exclusions()
         
+        # ======= PINNED FILES SETTINGS =======
+        # Specific file/folder paths that are "pinned" and should never be organized
+        self.pinned_paths: List[str] = []
+        
         # Load persisted config if available
         try:
             self._load_config()
@@ -301,6 +305,11 @@ class Settings:
         if isinstance(exclusions, list):
             self.exclusion_patterns = exclusions
         # If not in config, keep defaults (already set in __init__)
+        
+        # Pinned paths
+        pinned = data.get('pinned_paths')
+        if isinstance(pinned, list):
+            self.pinned_paths = pinned
 
     def _save_config(self) -> None:
         cfg = {
@@ -330,6 +339,8 @@ class Settings:
             'auto_organize_last_active': self.auto_organize_last_active,
             # Exclusion patterns
             'exclusion_patterns': self.exclusion_patterns,
+            # Pinned paths
+            'pinned_paths': self.pinned_paths,
         }
         try:
             with open(self._config_file(), 'w', encoding='utf-8') as f:
@@ -485,15 +496,20 @@ class Settings:
         self._save_config()
     
     def should_exclude(self, file_path: str) -> bool:
-        """Check if a file/folder should be excluded based on patterns.
+        """Check if a file/folder should be excluded based on patterns or if pinned.
         
         Supports:
         - Exact folder/file names: "node_modules", ".git"
         - Wildcards: "*.pyc", "*.tmp", "~$*"
         - Prefix wildcards: ".env.*"
         - File extensions: ".json" is automatically treated as "*.json"
+        - Pinned paths: specific files/folders that are protected
         """
         import fnmatch
+        
+        # First check if the path is pinned (protected)
+        if self.is_pinned(file_path):
+            return True
         
         # Get the file/folder name (case-insensitive matching)
         name = os.path.basename(file_path)
@@ -525,6 +541,53 @@ class Settings:
                     return True
         
         return False
+    
+    # ======= PINNED PATHS METHODS =======
+    
+    def add_pinned_path(self, file_path: str) -> bool:
+        """Pin a specific file or folder path so it's never organized.
+        Returns True if successfully added, False if already pinned.
+        """
+        # Normalize the path for consistent comparison
+        normalized = os.path.normpath(file_path)
+        if normalized and normalized not in self.pinned_paths:
+            self.pinned_paths.append(normalized)
+            self._save_config()
+            return True
+        return False
+    
+    def remove_pinned_path(self, file_path: str) -> bool:
+        """Unpin a file or folder path.
+        Returns True if successfully removed, False if wasn't pinned.
+        """
+        normalized = os.path.normpath(file_path)
+        if normalized in self.pinned_paths:
+            self.pinned_paths.remove(normalized)
+            self._save_config()
+            return True
+        return False
+    
+    def is_pinned(self, file_path: str) -> bool:
+        """Check if a specific file or folder path is pinned."""
+        normalized = os.path.normpath(file_path).lower()
+        for pinned in self.pinned_paths:
+            pinned_normalized = os.path.normpath(pinned).lower()
+            # Check exact match
+            if normalized == pinned_normalized:
+                return True
+            # Check if file is inside a pinned folder
+            if normalized.startswith(pinned_normalized + os.sep):
+                return True
+        return False
+    
+    def get_pinned_paths(self) -> List[str]:
+        """Get all pinned file/folder paths."""
+        return self.pinned_paths.copy()
+    
+    def clear_all_pinned(self) -> None:
+        """Remove all pinned paths."""
+        self.pinned_paths = []
+        self._save_config()
 
 
 # Global settings instance
