@@ -286,7 +286,7 @@ class AuthDialog(QDialog):
         price_layout.setAlignment(Qt.AlignCenter)
         price_layout.setSpacing(4)
         
-        price_amount = QLabel("$12")
+        price_amount = QLabel("$15")
         price_amount.setObjectName("priceAmount")
         price_period = QLabel("/ month")
         price_period.setObjectName("pricePeriod")
