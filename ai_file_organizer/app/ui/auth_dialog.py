@@ -295,23 +295,23 @@ class AuthDialog(QDialog):
         price_layout.addWidget(price_period)
         card_layout.addLayout(price_layout)
         
-        # Features
+        # Features - simplified with checkmarks for better visibility
         features = [
-            "🔍  AI-powered semantic search",
-            "👁️  Vision AI for image analysis",
-            "📝  OCR text extraction",
-            "⚡  Auto-indexing of new files",
+            "✓  AI-powered semantic search",
+            "✓  Smart file organization",
+            "✓  Auto-indexing & OCR",
         ]
         
         features_container = QWidget()
         features_container.setObjectName("featuresContainer")
         features_layout = QVBoxLayout(features_container)
-        features_layout.setContentsMargins(0, 8, 0, 0)
-        features_layout.setSpacing(10)
+        features_layout.setContentsMargins(8, 12, 8, 8)
+        features_layout.setSpacing(8)
         
         for feature in features:
             feat_label = QLabel(feature)
             feat_label.setObjectName("featureLabel")
+            feat_label.setMinimumHeight(24)
             features_layout.addWidget(feat_label)
         
         card_layout.addWidget(features_container)

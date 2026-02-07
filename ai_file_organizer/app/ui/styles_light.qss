@@ -1337,11 +1337,12 @@ QToolTip {
 }
 
 #featureLabel {
-    color: #1A1A2E;
-    font-size: 14px;
-    font-weight: 500;
+    color: #333333;
+    font-size: 15px;
+    font-weight: 600;
     background: transparent;
-    padding: 2px 0;
+    padding: 4px 0;
+    min-height: 20px;
 }
 
 #errorLabel {
