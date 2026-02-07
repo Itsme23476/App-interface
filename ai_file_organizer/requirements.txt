@@ -8,7 +8,6 @@ requests>=2.32.0
 openai>=1.30.0
 json5>=0.9.14
 keyboard>=0.13.5
-qhotkey>=1.5.0
 pywinauto>=0.6.8
 postgrest>=0.16.0
 supabase-auth>=2.0.0

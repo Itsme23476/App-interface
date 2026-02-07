@@ -1,9 +1,0 @@
-0000000000000000000000000000000000000000 e7f3548541d4606dd65b9970e11882d922610b06 Itsme23476 <nftaverageowner@gmail.com> 1767392299 +0200	commit (initial): Add theme toggle, auto-index, multi-folder watching, UI improvements
-e7f3548541d4606dd65b9970e11882d922610b06 e7f3548541d4606dd65b9970e11882d922610b06 Itsme23476 <nftaverageowner@gmail.com> 1767392474 +0200	Branch: renamed refs/heads/master to refs/heads/main
-e7f3548541d4606dd65b9970e11882d922610b06 725fb8903a2819d915e409bed51ad8bdb9efcafb Itsme23476 <nftaverageowner@gmail.com> 1767916532 +0200	commit: Add EXIF/metadata date extraction for search filters
-725fb8903a2819d915e409bed51ad8bdb9efcafb 725fb8903a2819d915e409bed51ad8bdb9efcafb Itsme23476 <nftaverageowner@gmail.com> 1767916542 +0200	Branch: renamed refs/heads/main to refs/heads/main
-725fb8903a2819d915e409bed51ad8bdb9efcafb c32d06224cd7188adce669f751d5d8df7a6f6e93 Itsme23476 <nftaverageowner@gmail.com> 1768228441 +0200	commit: Add indexing queue system, UI improvements, and bug fixes
-c32d06224cd7188adce669f751d5d8df7a6f6e93 0cbd326e19c235aea704229a284f7e828c0ddb05 Itsme23476 <nftaverageowner@gmail.com> 1768338902 +0200	commit: Initial commit - AI File Organizer app
-0cbd326e19c235aea704229a284f7e828c0ddb05 cdcba3558172a21b6befdbb2618cb3b9888ecd5d Itsme23476 <nftaverageowner@gmail.com> 1768486453 +0200	commit: UI improvements: Gemini-style search with animations
-cdcba3558172a21b6befdbb2618cb3b9888ecd5d cdcba3558172a21b6befdbb2618cb3b9888ecd5d Itsme23476 <nftaverageowner@gmail.com> 1768486937 +0200	Branch: renamed refs/heads/main to refs/heads/main
-cdcba3558172a21b6befdbb2618cb3b9888ecd5d bb906baf8f663e2b96fbd42374a366f12ac24c51 Itsme23476 <nftaverageowner@gmail.com> 1770041817 +0200	commit: Add voice input, silent path verification, and empty folder cleanup
