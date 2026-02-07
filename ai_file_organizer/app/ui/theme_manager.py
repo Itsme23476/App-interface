@@ -2,6 +2,7 @@
 Theme manager for switching between dark and light modes.
 """
 
+import sys
 from pathlib import Path
 from PySide6.QtWidgets import QApplication
 from PySide6.QtGui import QPalette, QColor
@@ -28,7 +29,14 @@ class ThemeManager(QObject):
             return
         super().__init__()
         self._initialized = True
-        self._ui_dir = Path(__file__).parent
+        
+        # Handle PyInstaller bundled path
+        if hasattr(sys, '_MEIPASS'):
+            # Running as bundled exe - files are in temp extraction folder
+            self._ui_dir = Path(sys._MEIPASS) / 'app' / 'ui'
+        else:
+            # Running from source
+            self._ui_dir = Path(__file__).parent
     
     @property
     def current_theme(self) -> str:

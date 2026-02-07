@@ -50,6 +50,8 @@ jobs:
             "--collect-all", "shiboken6",
             "--collect-all", "spellchecker",
             "--collect-data", "spellchecker",
+            "--add-data", "app/ui/styles.qss;app/ui",
+            "--add-data", "app/ui/styles_light.qss;app/ui",
             "--hidden-import", "PySide6.QtCore",
             "--hidden-import", "PySide6.QtGui",
             "--hidden-import", "PySide6.QtWidgets",
