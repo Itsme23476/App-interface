@@ -48,6 +48,8 @@ jobs:
             "--onefile",
             "--collect-all", "PySide6",
             "--collect-all", "shiboken6",
+            "--collect-all", "spellchecker",
+            "--collect-data", "spellchecker",
             "--hidden-import", "PySide6.QtCore",
             "--hidden-import", "PySide6.QtGui",
             "--hidden-import", "PySide6.QtWidgets",
@@ -59,6 +61,7 @@ jobs:
             "--hidden-import", "requests",
             "--hidden-import", "openai",
             "--hidden-import", "json5",
+            "--hidden-import", "spellchecker",
             "--noconfirm"
           )
           
