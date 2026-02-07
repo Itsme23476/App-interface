@@ -170,10 +170,20 @@ class IndexBeforeOrganizeWorker(QThread):
     progress = Signal(int, int, str)  # current, total, message
     finished = Signal(dict)  # stats dict
     error = Signal(str)
+    cancelled = Signal()  # Emitted when user cancels
     
     def __init__(self, folder_path: Path):
         super().__init__()
         self.folder_path = folder_path
+        self._cancelled = False
+    
+    def cancel(self):
+        """Request cancellation of the indexing operation."""
+        self._cancelled = True
+    
+    def is_cancelled(self):
+        """Check if cancellation was requested."""
+        return self._cancelled
     
     def run(self):
         try:
@@ -182,6 +192,8 @@ class IndexBeforeOrganizeWorker(QThread):
             search_service = SearchService()
             
             def progress_callback(current, total, message):
+                if self._cancelled:
+                    raise InterruptedError("Indexing cancelled by user")
                 self.progress.emit(current, total, message)
             
             stats = search_service.index_directory(
@@ -190,11 +202,233 @@ class IndexBeforeOrganizeWorker(QThread):
                 progress_cb=progress_callback
             )
             
-            self.finished.emit(stats)
+            if self._cancelled:
+                self.cancelled.emit()
+            else:
+                self.finished.emit(stats)
             
+        except InterruptedError:
+            self.cancelled.emit()
         except Exception as e:
-            logger.error(f"Index before organize error: {e}")
-            self.error.emit(str(e))
+            if self._cancelled:
+                self.cancelled.emit()
+            else:
+                logger.error(f"Index before organize error: {e}")
+                self.error.emit(str(e))
+
+
+class IndexProgressDialog(QDialog):
+    """Modal progress dialog for indexing with Cancel/Skip options."""
+    
+    # Signals for the result
+    skip_requested = Signal()  # User wants to skip indexing
+    
+    def __init__(self, folder_name: str, total_files: int, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Indexing Files")
+        self.setMinimumSize(480, 280)
+        self.setModal(True)
+        self._drag_pos = None
+        self.total_files = total_files
+        self.current_file = 0
+        self._result = None  # 'cancel', 'skip', or None (completed)
+        
+        # Remove default window frame for custom styling
+        self.setWindowFlags(self.windowFlags() | Qt.FramelessWindowHint)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        
+        self._setup_ui(folder_name)
+    
+    def _setup_ui(self, folder_name: str):
+        """Setup the dialog UI."""
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        
+        # Container with styled background
+        container = QFrame()
+        container.setObjectName("progressContainer")
+        container.setStyleSheet("""
+            QFrame#progressContainer {
+                background-color: white;
+                border-radius: 16px;
+                border: 2px solid rgba(124, 77, 255, 0.3);
+            }
+        """)
+        
+        container_layout = QVBoxLayout(container)
+        container_layout.setContentsMargins(28, 24, 28, 24)
+        container_layout.setSpacing(16)
+        
+        # Header with icon
+        header_layout = QHBoxLayout()
+        
+        icon_label = QLabel("🔍")
+        icon_label.setStyleSheet("font-size: 32px;")
+        header_layout.addWidget(icon_label)
+        
+        title_label = QLabel("Indexing Files")
+        title_label.setStyleSheet("""
+            font-size: 20px;
+            font-weight: 700;
+            color: #1a1a2e;
+        """)
+        header_layout.addWidget(title_label)
+        header_layout.addStretch()
+        
+        container_layout.addLayout(header_layout)
+        
+        # Folder info
+        folder_label = QLabel(f"📁 {folder_name}")
+        folder_label.setStyleSheet("""
+            color: #666666;
+            font-size: 14px;
+            padding: 8px 12px;
+            background: #F8F6FF;
+            border-radius: 8px;
+        """)
+        container_layout.addWidget(folder_label)
+        
+        # Progress info
+        self.progress_label = QLabel(f"Preparing to index {self.total_files} files...")
+        self.progress_label.setStyleSheet("""
+            color: #444444;
+            font-size: 14px;
+        """)
+        container_layout.addWidget(self.progress_label)
+        
+        # Progress bar
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, max(1, self.total_files))
+        self.progress_bar.setValue(0)
+        self.progress_bar.setTextVisible(False)
+        self.progress_bar.setFixedHeight(12)
+        self.progress_bar.setStyleSheet("""
+            QProgressBar {
+                background-color: #E8E0FF;
+                border: none;
+                border-radius: 6px;
+            }
+            QProgressBar::chunk {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, 
+                    stop:0 #7C4DFF, stop:1 #9575FF);
+                border-radius: 6px;
+            }
+        """)
+        container_layout.addWidget(self.progress_bar)
+        
+        # Current file label
+        self.file_label = QLabel("")
+        self.file_label.setStyleSheet("""
+            color: #888888;
+            font-size: 12px;
+        """)
+        self.file_label.setWordWrap(True)
+        container_layout.addWidget(self.file_label)
+        
+        container_layout.addStretch()
+        
+        # Buttons
+        button_layout = QHBoxLayout()
+        button_layout.setSpacing(12)
+        
+        # Skip button - proceed without full indexing
+        self.skip_btn = QPushButton("⏭️ Skip Indexing")
+        self.skip_btn.setCursor(Qt.PointingHandCursor)
+        self.skip_btn.setMinimumHeight(40)
+        self.skip_btn.setStyleSheet("""
+            QPushButton {
+                background-color: transparent;
+                border: 2px solid #E0E0E0;
+                border-radius: 10px;
+                color: #666666;
+                font-size: 13px;
+                font-weight: 600;
+                padding: 8px 16px;
+            }
+            QPushButton:hover {
+                border-color: #FF9800;
+                color: #FF9800;
+                background-color: rgba(255, 152, 0, 0.05);
+            }
+        """)
+        self.skip_btn.setToolTip("Continue with already-indexed files only")
+        self.skip_btn.clicked.connect(self._on_skip)
+        button_layout.addWidget(self.skip_btn)
+        
+        button_layout.addStretch()
+        
+        # Cancel button
+        self.cancel_btn = QPushButton("✕ Cancel")
+        self.cancel_btn.setCursor(Qt.PointingHandCursor)
+        self.cancel_btn.setMinimumHeight(40)
+        self.cancel_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #FF5252;
+                border: none;
+                border-radius: 10px;
+                color: white;
+                font-size: 13px;
+                font-weight: 600;
+                padding: 8px 20px;
+            }
+            QPushButton:hover {
+                background-color: #FF6B6B;
+            }
+        """)
+        self.cancel_btn.clicked.connect(self._on_cancel)
+        button_layout.addWidget(self.cancel_btn)
+        
+        container_layout.addLayout(button_layout)
+        
+        main_layout.addWidget(container)
+    
+    def update_progress(self, current: int, total: int, message: str):
+        """Update the progress display."""
+        self.current_file = current
+        self.total_files = total
+        
+        self.progress_bar.setRange(0, max(1, total))
+        self.progress_bar.setValue(current)
+        
+        self.progress_label.setText(f"Indexing file {current} of {total}...")
+        
+        # Show truncated file name
+        if message:
+            display_msg = message
+            if len(display_msg) > 60:
+                display_msg = "..." + display_msg[-57:]
+            self.file_label.setText(display_msg)
+    
+    def _on_cancel(self):
+        """Handle cancel button click."""
+        self._result = 'cancel'
+        self.reject()
+    
+    def _on_skip(self):
+        """Handle skip button click."""
+        self._result = 'skip'
+        self.skip_requested.emit()
+        self.accept()
+    
+    def get_result(self):
+        """Get the dialog result: 'cancel', 'skip', or None (completed normally)."""
+        return self._result
+    
+    def complete(self):
+        """Called when indexing completes successfully."""
+        self._result = None
+        self.accept()
+    
+    # Dragging support
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._drag_pos = event.globalPos() - self.frameGeometry().topLeft()
+            event.accept()
+    
+    def mouseMoveEvent(self, event):
+        if event.buttons() == Qt.LeftButton and self._drag_pos:
+            self.move(event.globalPos() - self._drag_pos)
+            event.accept()
 
 
 class EmptyFolderDialog(QDialog):
@@ -3873,11 +4107,21 @@ class OrganizePage(QWidget):
     
     def _switch_tab(self, index: int):
         """Switch between Organize Now (0) and Auto-Organize (1) tabs."""
+        # Hide tips IMMEDIATELY before switching
+        main_window = self.window()
+        if hasattr(main_window, 'tips_manager'):
+            main_window.tips_manager.hide_all_tips()
+        
         self.content_stack.setCurrentIndex(index)
         
         # Update button checked states
         self.tab_organize_now.setChecked(index == 0)
         self.tab_auto_organize.setChecked(index == 1)
+        
+        # Show tips for the new tab after a short delay
+        if hasattr(main_window, 'tips_manager'):
+            from PyQt5.QtCore import QTimer
+            QTimer.singleShot(150, main_window.tips_manager.show_tips_for_visible_widgets)
     def _hide_input_cards(self):
         """Hide instruction and destination cards after plan is generated."""
         self.instruction_card.setVisible(False)
@@ -4481,10 +4725,24 @@ class OrganizePage(QWidget):
     
     def _index_folder_before_organize(self, folder_path: Path):
         """Index a folder before organizing, then continue with organization."""
-        from app.core.search import SearchService
+        # Count files to index
+        file_count = 0
+        try:
+            for item in os.listdir(str(folder_path)):
+                item_path = os.path.join(str(folder_path), item)
+                if os.path.isfile(item_path):
+                    file_count += 1
+        except Exception:
+            file_count = 0
         
-        self.progress_bar.setVisible(True)
-        self.progress_bar.setRange(0, 0)
+        # Create and show the progress dialog
+        self._index_progress_dialog = IndexProgressDialog(
+            folder_path.name, 
+            file_count,
+            parent=self
+        )
+        
+        # Disable the generate button while indexing
         self.generate_button.setEnabled(False)
         self.status_label.setText(f"Indexing files in {folder_path.name}...")
         
@@ -4493,19 +4751,61 @@ class OrganizePage(QWidget):
         self._index_worker.progress.connect(self._on_index_progress)
         self._index_worker.finished.connect(self._on_index_before_organize_finished)
         self._index_worker.error.connect(self._on_index_error)
+        self._index_worker.cancelled.connect(self._on_index_cancelled)
+        
+        # Connect dialog buttons to worker
+        self._index_progress_dialog.rejected.connect(self._on_index_dialog_cancelled)
+        self._index_progress_dialog.skip_requested.connect(self._on_index_skip_requested)
+        
+        # Start the worker and show dialog
         self._index_worker.start()
+        self._index_progress_dialog.show()
     
     def _on_index_progress(self, current: int, total: int, message: str):
         """Handle indexing progress updates."""
-        if total > 0:
-            self.progress_bar.setRange(0, total)
-            self.progress_bar.setValue(current)
-        self.status_label.setText(message)
+        # Update the progress dialog if it exists
+        if hasattr(self, '_index_progress_dialog') and self._index_progress_dialog:
+            self._index_progress_dialog.update_progress(current, total, message)
+        
+        # Also update status label
+        self.status_label.setText(f"Indexing: {current}/{total}")
+    
+    def _on_index_dialog_cancelled(self):
+        """Handle user clicking Cancel in the progress dialog."""
+        if hasattr(self, '_index_worker') and self._index_worker:
+            self._index_worker.cancel()
+        
+        self.generate_button.setEnabled(True)
+        self.status_label.setText("Indexing cancelled.")
+    
+    def _on_index_skip_requested(self):
+        """Handle user clicking Skip in the progress dialog."""
+        if hasattr(self, '_index_worker') and self._index_worker:
+            self._index_worker.cancel()
+        
+        self.generate_button.setEnabled(True)
+        self.status_label.setText("Skipped indexing. Using already-indexed files...")
+        
+        # Continue with plan generation using existing indexed files
+        QTimer.singleShot(100, self.generate_plan)
+    
+    def _on_index_cancelled(self):
+        """Handle indexing being cancelled by the worker."""
+        if hasattr(self, '_index_progress_dialog') and self._index_progress_dialog:
+            self._index_progress_dialog.close()
+            self._index_progress_dialog = None
+        
+        self.generate_button.setEnabled(True)
+        self.status_label.setText("Indexing cancelled.")
     
     def _on_index_before_organize_finished(self, stats: dict):
         """Handle indexing completion, then continue with organization."""
+        # Close the progress dialog
+        if hasattr(self, '_index_progress_dialog') and self._index_progress_dialog:
+            self._index_progress_dialog.complete()
+            self._index_progress_dialog = None
+        
         indexed_count = stats.get('indexed_files', 0)
-        self.progress_bar.setVisible(False)
         self.generate_button.setEnabled(True)
         
         if indexed_count > 0:
@@ -4513,16 +4813,17 @@ class OrganizePage(QWidget):
             # Now call generate_plan again - files should be available
             QTimer.singleShot(100, self.generate_plan)
         else:
-            self.status_label.setText("No files were indexed.")
-            QMessageBox.warning(
-                self, "Indexing Failed",
-                "Could not index any files from the folder.\n"
-                "Please check that the folder contains supported file types."
-            )
+            self.status_label.setText("No new files to index.")
+            # Still proceed with plan if there are already indexed files
+            QTimer.singleShot(100, self.generate_plan)
     
     def _on_index_error(self, error: str):
         """Handle indexing errors."""
-        self.progress_bar.setVisible(False)
+        # Close the progress dialog
+        if hasattr(self, '_index_progress_dialog') and self._index_progress_dialog:
+            self._index_progress_dialog.close()
+            self._index_progress_dialog = None
+        
         self.generate_button.setEnabled(True)
         self.status_label.setText(f"Indexing error: {error}")
         logger.error(f"Index before organize error: {error}")

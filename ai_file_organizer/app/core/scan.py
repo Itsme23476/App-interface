@@ -115,6 +115,10 @@ def _should_skip_file(file_path: Path) -> bool:
     """
     Determine if a file should be skipped during scanning.
     
+    Note: Exclusion patterns from settings are NOT checked here.
+    Files can be indexed even if they match exclusion patterns.
+    Exclusion patterns only prevent files from being MOVED during organization.
+    
     Args:
         file_path: Path to the file
         

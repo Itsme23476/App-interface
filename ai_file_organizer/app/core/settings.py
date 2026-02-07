@@ -66,6 +66,14 @@ class Settings:
         # Specific file/folder paths that are "pinned" and should never be organized
         self.pinned_paths: List[str] = []
         
+        # ======= ONBOARDING SETTINGS =======
+        # Whether the user has completed the onboarding tour
+        self.has_completed_onboarding: bool = False
+        # How many times user clicked "Remind Me Later" (stop after 3)
+        self.onboarding_remind_count: int = 0
+        # List of contextual tip IDs that have been seen/dismissed
+        self.seen_tips: List[str] = []
+        
         # Load persisted config if available
         try:
             self._load_config()
@@ -310,6 +318,11 @@ class Settings:
         pinned = data.get('pinned_paths')
         if isinstance(pinned, list):
             self.pinned_paths = pinned
+        
+        # Onboarding
+        self.has_completed_onboarding = bool(data.get('has_completed_onboarding', False))
+        self.onboarding_remind_count = int(data.get('onboarding_remind_count', 0))
+        self.seen_tips = list(data.get('seen_tips', []))
 
     def _save_config(self) -> None:
         cfg = {
@@ -341,6 +354,10 @@ class Settings:
             'exclusion_patterns': self.exclusion_patterns,
             # Pinned paths
             'pinned_paths': self.pinned_paths,
+            # Onboarding
+            'has_completed_onboarding': self.has_completed_onboarding,
+            'onboarding_remind_count': self.onboarding_remind_count,
+            'seen_tips': self.seen_tips,
         }
         try:
             with open(self._config_file(), 'w', encoding='utf-8') as f:
@@ -506,9 +523,12 @@ class Settings:
         - Pinned paths: specific files/folders that are protected
         """
         import fnmatch
+        import logging
+        logger = logging.getLogger(__name__)
         
         # First check if the path is pinned (protected)
         if self.is_pinned(file_path):
+            logger.debug(f"Excluding pinned path: {file_path}")
             return True
         
         # Get the file/folder name (case-insensitive matching)
@@ -521,23 +541,35 @@ class Settings:
             
             # Check if pattern matches the name directly
             if fnmatch.fnmatch(name_lower, pattern_lower):
+                logger.debug(f"Excluding {name} - matched pattern '{pattern}' directly")
                 return True
             
             # Handle patterns like ".json" - treat as "*.json" for file extensions
             # This makes it user-friendly (no need to type the asterisk)
-            if pattern_lower.startswith('.') and not pattern_lower.startswith('.*') and not '*' in pattern_lower:
+            if pattern_lower.startswith('.') and not pattern_lower.startswith('.*') and '*' not in pattern_lower:
                 ext_pattern = '*' + pattern_lower
                 if fnmatch.fnmatch(name_lower, ext_pattern):
+                    logger.debug(f"Excluding {name} - matched extension pattern '{ext_pattern}'")
                     return True
+        
+        # Also check full path and path components for folder-based exclusions
+        for pattern in self.exclusion_patterns:
+            pattern_lower = pattern.lower()
             
-            # Also check if pattern matches the full path (for folder paths)
+            # Skip extension-only patterns for path matching (already handled above)
+            if pattern_lower.startswith('.') and '*' not in pattern_lower and len(pattern_lower) <= 5:
+                continue
+            
+            # Check if pattern matches the full path (for folder paths)
             if fnmatch.fnmatch(file_path_lower, f"*/{pattern_lower}") or fnmatch.fnmatch(file_path_lower, f"*\\{pattern_lower}"):
+                logger.debug(f"Excluding {name} - path matched pattern '{pattern}'")
                 return True
             
             # Check if any path component matches (for nested exclusions)
             path_parts = file_path.replace('\\', '/').split('/')
             for part in path_parts:
                 if fnmatch.fnmatch(part.lower(), pattern_lower):
+                    logger.debug(f"Excluding {name} - path component '{part}' matched pattern '{pattern}'")
                     return True
         
         return False
@@ -587,6 +619,29 @@ class Settings:
     def clear_all_pinned(self) -> None:
         """Remove all pinned paths."""
         self.pinned_paths = []
+        self._save_config()
+    
+    # ======= ONBOARDING METHODS =======
+    def complete_onboarding(self) -> None:
+        """Mark the onboarding as completed."""
+        self.has_completed_onboarding = True
+        self._save_config()
+    
+    def reset_onboarding(self) -> None:
+        """Reset onboarding so it shows again next time."""
+        self.has_completed_onboarding = False
+        self.onboarding_remind_count = 0
+        self._save_config()
+    
+    def mark_tip_seen(self, tip_id: str) -> None:
+        """Mark a contextual tip as seen"""
+        if tip_id not in self.seen_tips:
+            self.seen_tips.append(tip_id)
+            self._save_config()
+    
+    def reset_tips(self) -> None:
+        """Reset all contextual tips to show them again"""
+        self.seen_tips = []
         self._save_config()
 
 

@@ -38,6 +38,8 @@ from app.ui.quick_search_overlay import QuickSearchOverlay
 from app.ui.win_hotkey import register_global_hotkey, unregister_global_hotkey, get_foreground_hwnd, set_foreground_hwnd, set_foreground_hwnd_robust, get_window_rect
 from app.ui.theme_manager import theme_manager
 from app.ui.organize_page import OrganizePage
+from app.ui.onboarding import OnboardingOverlay
+from app.ui.contextual_tips import ContextualTipsManager
 
 
 logger = logging.getLogger(__name__)
@@ -287,7 +289,110 @@ class MainWindow(QMainWindow):
         # This prevents UNIQUE constraint errors from orphaned records
         QTimer.singleShot(2000, self._run_background_db_cleanup)
         
+        # Flag to track if onboarding has been shown this session
+        self._onboarding_shown_this_session = False
+        
+        # Contextual tips manager
+        self.tips_manager = ContextualTipsManager(self, settings)
+        
         logger.info("Main window initialized")
+    
+    def showEvent(self, event):
+        """Handle window show event - show onboarding on first launch"""
+        super().showEvent(event)
+        
+        # Only show onboarding once per session and if not completed
+        # Also stop showing if user clicked "Remind Me Later" 3+ times
+        remind_count = getattr(settings, 'onboarding_remind_count', 0)
+        should_show = (
+            not self._onboarding_shown_this_session 
+            and not settings.has_completed_onboarding
+            and remind_count < 3
+        )
+        if should_show:
+            self._onboarding_shown_this_session = True
+            # Delay slightly to ensure window is fully visible
+            QTimer.singleShot(500, self._show_onboarding)
+        else:
+            # Show contextual tips if onboarding is done
+            QTimer.singleShot(1000, self._init_contextual_tips)
+    
+    def _show_onboarding(self):
+        """Display the onboarding overlay"""
+        try:
+            self.onboarding = OnboardingOverlay(self)
+            self.onboarding.finished_onboarding.connect(self._on_onboarding_finished)
+            self.onboarding.remind_later.connect(self._on_onboarding_remind_later)
+            self.onboarding.show()
+        except Exception as e:
+            logger.error(f"Failed to show onboarding: {e}")
+    
+    def _on_onboarding_finished(self):
+        """Handle onboarding completion"""
+        settings.complete_onboarding()
+        logger.info("Onboarding completed")
+        # Now show contextual tips
+        QTimer.singleShot(500, self._init_contextual_tips)
+    
+    def _on_onboarding_remind_later(self):
+        """Handle 'Remind Me Later' - will show again next launch"""
+        # Don't mark as completed - just increment remind count
+        remind_count = getattr(settings, 'onboarding_remind_count', 0) + 1
+        settings.onboarding_remind_count = remind_count
+        settings._save_config()
+        logger.info(f"Onboarding reminder set (count: {remind_count})")
+        # Still show contextual tips even if they skipped
+        QTimer.singleShot(500, self._init_contextual_tips)
+    
+    def _init_contextual_tips(self):
+        """Initialize contextual tips for various UI elements"""
+        try:
+            # Organize page tips
+            if hasattr(self, 'organize_page'):
+                op = self.organize_page
+                
+                # History button - force below
+                if hasattr(op, 'history_button'):
+                    self.tips_manager.add_tip("history_button", op.history_button, force_position="below")
+                
+                # Pinned button - force below
+                if hasattr(op, 'pinned_button'):
+                    self.tips_manager.add_tip("pinned_button", op.pinned_button, force_position="below")
+                
+                # Undo button
+                if hasattr(op, 'undo_button'):
+                    self.tips_manager.add_tip("undo_button", op.undo_button, force_position="below")
+                
+                # Apply button
+                if hasattr(op, 'apply_button'):
+                    self.tips_manager.add_tip("apply_button", op.apply_button, force_position="below")
+                
+                # Edit button
+                if hasattr(op, 'edit_button'):
+                    self.tips_manager.add_tip("edit_button", op.edit_button, force_position="below")
+                
+                # Voice button (mic) - force below
+                if hasattr(op, 'mic_button'):
+                    self.tips_manager.add_tip("voice_button", op.mic_button, force_position="below")
+            
+            # Search page tips
+            if hasattr(self, 'search_input'):
+                self.tips_manager.add_tip("search_input", self.search_input)
+            
+            # Settings page tips
+            if hasattr(self, 'welcome_guide_btn'):
+                self.tips_manager.add_tip("welcome_guide_button", self.welcome_guide_btn)
+            
+            # Exclusions section
+            if hasattr(self, 'exclusions_toggle_btn'):
+                self.tips_manager.add_tip("exclusions_section", self.exclusions_toggle_btn)
+            
+            # Now show tips for currently visible widgets only
+            QTimer.singleShot(200, self.tips_manager.show_tips_for_visible_widgets)
+            
+            logger.info("Contextual tips initialized")
+        except Exception as e:
+            logger.error(f"Failed to initialize contextual tips: {e}")
     
     def setup_ui(self):
         """Setup the user interface with modern sidebar navigation."""
@@ -317,8 +422,8 @@ class MainWindow(QMainWindow):
         
         # Create pages (order matters - matches nav button indices)
         self.setup_search_page()      # Index 0
-        self.setup_index_page()       # Index 1
-        self.setup_organize_page()    # Index 2
+        self.setup_organize_page()    # Index 1
+        self.setup_index_page()       # Index 2
         self.setup_settings_page()    # Index 3
         
         # Set default page to Search
@@ -370,8 +475,8 @@ class MainWindow(QMainWindow):
         
         nav_items = [
             ("🔍", "Search", 0),
-            ("📁", "Index Files", 1),
-            ("🗂️", "Organize", 2),
+            ("🗂️", "Organize", 1),
+            ("📁", "Index Files", 2),
             ("⚙️", "Settings", 3),
         ]
         
@@ -421,7 +526,15 @@ class MainWindow(QMainWindow):
     
     def _on_nav_clicked(self, index: int):
         """Handle navigation button clicks."""
+        # Hide tips IMMEDIATELY before page switch
+        if hasattr(self, 'tips_manager'):
+            self.tips_manager.hide_all_tips()
+        
         self.page_stack.setCurrentIndex(index)
+        
+        # Show tips for new page after a tiny delay
+        if hasattr(self, 'tips_manager'):
+            QTimer.singleShot(150, self.tips_manager.show_tips_for_visible_widgets)
     
     def setup_organize_tab(self):
         """Setup the file organization tab."""
@@ -1363,6 +1476,54 @@ class MainWindow(QMainWindow):
         appearance_layout.addLayout(theme_row)
         
         layout.addWidget(appearance_card)
+
+        # ======= HELP & ONBOARDING CARD =======
+        help_card = QFrame()
+        help_card.setObjectName("settingsCardHelp")
+        help_card.setStyleSheet("""
+            QFrame#settingsCardHelp {
+                background-color: rgba(124, 77, 255, 0.03);
+                border: 1px dashed rgba(124, 77, 255, 0.25);
+                border-radius: 16px;
+            }
+            QFrame#settingsCardHelp > QLabel {
+                border: none;
+                background: transparent;
+            }
+        """)
+        help_layout = QVBoxLayout(help_card)
+        help_layout.setContentsMargins(20, 20, 20, 20)
+        help_layout.setSpacing(12)
+        
+        help_title = QLabel("🎓 Help & Guidance")
+        help_title.setStyleSheet(settings_title_style)
+        help_layout.addWidget(help_title)
+        
+        help_desc = QLabel("New to the app? Take a quick tour to learn the basics.")
+        help_desc.setStyleSheet(settings_hint_style)
+        help_layout.addWidget(help_desc)
+        
+        show_guide_btn = QPushButton("📖 Show Welcome Guide")
+        show_guide_btn.setMinimumHeight(40)
+        show_guide_btn.setCursor(Qt.PointingHandCursor)
+        show_guide_btn.setStyleSheet("""
+            QPushButton {
+                background-color: transparent;
+                border: 2px solid #7C4DFF;
+                border-radius: 10px;
+                color: #7C4DFF;
+                font-size: 14px;
+                font-weight: 600;
+                padding: 8px 16px;
+            }
+            QPushButton:hover {
+                background-color: rgba(124, 77, 255, 0.1);
+            }
+        """)
+        show_guide_btn.clicked.connect(self._show_onboarding)
+        help_layout.addWidget(show_guide_btn)
+        
+        layout.addWidget(help_card)
 
         # AI Providers section removed - app covers AI costs for users
         # (Hidden placeholder widgets to prevent AttributeError in event handlers)
