@@ -1,0 +1,96 @@
+name: Build Windows Installer
+
+on:
+  release:
+    types: [created]
+  workflow_dispatch:  # Allow manual trigger
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller
+          pip install -r ai_file_organizer/requirements.txt
+      
+      - name: Build with PyInstaller
+        run: |
+          cd ai_file_organizer
+          pyinstaller --name "AI File Organizer" --windowed --onefile --icon=assets/icon.ico main.py --add-data "assets;assets"
+        continue-on-error: true
+      
+      - name: Build with PyInstaller (no icon fallback)
+        if: failure()
+        run: |
+          cd ai_file_organizer
+          pyinstaller --name "AI File Organizer" --windowed --onefile main.py
+      
+      - name: Create Inno Setup installer script
+        run: |
+          @"
+          [Setup]
+          AppName=AI File Organizer
+          AppVersion=${{ github.ref_name }}
+          DefaultDirName={autopf}\AI File Organizer
+          DefaultGroupName=AI File Organizer
+          OutputDir=installer
+          OutputBaseFilename=AI-File-Organizer-Setup-${{ github.ref_name }}
+          Compression=lzma
+          SolidCompression=yes
+          PrivilegesRequired=admin
+          
+          [Files]
+          Source: "ai_file_organizer\dist\AI File Organizer.exe"; DestDir: "{app}"; Flags: ignoreversion
+          
+          [Icons]
+          Name: "{group}\AI File Organizer"; Filename: "{app}\AI File Organizer.exe"
+          Name: "{commondesktop}\AI File Organizer"; Filename: "{app}\AI File Organizer.exe"
+          
+          [Run]
+          Filename: "{app}\AI File Organizer.exe"; Description: "Launch AI File Organizer"; Flags: nowait postinstall skipifsilent
+          "@ | Out-File -FilePath installer.iss -Encoding utf8
+        shell: pwsh
+      
+      - name: Install Inno Setup
+        run: |
+          choco install innosetup -y
+        shell: cmd
+      
+      - name: Build Installer
+        run: |
+          mkdir installer
+          "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer.iss
+        shell: cmd
+      
+      - name: Upload installer as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer
+          path: installer/*.exe
+      
+      - name: Upload to Release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v1
+        with:
+          files: installer/*.exe
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: Also upload standalone exe to Release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v1
+        with:
+          files: ai_file_organizer/dist/*.exe
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
