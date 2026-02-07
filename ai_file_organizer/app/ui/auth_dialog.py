@@ -295,11 +295,10 @@ class AuthDialog(QDialog):
         price_layout.addWidget(price_period)
         card_layout.addLayout(price_layout)
         
-        # Features - simplified with checkmarks for better visibility
+        # Features - just 2 to fit the space
         features = [
-            "✓  AI-powered semantic search",
-            "✓  Smart file organization",
-            "✓  Auto-indexing & OCR",
+            "✓  AI-powered search & organization",
+            "✓  Auto-indexing, OCR & Vision AI",
         ]
         
         features_container = QWidget()
