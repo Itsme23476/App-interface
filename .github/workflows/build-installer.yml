@@ -27,19 +27,64 @@ jobs:
           python -m pip install --upgrade pip
           pip install pyinstaller
           pip install -r ai_file_organizer/requirements.txt
+          
+          # Verify PySide6 is installed correctly
+          python -c "import PySide6; print(f'PySide6 version: {PySide6.__version__}')"
+          python -c "from PySide6.QtWidgets import QApplication; print('QtWidgets OK')"
+          python -c "from PySide6.QtCore import QCoreApplication; print('QtCore OK')"
       
       - name: Build with PyInstaller
         run: |
           cd ai_file_organizer
-          # Try with assets if they exist
+          
+          # Build with proper PySide6 collection
+          # --collect-all PySide6: Collects all Qt modules, plugins, and data
+          # --collect-all shiboken6: Collects the PySide6 bindings layer
+          # --hidden-import: Explicitly include modules that might not be detected
+          
+          $baseArgs = @(
+            "--name", "AIFileOrganizer",
+            "--windowed",
+            "--onefile",
+            "--collect-all", "PySide6",
+            "--collect-all", "shiboken6",
+            "--hidden-import", "PySide6.QtCore",
+            "--hidden-import", "PySide6.QtGui",
+            "--hidden-import", "PySide6.QtWidgets",
+            "--hidden-import", "PySide6.QtNetwork",
+            "--hidden-import", "PySide6.QtSvg",
+            "--hidden-import", "PySide6.QtSvgWidgets",
+            "--hidden-import", "PIL",
+            "--hidden-import", "PIL.Image",
+            "--hidden-import", "requests",
+            "--hidden-import", "openai",
+            "--hidden-import", "json5",
+            "--noconfirm"
+          )
+          
           if (Test-Path "assets/icon.ico") {
             echo "Building with icon..."
-            pyinstaller --name "AIFileOrganizer" --windowed --onefile --icon=assets/icon.ico main.py --add-data "assets;assets"
+            $baseArgs += @("--icon", "assets/icon.ico", "--add-data", "assets;assets")
           } else {
             echo "Building without icon..."
-            pyinstaller --name "AIFileOrganizer" --windowed --onefile main.py
           }
+          
+          # Add the main script
+          $baseArgs += "main.py"
+          
+          echo "Running PyInstaller with args: $baseArgs"
+          pyinstaller @baseArgs
+          
           echo "=== Build complete ==="
+          echo "Checking output size..."
+          $exePath = "dist\AIFileOrganizer.exe"
+          if (Test-Path $exePath) {
+            $size = (Get-Item $exePath).Length / 1MB
+            echo "EXE size: $([math]::Round($size, 2)) MB"
+            if ($size -lt 50) {
+              echo "WARNING: EXE seems too small! Expected 80-150 MB for PySide6 app"
+            }
+          }
           dir dist
         shell: pwsh
       
