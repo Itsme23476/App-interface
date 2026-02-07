@@ -454,6 +454,7 @@ class AuthDialog(QDialog):
                 self._go_to_login()
                 self.login_email.setText(email)
             else:
+                # Account created and auto-logged in
                 tokens = supabase_auth.get_session_tokens()
                 if tokens:
                     settings.set_auth_tokens(
@@ -461,7 +462,8 @@ class AuthDialog(QDialog):
                         tokens['refresh_token'],
                         email
                     )
-                self._show_subscribe_page()
+                # Check if they already have a subscription (e.g., from a previous signup)
+                self._check_subscription_silent()
         else:
             error = result.get('error', 'Signup failed')
             self.signup_error.setText(error)
