@@ -31,7 +31,7 @@ SUPABASE_URL = "https://gsvccxhdgcshiwgjvgfi.supabase.co"
 SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImdzdmNjeGhkZ2NzaGl3Z2p2Z2ZpIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjczOTY2NTIsImV4cCI6MjA4Mjk3MjY1Mn0.Sbb6YJjlQ_ig2LCcs9zz_Be1kU-iIHBx4Vu4nzCPyTM"
 
 # Stripe configuration
-STRIPE_PRICE_ID = "price_1SlJ7TBATYQXewwiW3WdOIRN"
+STRIPE_PRICE_ID = "price_1SeEv5BATYQXewwiQ5XO32PD"
 
 
 class SupabaseAuth:
