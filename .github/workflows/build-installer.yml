@@ -23,35 +23,66 @@ jobs:
           python -m pip install --upgrade pip
           pip install pyinstaller
           pip install -r ai_file_organizer/requirements.txt
+        continue-on-error: false
+      
+      - name: List files for debugging
+        run: |
+          echo "=== Root directory ==="
+          dir
+          echo "=== ai_file_organizer directory ==="
+          dir ai_file_organizer
+          echo "=== Checking for assets ==="
+          if (Test-Path "ai_file_organizer/assets") { dir ai_file_organizer/assets } else { echo "No assets folder" }
+        shell: pwsh
       
       - name: Build with PyInstaller
+        id: pyinstaller
         run: |
           cd ai_file_organizer
-          pyinstaller --name "AI File Organizer" --windowed --onefile --icon=assets/icon.ico main.py --add-data "assets;assets"
-        continue-on-error: true
+          # Try with assets if they exist
+          if (Test-Path "assets/icon.ico") {
+            echo "Building with icon..."
+            pyinstaller --name "AIFileOrganizer" --windowed --onefile --icon=assets/icon.ico main.py --add-data "assets;assets"
+          } else {
+            echo "Building without icon..."
+            pyinstaller --name "AIFileOrganizer" --windowed --onefile main.py
+          }
+          # List output
+          echo "=== dist folder contents ==="
+          dir dist
+        shell: pwsh
       
-      - name: Build with PyInstaller (no icon fallback)
-        if: failure()
+      - name: Verify build output
         run: |
-          cd ai_file_organizer
-          pyinstaller --name "AI File Organizer" --windowed --onefile main.py
+          if (Test-Path "ai_file_organizer/dist/AIFileOrganizer.exe") {
+            echo "Build successful! EXE found."
+          } else {
+            echo "ERROR: EXE not found!"
+            echo "Listing all files in ai_file_organizer..."
+            Get-ChildItem -Recurse ai_file_organizer | Select-Object FullName
+            exit 1
+          }
+        shell: pwsh
       
       - name: Create Inno Setup installer script
         run: |
+          $version = "${{ github.ref_name }}"
+          if ($version -eq "") { $version = "1.0.0" }
+          
           @"
           [Setup]
           AppName=AI File Organizer
-          AppVersion=${{ github.ref_name }}
+          AppVersion=$version
           DefaultDirName={autopf}\AI File Organizer
           DefaultGroupName=AI File Organizer
           OutputDir=installer
-          OutputBaseFilename=AI-File-Organizer-Setup-${{ github.ref_name }}
+          OutputBaseFilename=AI-File-Organizer-Setup
           Compression=lzma
           SolidCompression=yes
           PrivilegesRequired=admin
           
           [Files]
-          Source: "ai_file_organizer\dist\AI File Organizer.exe"; DestDir: "{app}"; Flags: ignoreversion
+          Source: "ai_file_organizer\dist\AIFileOrganizer.exe"; DestDir: "{app}"; DestName: "AI File Organizer.exe"; Flags: ignoreversion
           
           [Icons]
           Name: "{group}\AI File Organizer"; Filename: "{app}\AI File Organizer.exe"
@@ -60,17 +91,23 @@ jobs:
           [Run]
           Filename: "{app}\AI File Organizer.exe"; Description: "Launch AI File Organizer"; Flags: nowait postinstall skipifsilent
           "@ | Out-File -FilePath installer.iss -Encoding utf8
+          
+          echo "=== Generated installer.iss ==="
+          Get-Content installer.iss
         shell: pwsh
       
       - name: Install Inno Setup
-        run: |
-          choco install innosetup -y
+        run: choco install innosetup -y
         shell: cmd
       
       - name: Build Installer
         run: |
           mkdir installer
           "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer.iss
+        shell: cmd
+      
+      - name: List installer output
+        run: dir installer
         shell: cmd
       
       - name: Upload installer as artifact
@@ -83,14 +120,8 @@ jobs:
         if: github.event_name == 'release'
         uses: softprops/action-gh-release@v1
         with:
-          files: installer/*.exe
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      
-      - name: Also upload standalone exe to Release
-        if: github.event_name == 'release'
-        uses: softprops/action-gh-release@v1
-        with:
-          files: ai_file_organizer/dist/*.exe
+          files: |
+            installer/*.exe
+            ai_file_organizer/dist/*.exe
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
