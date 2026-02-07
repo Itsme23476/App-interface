@@ -5,6 +5,10 @@ on:
     types: [created]
   workflow_dispatch:  # Allow manual trigger
 
+# Required permissions for uploading to releases
+permissions:
+  contents: write
+
 jobs:
   build-windows:
     runs-on: windows-latest
@@ -23,20 +27,8 @@ jobs:
           python -m pip install --upgrade pip
           pip install pyinstaller
           pip install -r ai_file_organizer/requirements.txt
-        continue-on-error: false
-      
-      - name: List files for debugging
-        run: |
-          echo "=== Root directory ==="
-          dir
-          echo "=== ai_file_organizer directory ==="
-          dir ai_file_organizer
-          echo "=== Checking for assets ==="
-          if (Test-Path "ai_file_organizer/assets") { dir ai_file_organizer/assets } else { echo "No assets folder" }
-        shell: pwsh
       
       - name: Build with PyInstaller
-        id: pyinstaller
         run: |
           cd ai_file_organizer
           # Try with assets if they exist
@@ -47,18 +39,16 @@ jobs:
             echo "Building without icon..."
             pyinstaller --name "AIFileOrganizer" --windowed --onefile main.py
           }
-          # List output
-          echo "=== dist folder contents ==="
+          echo "=== Build complete ==="
           dir dist
         shell: pwsh
       
       - name: Verify build output
         run: |
           if (Test-Path "ai_file_organizer/dist/AIFileOrganizer.exe") {
-            echo "Build successful! EXE found."
+            echo "Build successful!"
           } else {
             echo "ERROR: EXE not found!"
-            echo "Listing all files in ai_file_organizer..."
             Get-ChildItem -Recurse ai_file_organizer | Select-Object FullName
             exit 1
           }
@@ -67,7 +57,11 @@ jobs:
       - name: Create Inno Setup installer script
         run: |
           $version = "${{ github.ref_name }}"
-          if ($version -eq "") { $version = "1.0.0" }
+          if ([string]::IsNullOrEmpty($version) -or $version -eq "refs/heads/main") { 
+            $version = "1.0.0" 
+          }
+          # Remove 'V' or 'v' prefix if present
+          $version = $version -replace '^[Vv]', ''
           
           @"
           [Setup]
@@ -91,9 +85,6 @@ jobs:
           [Run]
           Filename: "{app}\AI File Organizer.exe"; Description: "Launch AI File Organizer"; Flags: nowait postinstall skipifsilent
           "@ | Out-File -FilePath installer.iss -Encoding utf8
-          
-          echo "=== Generated installer.iss ==="
-          Get-Content installer.iss
         shell: pwsh
       
       - name: Install Inno Setup
@@ -106,22 +97,25 @@ jobs:
           "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer.iss
         shell: cmd
       
-      - name: List installer output
-        run: dir installer
-        shell: cmd
-      
       - name: Upload installer as artifact
         uses: actions/upload-artifact@v4
         with:
           name: windows-installer
           path: installer/*.exe
+          if-no-files-found: error
+      
+      - name: Upload standalone exe as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: standalone-exe
+          path: ai_file_organizer/dist/*.exe
+          if-no-files-found: error
       
       - name: Upload to Release
         if: github.event_name == 'release'
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           files: |
             installer/*.exe
             ai_file_organizer/dist/*.exe
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          fail_on_unmatched_files: true

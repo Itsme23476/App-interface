@@ -243,49 +243,68 @@ class SupabaseAuth:
             dict with 'has_subscription' bool, 'status', and 'expires_at'
         """
         if not self._user:
+            logger.warning("[SUB CHECK] Not authenticated - no user")
             return {'has_subscription': False, 'status': None, 'error': 'Not authenticated'}
         
         try:
             user_id = self._user.get('id')
+            logger.info(f"[SUB CHECK] Checking subscription for user_id: {user_id}")
+            
             if not user_id:
+                logger.warning("[SUB CHECK] No user ID found")
                 return {'has_subscription': False, 'status': None, 'error': 'No user ID'}
             
             # Get DB client with auth token
             db_client = self._get_db_client()
             if not db_client:
+                logger.warning("[SUB CHECK] Database client not available")
                 return {'has_subscription': False, 'status': None, 'error': 'Database not available'}
             
             # Query subscriptions table
+            logger.info(f"[SUB CHECK] Querying subscriptions table for user_id: {user_id}")
             response = db_client.from_('subscriptions').select('*').eq('user_id', user_id).execute()
+            
+            logger.info(f"[SUB CHECK] Query response: {response.data}")
             
             if response.data and len(response.data) > 0:
                 sub = response.data[0]
                 self._subscription = sub
+                logger.info(f"[SUB CHECK] Found subscription: {sub}")
                 
                 status = sub.get('status')
                 is_active = status in ('active', 'trialing')
+                logger.info(f"[SUB CHECK] Status: {status}, is_active (before date check): {is_active}")
                 
                 # Check if subscription has expired
                 period_end = sub.get('current_period_end')
+                logger.info(f"[SUB CHECK] current_period_end: {period_end}")
+                
                 if period_end and is_active:
                     try:
                         end_date = datetime.fromisoformat(period_end.replace('Z', '+00:00'))
-                        if end_date < datetime.now(end_date.tzinfo):
+                        now = datetime.now(end_date.tzinfo)
+                        logger.info(f"[SUB CHECK] end_date: {end_date}, now: {now}")
+                        if end_date < now:
+                            logger.info("[SUB CHECK] Subscription has EXPIRED")
                             is_active = False
-                    except Exception:
-                        pass
+                        else:
+                            logger.info("[SUB CHECK] Subscription is VALID")
+                    except Exception as e:
+                        logger.warning(f"[SUB CHECK] Date parsing error: {e}")
                 
+                logger.info(f"[SUB CHECK] Final result: has_subscription={is_active}")
                 return {
                     'has_subscription': is_active,
                     'status': status,
                     'expires_at': period_end
                 }
             else:
+                logger.warning(f"[SUB CHECK] No subscription found for user_id: {user_id}")
                 return {'has_subscription': False, 'status': None}
                 
         except Exception as e:
             error_msg = str(e)
-            logger.error(f"Subscription check error: {error_msg}")
+            logger.error(f"[SUB CHECK] Exception: {error_msg}")
             return {'has_subscription': False, 'status': None, 'error': error_msg}
     
     def open_checkout(self) -> bool:
