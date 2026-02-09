@@ -1149,8 +1149,8 @@ QToolTip {
 }
 
 #overlayResults::item {
-    padding: 10px 12px;
-    border-radius: 8px;
+    padding: 0px;
+    border-radius: 0px;
     color: #666666;
 }
 
@@ -1185,13 +1185,12 @@ QToolTip {
 #overlayOpenBtn {
     background-color: #7C4DFF;
     border: none;
-    border-radius: 4px;
+    border-radius: 0px;
     color: white;
-    font-size: 9px;
+    font-size: 12px;
     font-weight: bold;
-    padding: 0px 4px;
-    min-height: 18px;
-    min-width: 40px;
+    padding: 0px;
+    margin: -10px -12px;
 }
 
 #overlayOpenBtn:hover {

@@ -1,0 +1,19 @@
+{
+  "tests/test_database.py::TestFileIndex::test_get_file_by_path": true,
+  "tests/test_database.py::TestFileIndex::test_remove_file": true,
+  "tests/test_database.py::TestFileIndex::test_get_all_files": true,
+  "tests/test_database.py::TestFileIndex::test_search_files": true,
+  "tests/test_database.py::TestFileIndex::test_clear_all": true,
+  "tests/test_database.py::TestFileIndex::test_update_file": true,
+  "tests/test_database.py::TestFileIndex::test_file_count": true,
+  "tests/test_plan.py::TestOrganizationPlan::test_plan_validation_empty": true,
+  "tests/test_plan.py::TestOrganizationPlan::test_plan_validation_valid_structure": true,
+  "tests/test_plan.py::TestOrganizationPlan::test_plan_validation_missing_fields": true,
+  "tests/test_plan.py::TestPlanCreation::test_validate_plan_structure": true,
+  "tests/test_search.py::TestSearchService::test_search_by_filename": true,
+  "tests/test_search.py::TestSearchService::test_search_by_category": true,
+  "tests/test_theme.py::TestThemeManager::test_primary_color": true,
+  "tests/test_plan.py::TestPlanCreation::test_ensure_all_files_included": true,
+  "tests/test_search.py::TestSearchService::test_get_all_files": true,
+  "tests/test_theme.py::TestThemeManager::test_purple_accent_color": true
+}

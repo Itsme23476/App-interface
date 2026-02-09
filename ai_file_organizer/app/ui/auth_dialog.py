@@ -43,6 +43,12 @@ class AuthDialog(QDialog):
         # Try to restore session on init
         QTimer.singleShot(100, self._try_restore_session)
     
+    def showEvent(self, event):
+        """Apply dark/light title bar when dialog is shown."""
+        super().showEvent(event)
+        from app.ui.theme_manager import apply_titlebar_theme
+        apply_titlebar_theme(self)
+    
     def _setup_ui(self):
         """Set up the dialog UI."""
         layout = QVBoxLayout(self)

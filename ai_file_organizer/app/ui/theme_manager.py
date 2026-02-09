@@ -11,6 +11,83 @@ from PySide6.QtCore import Qt, QObject, Signal
 from app.core.settings import settings
 
 
+# ---------------------------------------------------------------------------
+# Theme color palettes - centralised so every widget can stay in sync
+# ---------------------------------------------------------------------------
+_DARK_COLORS = {
+    "bg":               "#0A0A12",
+    "surface":          "#111119",
+    "card":             "#16161F",
+    "border":           "#1C1C28",
+    "border_strong":    "#252535",
+    "text":             "#E8E8F0",
+    "text_secondary":   "#B0B0C0",
+    "text_muted":       "#7A7A90",
+    "text_disabled":    "#4A4A5A",
+    "input_bg":         "#16161F",
+    "hover":            "#1C1C28",
+    "pressed":          "#252535",
+    "tab_unchecked_bg": "#16161F",
+    "tab_unchecked_border": "#252535",
+    "tab_unchecked_text": "#B0B0C0",
+    "tab_unchecked_hover": "#1C1C28",
+    "danger_bg":        "rgba(211, 47, 47, 0.12)",
+    "danger_hover":     "rgba(211, 47, 47, 0.10)",
+    "danger_border":    "rgba(211, 47, 47, 0.30)",
+    "danger_text":      "#FF6B6B",
+    "purple_light_bg":  "rgba(124, 77, 255, 0.12)",
+    "purple_light_hover":"rgba(124, 77, 255, 0.10)",
+    "purple_pressed":   "#1C1C28",
+    "scrollbar_bg":     "#252535",
+    "scrollbar_handle": "#7A7A90",
+    "icon_bg":          "#1A1A2E",
+    "item_bg":          "#111119",
+    "divider":          "#1C1C28",
+    "dialog_bg":        "#111119",
+    "dialog_border":    "#1C1C28",
+}
+
+_LIGHT_COLORS = {
+    "bg":               "#FAFBFC",
+    "surface":          "#FFFFFF",
+    "card":             "#FFFFFF",
+    "border":           "#E8E8E8",
+    "border_strong":    "#D0D0D0",
+    "text":             "#1A1A1A",
+    "text_secondary":   "#666666",
+    "text_muted":       "#888888",
+    "text_disabled":    "#888888",
+    "input_bg":         "#FFFFFF",
+    "hover":            "#F5F5F5",
+    "pressed":          "#E8E8E8",
+    "tab_unchecked_bg": "#FFFFFF",
+    "tab_unchecked_border": "#E0E0E0",
+    "tab_unchecked_text": "#666666",
+    "tab_unchecked_hover": "#F5F5F5",
+    "danger_bg":        "#FFF0F0",
+    "danger_hover":     "#FFEBEE",
+    "danger_border":    "#FFCCCC",
+    "danger_text":      "#CC6666",
+    "purple_light_bg":  "#E8DFFF",
+    "purple_light_hover":"#EDE7FF",
+    "purple_pressed":   "#E8E0FF",
+    "scrollbar_bg":     "#F0F0F0",
+    "scrollbar_handle": "#AAAAAA",
+    "icon_bg":          "#F3EEFF",
+    "item_bg":          "#FAFAFA",
+    "divider":          "#EEEEEE",
+    "dialog_bg":        "#FFFFFF",
+    "dialog_border":    "#E0E0E0",
+}
+
+
+def get_theme_colors(theme: str = None) -> dict:
+    """Return the colour palette dict for the given (or current) theme."""
+    if theme is None:
+        theme = settings.theme
+    return dict(_DARK_COLORS) if theme == "dark" else dict(_LIGHT_COLORS)
+
+
 class ThemeManager(QObject):
     """Manages application theme switching."""
     
@@ -43,6 +120,10 @@ class ThemeManager(QObject):
         """Get current theme from settings."""
         return settings.theme
     
+    def get_colors(self) -> dict:
+        """Convenience: return colours for the *current* theme."""
+        return get_theme_colors(self.current_theme)
+    
     def apply_theme(self, theme: str = None):
         """Apply theme to the application.
         
@@ -72,12 +153,61 @@ class ThemeManager(QObject):
             with open(style_path, 'r', encoding='utf-8') as f:
                 app.setStyleSheet(f.read())
         
+        # Apply dark/light title bar on Windows
+        self._apply_windows_titlebar(theme)
+        
         # Save setting
         if settings.theme != theme:
             settings.set_theme(theme)
         
         # Emit signal for any listeners
         self.theme_changed.emit(theme)
+    
+    def _apply_windows_titlebar(self, theme: str):
+        """Set Windows title bar to dark or light using DwmSetWindowAttribute."""
+        if sys.platform != 'win32':
+            return
+        try:
+            import ctypes
+            import ctypes.wintypes
+            dark_value = 1 if theme == 'dark' else 0
+
+            app = QApplication.instance()
+            if not app:
+                return
+
+            # Try attribute 20 first (Win10 2004+ / Win11), fall back to 19
+            for attr in (20, 19):
+                applied = False
+                for widget in app.topLevelWidgets():
+                    try:
+                        hwnd = int(widget.winId())
+                        if not hwnd:
+                            continue
+                        result = ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                            ctypes.wintypes.HWND(hwnd),
+                            ctypes.wintypes.DWORD(attr),
+                            ctypes.byref(ctypes.c_int(dark_value)),
+                            ctypes.sizeof(ctypes.c_int),
+                        )
+                        if result == 0:  # S_OK
+                            applied = True
+                            # Force Windows to redraw the title bar
+                            SWP_FRAMECHANGED = 0x0020
+                            SWP_NOMOVE = 0x0002
+                            SWP_NOSIZE = 0x0001
+                            SWP_NOZORDER = 0x0004
+                            ctypes.windll.user32.SetWindowPos(
+                                ctypes.wintypes.HWND(hwnd),
+                                None, 0, 0, 0, 0,
+                                SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER,
+                            )
+                    except Exception:
+                        continue
+                if applied:
+                    break  # attribute worked, no need to try fallback
+        except Exception:
+            pass  # Silently fail on non-Windows or older versions
     
     def toggle_theme(self):
         """Toggle between dark and light themes."""
@@ -88,18 +218,18 @@ class ThemeManager(QObject):
     def _apply_dark_palette(self, app: QApplication):
         """Apply dark color palette with purple accent."""
         palette = QPalette()
-        palette.setColor(QPalette.Window, QColor(15, 15, 15))        # #0F0F0F
-        palette.setColor(QPalette.WindowText, QColor(224, 224, 224)) # #E0E0E0
-        palette.setColor(QPalette.Base, QColor(26, 26, 26))          # #1A1A1A
-        palette.setColor(QPalette.AlternateBase, QColor(15, 15, 15)) # #0F0F0F
-        palette.setColor(QPalette.ToolTipBase, QColor(30, 30, 30))
-        palette.setColor(QPalette.ToolTipText, QColor(224, 224, 224))
-        palette.setColor(QPalette.Text, QColor(224, 224, 224))
-        palette.setColor(QPalette.Button, QColor(30, 30, 30))
-        palette.setColor(QPalette.ButtonText, QColor(224, 224, 224))
+        palette.setColor(QPalette.Window, QColor(10, 10, 18))        # #0A0A12
+        palette.setColor(QPalette.WindowText, QColor(232, 232, 240)) # #E8E8F0
+        palette.setColor(QPalette.Base, QColor(17, 17, 25))           # #111119
+        palette.setColor(QPalette.AlternateBase, QColor(14, 14, 22))  # #0E0E16
+        palette.setColor(QPalette.ToolTipBase, QColor(22, 22, 31))    # #16161F
+        palette.setColor(QPalette.ToolTipText, QColor(232, 232, 240)) # #E8E8F0
+        palette.setColor(QPalette.Text, QColor(232, 232, 240))        # #E8E8F0
+        palette.setColor(QPalette.Button, QColor(22, 22, 31))         # #16161F
+        palette.setColor(QPalette.ButtonText, QColor(232, 232, 240))  # #E8E8F0
         palette.setColor(QPalette.BrightText, Qt.red)
-        palette.setColor(QPalette.Link, QColor(124, 77, 255))        # #7C4DFF Purple accent
-        palette.setColor(QPalette.Highlight, QColor(124, 77, 255))   # #7C4DFF
+        palette.setColor(QPalette.Link, QColor(124, 77, 255))         # #7C4DFF
+        palette.setColor(QPalette.Highlight, QColor(124, 77, 255))    # #7C4DFF
         palette.setColor(QPalette.HighlightedText, Qt.white)
         app.setPalette(palette)
     
@@ -120,6 +250,48 @@ class ThemeManager(QObject):
         palette.setColor(QPalette.Highlight, QColor(124, 77, 255))   # #7C4DFF
         palette.setColor(QPalette.HighlightedText, Qt.white)
         app.setPalette(palette)
+
+
+def apply_titlebar_theme(widget):
+    """Apply the current theme's title bar color to a specific widget.
+    
+    Call this in a dialog's showEvent to ensure dark/light title bar.
+    Works only on Windows 10 (2004+) and Windows 11.
+    """
+    if sys.platform != 'win32':
+        return
+    
+    try:
+        import ctypes
+        import ctypes.wintypes
+        
+        dark_value = 1 if settings.theme == 'dark' else 0
+        hwnd = int(widget.winId())
+        if not hwnd:
+            return
+        
+        # Try attribute 20 first (Win10 2004+ / Win11), fall back to 19
+        for attr in (20, 19):
+            result = ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                ctypes.wintypes.HWND(hwnd),
+                ctypes.wintypes.DWORD(attr),
+                ctypes.byref(ctypes.c_int(dark_value)),
+                ctypes.sizeof(ctypes.c_int),
+            )
+            if result == 0:  # S_OK
+                # Force Windows to redraw the title bar
+                SWP_FRAMECHANGED = 0x0020
+                SWP_NOMOVE = 0x0002
+                SWP_NOSIZE = 0x0001
+                SWP_NOZORDER = 0x0004
+                ctypes.windll.user32.SetWindowPos(
+                    ctypes.wintypes.HWND(hwnd),
+                    None, 0, 0, 0, 0,
+                    SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER,
+                )
+                break
+    except Exception:
+        pass
 
 
 # Global instance

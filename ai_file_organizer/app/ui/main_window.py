@@ -301,6 +301,9 @@ class MainWindow(QMainWindow):
         """Handle window show event - show onboarding on first launch"""
         super().showEvent(event)
         
+        # Apply dark/light title bar now that the window has a valid HWND
+        theme_manager._apply_windows_titlebar(theme_manager.current_theme)
+        
         # Only show onboarding once per session and if not completed
         # Also stop showing if user clicked "Remind Me Later" 3+ times
         remind_count = getattr(settings, 'onboarding_remind_count', 0)
@@ -522,6 +525,11 @@ class MainWindow(QMainWindow):
         info_layout.addWidget(self.account_plan_label)
         
         account_layout.addWidget(info_container, 1)
+        
+        # Make account section clickable to go to Settings
+        account_container.setCursor(Qt.PointingHandCursor)
+        account_container.mousePressEvent = lambda e: self._on_nav_clicked(3)  # Settings is index 3
+        
         sidebar_layout.addWidget(account_container)
     
     def _on_nav_clicked(self, index: int):
@@ -1129,7 +1137,7 @@ class MainWindow(QMainWindow):
             bg_color = "#1a1a2e"
             card_bg = "#252540"
             text_color = "#FFFFFF"
-            subtitle_color = "#888888"
+            subtitle_color = "#7A7A90"
             border_color = "#3A3A5A"
             close_bg = "rgba(255, 255, 255, 0.1)"
             close_hover = "rgba(124, 77, 255, 0.2)"
@@ -1148,6 +1156,40 @@ class MainWindow(QMainWindow):
         overlay.setObjectName("filesOverlay")
         overlay.setModal(True)
         overlay.resize(int(self.width() * 0.92), int(self.height() * 0.88))
+        
+        # Apply scrollbar styling at dialog level - this ensures ALL scrollbars in the dialog are styled
+        overlay.setStyleSheet("""
+            QScrollBar:vertical {
+                background: #7A7A90;
+                width: 8px;
+                border-radius: 4px;
+            }
+            QScrollBar::handle:vertical {
+                background: #252535;
+                min-height: 30px;
+                border-radius: 4px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background: #9575FF;
+            }
+            QScrollBar:horizontal {
+                background: #7A7A90;
+                height: 8px;
+                border-radius: 4px;
+            }
+            QScrollBar::handle:horizontal {
+                background: #252535;
+                min-width: 30px;
+                border-radius: 4px;
+            }
+            QScrollBar::handle:horizontal:hover {
+                background: #9575FF;
+            }
+            QScrollBar::add-line, QScrollBar::sub-line {
+                width: 0px;
+                height: 0px;
+            }
+        """)
         
         # Center the dialog
         overlay.move(
@@ -1327,6 +1369,138 @@ class MainWindow(QMainWindow):
         """)
         table_layout = QVBoxLayout(table_container)
         table_layout.setContentsMargins(0, 0, 0, 0)
+        
+        # Style the table for the current theme - use explicit colors, not theme variables
+        # to ensure dark mode is always applied in this dialog
+        if is_dark:
+            tbl_bg = "#252540"
+            tbl_alt_bg = "#1a1a2e"
+            tbl_text = "#FFFFFF"
+            tbl_border = "#3A3A5A"
+            tbl_header_bg = "#1a1a2e"
+            tbl_header_text = "#7A7A90"
+        else:
+            tbl_bg = "#FFFFFF"
+            tbl_alt_bg = "#F8F6FF"
+            tbl_text = "#1A1A1A"
+            tbl_border = "#E8E8E8"
+            tbl_header_bg = "#FFFFFF"
+            tbl_header_text = "#666666"
+        
+        table_style = f"""
+            QTableWidget, QTableWidget * {{
+                background-color: {tbl_bg};
+                color: {tbl_text};
+            }}
+            QTableWidget {{
+                background-color: {tbl_bg};
+                alternate-background-color: {tbl_alt_bg};
+                color: {tbl_text};
+                gridline-color: {tbl_border};
+                border: none;
+                selection-background-color: rgba(124, 77, 255, 0.25);
+                selection-color: {tbl_text};
+            }}
+            QTableWidget QTableCornerButton::section {{
+                background-color: {tbl_header_bg};
+                border: none;
+            }}
+            QTableWidget::item {{
+                padding: 8px;
+                border-bottom: 1px solid {tbl_border};
+                background-color: {tbl_bg};
+                color: {tbl_text};
+            }}
+            QTableWidget::item:alternate {{
+                background-color: {tbl_alt_bg};
+            }}
+            QTableWidget::item:selected {{
+                background-color: rgba(124, 77, 255, 0.25);
+                color: {tbl_text};
+            }}
+            QHeaderView {{
+                background-color: {tbl_header_bg};
+            }}
+            QHeaderView::section {{
+                background-color: {tbl_header_bg};
+                color: {tbl_header_text};
+                padding: 10px 8px;
+                border: none;
+                border-bottom: 2px solid {tbl_border};
+                font-weight: 600;
+                font-size: 12px;
+            }}
+            QTableWidget QCheckBox::indicator {{
+                width: 18px;
+                height: 18px;
+                border: 2px solid #5A5A70;
+                border-radius: 4px;
+                background: {tbl_bg};
+            }}
+            QTableWidget QCheckBox::indicator:checked {{
+                background: #7C4DFF;
+                border-color: #7C4DFF;
+            }}
+            #filesTable QScrollBar:vertical {{
+                background: #7A7A90 !important;
+                width: 8px;
+                border-radius: 4px;
+            }}
+            #filesTable QScrollBar::handle:vertical {{
+                background: #252535 !important;
+                min-height: 30px;
+                border-radius: 4px;
+            }}
+            #filesTable QScrollBar::handle:vertical:hover {{
+                background: #9575FF !important;
+            }}
+            #filesTable QScrollBar:horizontal {{
+                background: #7A7A90 !important;
+                height: 8px;
+                border-radius: 4px;
+            }}
+            #filesTable QScrollBar::handle:horizontal {{
+                background: #252535 !important;
+                min-width: 30px;
+                border-radius: 4px;
+            }}
+            #filesTable QScrollBar::handle:horizontal:hover {{
+                background: #9575FF !important;
+            }}
+            QScrollBar::add-line, QScrollBar::sub-line {{
+                width: 0px;
+                height: 0px;
+            }}
+        """
+        self.debug_table.setStyleSheet(table_style)
+        
+        # Also style the viewport explicitly
+        if self.debug_table.viewport():
+            self.debug_table.viewport().setStyleSheet(f"background-color: {tbl_bg};")
+        
+        # Force scrollbar styling directly on scrollbar widgets
+        scrollbar_style = """
+            QScrollBar {
+                background: #7A7A90;
+                border-radius: 4px;
+            }
+            QScrollBar::handle {
+                background: #252535;
+                border-radius: 4px;
+            }
+            QScrollBar::handle:hover {
+                background: #9575FF;
+            }
+            QScrollBar::add-line, QScrollBar::sub-line {
+                width: 0px;
+                height: 0px;
+            }
+        """
+        if self.debug_table.verticalScrollBar():
+            self.debug_table.verticalScrollBar().setStyleSheet(scrollbar_style)
+        if self.debug_table.horizontalScrollBar():
+            self.debug_table.horizontalScrollBar().setStyleSheet(scrollbar_style)
+        
         table_layout.addWidget(self.debug_table)
         
         layout.addWidget(table_container, 1)
@@ -1343,6 +1517,11 @@ class MainWindow(QMainWindow):
                 background-color: {bg_color};
             }}
         """)
+        
+        # Apply dark/light title bar
+        from app.ui.theme_manager import apply_titlebar_theme
+        overlay.show()
+        apply_titlebar_theme(overlay)
         
         # Show the overlay
         self.refresh_debug_view()
@@ -1415,19 +1594,19 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(settings_widget)
         layout.setContentsMargins(40, 30, 40, 30)
         layout.setSpacing(16)
-        
+
         # Style variables for settings (no cascading - applied individually)
         settings_title_style = "font-size: 15px; font-weight: 600; color: #7C4DFF; background: transparent; border: none;"
-        settings_label_style = "color: #555555; font-size: 13px; background: transparent; border: none;"
-        settings_hint_style = "color: #888888; font-size: 11px; background: transparent; border: none;"
+        settings_label_style = "color: #7A7A90; font-size: 13px; background: transparent; border: none;"
+        settings_hint_style = "color: #4A4A5A; font-size: 11px; background: transparent; border: none;"
 
         # ======= APPEARANCE CARD =======
         appearance_card = QFrame()
         appearance_card.setObjectName("settingsCard")
         appearance_card.setStyleSheet("""
             QFrame#settingsCard {
-                background-color: rgba(124, 77, 255, 0.03);
-                border: 1px dashed rgba(124, 77, 255, 0.25);
+                background-color: #111119;
+                border: 1px solid #1C1C28;
                 border-radius: 16px;
             }
             QFrame#settingsCard QLabel {
@@ -1454,15 +1633,16 @@ class MainWindow(QMainWindow):
         self.theme_toggle_btn.setCursor(Qt.PointingHandCursor)
         self.theme_toggle_btn.setStyleSheet("""
             QPushButton {
-                background-color: white;
-                border: 2px solid #7C4DFF;
+                background-color: #16161F;
+                border: 1px solid rgba(124, 77, 255, 0.30);
                 border-radius: 10px;
                 color: #7C4DFF;
                 font-weight: 600;
                 padding: 0 16px;
             }
             QPushButton:hover {
-                background-color: rgba(124, 77, 255, 0.1);
+                background-color: rgba(124, 77, 255, 0.08);
+                border-color: #7C4DFF;
             }
             QPushButton:checked {
                 background-color: #7C4DFF;
@@ -1482,8 +1662,8 @@ class MainWindow(QMainWindow):
         help_card.setObjectName("settingsCardHelp")
         help_card.setStyleSheet("""
             QFrame#settingsCardHelp {
-                background-color: rgba(124, 77, 255, 0.03);
-                border: 1px dashed rgba(124, 77, 255, 0.25);
+                background-color: #111119;
+                border: 1px solid #1C1C28;
                 border-radius: 16px;
             }
             QFrame#settingsCardHelp > QLabel {
@@ -1509,7 +1689,7 @@ class MainWindow(QMainWindow):
         show_guide_btn.setStyleSheet("""
             QPushButton {
                 background-color: transparent;
-                border: 2px solid #7C4DFF;
+                border: 1px solid rgba(124, 77, 255, 0.30);
                 border-radius: 10px;
                 color: #7C4DFF;
                 font-size: 14px;
@@ -1517,14 +1697,15 @@ class MainWindow(QMainWindow):
                 padding: 8px 16px;
             }
             QPushButton:hover {
-                background-color: rgba(124, 77, 255, 0.1);
+                background-color: rgba(124, 77, 255, 0.08);
+                border-color: #7C4DFF;
             }
         """)
         show_guide_btn.clicked.connect(self._show_onboarding)
         help_layout.addWidget(show_guide_btn)
         
         layout.addWidget(help_card)
-
+        
         # AI Providers section removed - app covers AI costs for users
         # (Hidden placeholder widgets to prevent AttributeError in event handlers)
         self.local_ai_group = QFrame()
@@ -1537,8 +1718,8 @@ class MainWindow(QMainWindow):
         qs_card.setObjectName("settingsCardQS")
         qs_card.setStyleSheet("""
             QFrame#settingsCardQS {
-                background-color: rgba(124, 77, 255, 0.03);
-                border: 1px dashed rgba(124, 77, 255, 0.25);
+                background-color: #111119;
+                border: 1px solid #1C1C28;
                 border-radius: 16px;
             }
             QFrame#settingsCardQS > QLabel {
@@ -1556,19 +1737,21 @@ class MainWindow(QMainWindow):
         
         toggle_btn_style = """
             QPushButton {
-                background-color: white;
-                border: 2px solid #7C4DFF;
+                background-color: #16161F;
+                border: 1px solid rgba(124, 77, 255, 0.30);
                 border-radius: 10px;
                 color: #7C4DFF;
                 font-weight: 600;
                 padding: 8px 16px;
             }
             QPushButton:hover {
-                background-color: rgba(124, 77, 255, 0.1);
+                background-color: rgba(124, 77, 255, 0.08);
+                border-color: #7C4DFF;
             }
             QPushButton:checked {
                 background-color: #7C4DFF;
                 color: white;
+                border-color: #7C4DFF;
             }
         """
 
@@ -1603,13 +1786,15 @@ class MainWindow(QMainWindow):
         self.qs_shortcut_input.setMaximumWidth(180)
         self.qs_shortcut_input.setStyleSheet("""
             QLineEdit {
-                background-color: white;
-                border: 1px solid #E0E0E0;
+                background-color: #0F0F1A;
+                border: 1px solid #1C1C28;
                 border-radius: 8px;
                 padding: 6px 12px;
+                color: #E8E8F0;
             }
             QLineEdit:focus {
                 border-color: #7C4DFF;
+                background-color: #12121E;
             }
         """)
         qs_row2.addWidget(self.qs_shortcut_input)
@@ -1640,8 +1825,8 @@ class MainWindow(QMainWindow):
         search_card.setObjectName("settingsCardSearch")
         search_card.setStyleSheet("""
             QFrame#settingsCardSearch {
-                background-color: rgba(124, 77, 255, 0.03);
-                border: 1px dashed rgba(124, 77, 255, 0.25);
+                background-color: #111119;
+                border: 1px solid #1C1C28;
                 border-radius: 16px;
             }
             QFrame#settingsCardSearch > QLabel {
@@ -1698,8 +1883,8 @@ class MainWindow(QMainWindow):
         account_card.setObjectName("settingsCardAccount")
         account_card.setStyleSheet("""
             QFrame#settingsCardAccount {
-                background-color: rgba(124, 77, 255, 0.03);
-                border: 1px dashed rgba(124, 77, 255, 0.25);
+                background-color: #111119;
+                border: 1px solid #1C1C28;
                 border-radius: 16px;
             }
             QFrame#settingsCardAccount > QLabel {
@@ -1732,7 +1917,7 @@ class MainWindow(QMainWindow):
         sub_label.setStyleSheet(settings_label_style)
         sub_row.addWidget(sub_label)
         self.account_sub_label = QLabel("No subscription")
-        self.account_sub_label.setStyleSheet("color: #888888; font-size: 13px; background: transparent;")
+        self.account_sub_label.setStyleSheet("color: #7A7A90; font-size: 13px; background: transparent;")
         sub_row.addWidget(self.account_sub_label)
         sub_row.addStretch()
         account_layout.addLayout(sub_row)
@@ -1740,24 +1925,25 @@ class MainWindow(QMainWindow):
         # Buttons row
         button_row = QHBoxLayout()
         button_row.setSpacing(10)
-        self.refresh_account_btn = QPushButton("Refresh")
-        self.refresh_account_btn.setMinimumHeight(36)
-        self.refresh_account_btn.setMinimumWidth(100)
-        self.refresh_account_btn.setCursor(Qt.PointingHandCursor)
-        self.refresh_account_btn.setStyleSheet("""
+        self.manage_sub_btn = QPushButton("Manage Subscription")
+        self.manage_sub_btn.setMinimumHeight(36)
+        self.manage_sub_btn.setMinimumWidth(150)
+        self.manage_sub_btn.setCursor(Qt.PointingHandCursor)
+        self.manage_sub_btn.setStyleSheet("""
             QPushButton {
                 background-color: transparent;
-                border: 1px solid #7C4DFF;
+                border: 1px solid rgba(124, 77, 255, 0.30);
                 border-radius: 8px;
                 color: #7C4DFF;
                 font-weight: 500;
             }
             QPushButton:hover {
-                background-color: rgba(124, 77, 255, 0.1);
+                background-color: rgba(124, 77, 255, 0.08);
+                border-color: #7C4DFF;
             }
         """)
-        self.refresh_account_btn.clicked.connect(self._refresh_account_info)
-        button_row.addWidget(self.refresh_account_btn)
+        self.manage_sub_btn.clicked.connect(self._open_billing_portal)
+        button_row.addWidget(self.manage_sub_btn)
         
         self.signout_btn = QPushButton("Sign Out")
         self.signout_btn.setMinimumHeight(36)
@@ -1766,15 +1952,15 @@ class MainWindow(QMainWindow):
         self.signout_btn.setStyleSheet("""
             QPushButton {
                 background-color: transparent;
-                border: 1px solid #CCCCCC;
+                border: 1px solid #252535;
                 border-radius: 8px;
-                color: #666666;
+                color: #7A7A90;
                 font-weight: 500;
             }
             QPushButton:hover {
-                background-color: #FFEBEE;
+                background-color: rgba(211, 47, 47, 0.08);
                 border-color: #D32F2F;
-                color: #D32F2F;
+                color: #FF6B6B;
             }
         """)
         self.signout_btn.clicked.connect(self._sign_out)
@@ -1789,8 +1975,8 @@ class MainWindow(QMainWindow):
         exclusions_container.setObjectName("settingsCardExclusions")
         exclusions_container.setStyleSheet("""
             QFrame#settingsCardExclusions {
-                background-color: rgba(124, 77, 255, 0.03);
-                border: 1px dashed rgba(124, 77, 255, 0.25);
+                background-color: #111119;
+                border: 1px solid #1C1C28;
                 border-radius: 16px;
             }
             QFrame#settingsCardExclusions > QLabel {
@@ -1845,22 +2031,22 @@ class MainWindow(QMainWindow):
         self.exclusions_list.setMaximumHeight(200)
         self.exclusions_list.setStyleSheet("""
             QListWidget {
-                background-color: white;
-                border: 1px solid #E0E0E0;
+                background-color: #0F0F1A;
+                border: 1px solid #1C1C28;
                 border-radius: 10px;
                 padding: 6px;
             }
             QListWidget::item {
                 padding: 8px 12px;
                 border-radius: 6px;
-                color: #555555;
+                color: #B0B0C0;
             }
             QListWidget::item:hover {
-                background-color: #F8F6FF;
+                background-color: #16161F;
             }
             QListWidget::item:selected {
                 background-color: rgba(124, 77, 255, 0.12);
-                color: #7C4DFF;
+                color: #B39DFF;
             }
         """)
         self._refresh_exclusions_list()
@@ -1875,13 +2061,15 @@ class MainWindow(QMainWindow):
         self.exclusion_input.setMinimumHeight(36)
         self.exclusion_input.setStyleSheet("""
             QLineEdit {
-                background-color: white;
-                border: 1px solid #E0E0E0;
+                background-color: #0F0F1A;
+                border: 1px solid #1C1C28;
                 border-radius: 8px;
                 padding: 6px 12px;
+                color: #E8E8F0;
             }
             QLineEdit:focus {
                 border-color: #7C4DFF;
+                background-color: #12121E;
             }
         """)
         self.exclusion_input.returnPressed.connect(self._add_exclusion_pattern)
@@ -1906,26 +2094,26 @@ class MainWindow(QMainWindow):
         add_exclusion_btn.clicked.connect(self._add_exclusion_pattern)
         exclusions_btn_row.addWidget(add_exclusion_btn)
         
-        remove_exclusion_btn = QPushButton("Remove")
-        remove_exclusion_btn.setMinimumHeight(36)
-        remove_exclusion_btn.setMinimumWidth(80)
-        remove_exclusion_btn.setCursor(Qt.PointingHandCursor)
-        remove_exclusion_btn.setStyleSheet("""
+        self._remove_exclusion_btn = QPushButton("Remove")
+        self._remove_exclusion_btn.setMinimumHeight(36)
+        self._remove_exclusion_btn.setMinimumWidth(80)
+        self._remove_exclusion_btn.setCursor(Qt.PointingHandCursor)
+        self._remove_exclusion_btn.setStyleSheet("""
             QPushButton {
                 background-color: transparent;
-                border: 1px solid #CCCCCC;
+                border: 1px solid #252535;
                 border-radius: 8px;
-                color: #666666;
+                color: #7A7A90;
                 font-weight: 500;
             }
             QPushButton:hover {
-                background-color: #FFEBEE;
+                background-color: rgba(211, 47, 47, 0.08);
                 border-color: #D32F2F;
-                color: #D32F2F;
+                color: #FF6B6B;
             }
         """)
-        remove_exclusion_btn.clicked.connect(self._remove_exclusion_pattern)
-        exclusions_btn_row.addWidget(remove_exclusion_btn)
+        self._remove_exclusion_btn.clicked.connect(self._remove_exclusion_pattern)
+        exclusions_btn_row.addWidget(self._remove_exclusion_btn)
         
         reset_exclusions_btn = QPushButton("Reset")
         reset_exclusions_btn.setMinimumHeight(36)
@@ -1934,13 +2122,14 @@ class MainWindow(QMainWindow):
         reset_exclusions_btn.setStyleSheet("""
             QPushButton {
                 background-color: transparent;
-                border: 1px solid #7C4DFF;
+                border: 1px solid rgba(124, 77, 255, 0.30);
                 border-radius: 8px;
                 color: #7C4DFF;
                 font-weight: 500;
             }
             QPushButton:hover {
-                background-color: rgba(124, 77, 255, 0.1);
+                background-color: rgba(124, 77, 255, 0.08);
+                border-color: #7C4DFF;
             }
         """)
         reset_exclusions_btn.clicked.connect(self._reset_exclusions)
@@ -1964,6 +2153,9 @@ class MainWindow(QMainWindow):
         # Set widget in scroll area and add to stack
         scroll_area.setWidget(settings_widget)
         self.page_stack.addWidget(scroll_area)
+        
+        # Apply correct theme styles on startup
+        self._apply_settings_theme_styles(theme_manager.current_theme)
     
     def _update_theme_button(self):
         """Update the theme toggle button text and state."""
@@ -1979,7 +2171,152 @@ class MainWindow(QMainWindow):
         """Handle theme toggle button click."""
         new_theme = theme_manager.toggle_theme()
         self._update_theme_button()
+        # Re-apply inline styles for the new theme
+        self._apply_settings_theme_styles(new_theme)
+        if hasattr(self, 'organize_page') and hasattr(self.organize_page, '_apply_theme_styles'):
+            self.organize_page._apply_theme_styles(new_theme)
         self.status_bar.showMessage(f"Switched to {new_theme} mode", 3000)
+    
+    def _apply_settings_theme_styles(self, theme=None):
+        """Re-apply all theme-dependent inline styles on the settings page."""
+        from app.ui.theme_manager import get_theme_colors
+        c = get_theme_colors(theme)
+
+        # Style variables
+        settings_label_style = f"color: {c['text_muted']}; font-size: 13px; background: transparent; border: none;"
+        settings_hint_style = f"color: {c['text_disabled']}; font-size: 11px; background: transparent; border: none;"
+
+        # ---- Card backgrounds (find by object name) ----
+        from PySide6.QtWidgets import QFrame
+        card_names = ['settingsCard', 'settingsCardHelp', 'settingsCardQS',
+                      'settingsCardSearch', 'settingsCardAccount', 'settingsCardExclusions']
+        for name in card_names:
+            card = self.findChild(QFrame, name)
+            if card:
+                card.setStyleSheet(f"""
+                    QFrame#{name} {{
+                        background-color: {c['surface']};
+                        border: 1px solid {c['border']};
+                        border-radius: 16px;
+                    }}
+                    QFrame#{name} QLabel {{
+                        border: none;
+                        background: transparent;
+                    }}
+                """)
+
+        # ---- Toggle buttons ----
+        toggle_btn_style = f"""
+            QPushButton {{
+                background-color: {c['card']};
+                border: 1px solid rgba(124, 77, 255, 0.30);
+                border-radius: 10px;
+                color: #7C4DFF;
+                font-weight: 600;
+                padding: 8px 16px;
+            }}
+            QPushButton:hover {{
+                background-color: rgba(124, 77, 255, 0.08);
+                border-color: #7C4DFF;
+            }}
+            QPushButton:checked {{
+                background-color: #7C4DFF;
+                color: white;
+                border-color: #7C4DFF;
+            }}
+        """
+        for btn in [self.theme_toggle_btn, self.qs_autopaste_btn, self.qs_autoconfirm_btn,
+                    self.gpt_rerank_button, self.spell_check_btn]:
+            btn.setStyleSheet(toggle_btn_style)
+
+        # ---- Input fields ----
+        input_style = f"""
+            QLineEdit {{
+                background-color: {c['bg']};
+                border: 1px solid {c['border']};
+                border-radius: 8px;
+                padding: 6px 12px;
+                color: {c['text']};
+            }}
+            QLineEdit:focus {{
+                border-color: #7C4DFF;
+                background-color: {c['card']};
+            }}
+        """
+        self.qs_shortcut_input.setStyleSheet(input_style)
+        self.exclusion_input.setStyleSheet(input_style)
+
+        # ---- Exclusions list ----
+        self.exclusions_list.setStyleSheet(f"""
+            QListWidget {{
+                background-color: {c['bg']};
+                border: 1px solid {c['border']};
+                border-radius: 10px;
+                padding: 6px;
+            }}
+            QListWidget::item {{
+                padding: 8px 12px;
+                border-radius: 6px;
+                color: {c['text_secondary']};
+            }}
+            QListWidget::item:hover {{
+                background-color: {c['card']};
+            }}
+            QListWidget::item:selected {{
+                background-color: rgba(124, 77, 255, 0.12);
+                color: #B39DFF;
+            }}
+        """)
+
+        # ---- Sign out button ----
+        self.signout_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: transparent;
+                border: 1px solid {c['border_strong']};
+                border-radius: 8px;
+                color: {c['text_muted']};
+                font-weight: 500;
+            }}
+            QPushButton:hover {{
+                background-color: rgba(211, 47, 47, 0.08);
+                border-color: #D32F2F;
+                color: #FF6B6B;
+            }}
+        """)
+
+        # ---- Remove exclusion button ----
+        self._remove_exclusion_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: transparent;
+                border: 1px solid {c['border_strong']};
+                border-radius: 8px;
+                color: {c['text_muted']};
+                font-weight: 500;
+            }}
+            QPushButton:hover {{
+                background-color: rgba(211, 47, 47, 0.08);
+                border-color: #D32F2F;
+                color: #FF6B6B;
+            }}
+        """)
+
+        # ---- Labels inside cards ----
+        # Update labels that use muted/hint colors
+        # Find labels by checking their current style properties
+        settings_page_idx = 3  # settings is the 4th page in page_stack
+        if self.page_stack.count() > settings_page_idx:
+            settings_page = self.page_stack.widget(settings_page_idx)
+            if settings_page:
+                for label in settings_page.findChildren(QLabel):
+                    style = label.styleSheet()
+                    if not style:
+                        continue
+                    # Update muted color labels (font-size: 13px)
+                    if 'font-size: 13px' in style and ('color: #7A7A90' in style or 'color: #888888' in style):
+                        label.setStyleSheet(settings_label_style)
+                    # Update hint color labels (font-size: 11px)
+                    elif 'font-size: 11px' in style and ('color: #4A4A5A' in style or 'color: #999999' in style):
+                        label.setStyleSheet(settings_hint_style)
     
     def _refresh_account_info(self):
         """Refresh and display account information in sidebar and settings."""
@@ -2035,10 +2372,43 @@ class MainWindow(QMainWindow):
                 # Update sidebar
                 self.account_name_label.setText("Guest")
                 self.account_plan_label.setText("Sign in to continue")
-                self.account_plan_label.setStyleSheet("color: #888;")
+                self.account_plan_label.setStyleSheet("color: #7A7A90;")
                 self.avatar_label.setText("?")
         except Exception as e:
             logger.error(f"[ACCOUNT] Error refreshing account info: {e}")
+    
+    def _open_billing_portal(self):
+        """Open Stripe billing portal for subscription management."""
+        import webbrowser
+        from urllib.parse import quote
+        from app.core.supabase_client import supabase_auth, SUPABASE_URL
+        
+        if not supabase_auth.is_authenticated:
+            QMessageBox.warning(self, "Not Logged In", "Please sign in to manage your subscription.")
+            return
+        
+        # Get user info from the current_user dict
+        current_user = supabase_auth.current_user
+        if not current_user:
+            QMessageBox.warning(self, "Error", "Could not retrieve account info. Please try signing out and back in.")
+            return
+        
+        user_id = current_user.get('id', '')
+        email = current_user.get('email', '')
+        
+        if not email or not user_id:
+            QMessageBox.warning(self, "Error", "Could not retrieve account email. Please try signing out and back in.")
+            return
+        
+        # Open billing portal via Supabase Edge Function
+        portal_url = f"{SUPABASE_URL}/functions/v1/create-portal-session?user_id={user_id}&email={quote(email)}"
+        
+        try:
+            webbrowser.open(portal_url)
+            self.status_bar.showMessage("Opening subscription management...", 3000)
+        except Exception as e:
+            logger.error(f"Error opening billing portal: {e}")
+            QMessageBox.warning(self, "Error", "Could not open billing portal. Please try again.")
     
     def _rebuild_fts_index(self):
         """Rebuild the FTS search index to fix corruption."""
@@ -3724,7 +4094,7 @@ class MainWindow(QMainWindow):
         else:
             dialog_style = """
                 QDialog {
-                    background-color: #FFFFFF;
+                    background-color: #0A0A12;
                 }
                 QLabel {
                     color: #7C4DFF;
@@ -3734,15 +4104,15 @@ class MainWindow(QMainWindow):
                     background-color: transparent;
                 }
                 QTextEdit {
-                    background-color: #F5F5F5;
-                    color: #1A1A1A;
-                    border: 2px solid #7C4DFF;
+                    background-color: #0F0F1A;
+                    color: #E8E8F0;
+                    border: 1px solid rgba(124, 77, 255, 0.30);
                     border-radius: 8px;
                     font-size: 14px;
                     padding: 15px;
                 }
                 QTextEdit:focus {
-                    border: 2px solid #9575FF;
+                    border: 1px solid #7C4DFF;
                 }
                 QPushButton {
                     background-color: #7C4DFF;
@@ -3786,6 +4156,11 @@ class MainWindow(QMainWindow):
             button_box = QDialogButtonBox(QDialogButtonBox.Ok)
             button_box.accepted.connect(dialog.accept)
         layout.addWidget(button_box)
+        
+        # Apply dark/light title bar
+        from app.ui.theme_manager import apply_titlebar_theme
+        dialog.show()
+        apply_titlebar_theme(dialog)
         
         result = dialog.exec()
         
@@ -4431,6 +4806,11 @@ Move Plan Summary:
             self.y() + (self.height() - dialog.height()) // 2
         )
         
+        # Apply dark/light title bar
+        from app.ui.theme_manager import apply_titlebar_theme
+        dialog.show()
+        apply_titlebar_theme(dialog)
+        
         if dialog.exec() == QDialog.Accepted:
             # Start indexing with the existing progress UI
             self._pc_index_queue = list(user_folders)
@@ -4757,7 +5137,7 @@ Move Plan Summary:
                 status_label.setStyleSheet("color: #4CAF50; font-size: 13px;")
             else:
                 status_label.setText("Not watching any folders")
-                status_label.setStyleSheet("color: #888; font-size: 13px;")
+                status_label.setStyleSheet("color: #7A7A90; font-size: 13px;")
         
         update_status()
         layout.addWidget(status_label)
@@ -4790,6 +5170,11 @@ Move Plan Summary:
             self.x() + (self.width() - dialog.width()) // 2,
             self.y() + (self.height() - dialog.height()) // 2
         )
+        
+        # Apply dark/light title bar
+        from app.ui.theme_manager import apply_titlebar_theme
+        dialog.show()
+        apply_titlebar_theme(dialog)
         
         dialog.exec()
     
@@ -4900,7 +5285,7 @@ Move Plan Summary:
             self.watch_status_label.setStyleSheet("color: #4CAF50;")
         else:
             self.watch_status_label.setText("Not watching any folders")
-            self.watch_status_label.setStyleSheet("color: #888;")
+            self.watch_status_label.setStyleSheet("color: #7A7A90;")
     
     def _start_folder_watching(self):
         """Start watching folders for new files."""
@@ -5089,7 +5474,7 @@ Move Plan Summary:
             self.refresh_debug_view()
         elif status == 'skipped':
             self.watch_status_label.setText(f"○ Already indexed: {filename}")
-            self.watch_status_label.setStyleSheet("color: #888; font-size: 13px;")
+            self.watch_status_label.setStyleSheet("color: #7A7A90; font-size: 13px;")
         else:
             self.watch_status_label.setText(f"✗ Error: {filename}")
             self.watch_status_label.setStyleSheet("color: #ff5555; font-size: 13px;")
@@ -5333,7 +5718,7 @@ Move Plan Summary:
         sep = QFrame()
         sep.setFrameShape(QFrame.VLine)
         sep.setFrameShadow(QFrame.Sunken)
-        sep.setStyleSheet("color: #555;")
+        sep.setStyleSheet("color: #252535;")
         return sep
     
     def _get_selected_file_ids(self, source: str = 'search') -> List[int]:
@@ -5468,11 +5853,54 @@ Move Plan Summary:
         if reply != QMessageBox.Yes:
             return
         
-        # Show progress dialog
+        # Show progress dialog with theme-aware styling
+        from app.ui.theme_manager import get_theme_colors, apply_titlebar_theme
+        c = get_theme_colors()
+        
         progress = QProgressDialog("Removing files from index...", "Cancel", 0, 0, self)
+        progress.setWindowTitle("File Search Assistant")
         progress.setWindowModality(Qt.WindowModal)
         progress.setMinimumDuration(0)
+        progress.setMinimumWidth(280)
+        progress.setStyleSheet(f"""
+            QProgressDialog {{
+                background-color: {c['surface']};
+            }}
+            QLabel {{
+                color: {c['text']};
+                font-size: 14px;
+                padding: 8px;
+            }}
+            QProgressBar {{
+                border: none;
+                border-radius: 6px;
+                background-color: {c['border']};
+                height: 12px;
+                text-align: center;
+            }}
+            QProgressBar::chunk {{
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #7C4DFF, stop:1 #9575FF);
+                border-radius: 6px;
+            }}
+            QPushButton {{
+                background-color: #7C4DFF;
+                color: white;
+                border: none;
+                border-radius: 8px;
+                padding: 8px 20px;
+                font-size: 13px;
+                font-weight: 600;
+                min-width: 80px;
+            }}
+            QPushButton:hover {{
+                background-color: #9575FF;
+            }}
+            QPushButton:pressed {{
+                background-color: #6A3DE8;
+            }}
+        """)
         progress.show()
+        apply_titlebar_theme(progress)
         QApplication.processEvents()
         
         # Run in background thread
@@ -5506,11 +5934,54 @@ Move Plan Summary:
         if reply != QMessageBox.Yes:
             return
         
-        # Show progress dialog
+        # Show progress dialog with theme-aware styling
+        from app.ui.theme_manager import get_theme_colors, apply_titlebar_theme
+        c = get_theme_colors()
+        
         progress = QProgressDialog("Re-indexing files...", "Cancel", 0, len(file_paths), self)
+        progress.setWindowTitle("File Search Assistant")
         progress.setWindowModality(Qt.WindowModal)
         progress.setMinimumDuration(0)
+        progress.setMinimumWidth(280)
+        progress.setStyleSheet(f"""
+            QProgressDialog {{
+                background-color: {c['surface']};
+            }}
+            QLabel {{
+                color: {c['text']};
+                font-size: 14px;
+                padding: 8px;
+            }}
+            QProgressBar {{
+                border: none;
+                border-radius: 6px;
+                background-color: {c['border']};
+                height: 12px;
+                text-align: center;
+            }}
+            QProgressBar::chunk {{
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #7C4DFF, stop:1 #9575FF);
+                border-radius: 6px;
+            }}
+            QPushButton {{
+                background-color: #7C4DFF;
+                color: white;
+                border: none;
+                border-radius: 8px;
+                padding: 8px 20px;
+                font-size: 13px;
+                font-weight: 600;
+                min-width: 80px;
+            }}
+            QPushButton:hover {{
+                background-color: #9575FF;
+            }}
+            QPushButton:pressed {{
+                background-color: #6A3DE8;
+            }}
+        """)
         progress.show()
+        apply_titlebar_theme(progress)
         QApplication.processEvents()
         
         # Run in background thread
@@ -6121,15 +6592,115 @@ Move Plan Summary:
         
         msg = f"Index {' and '.join(msg_parts)}?"
         
-        reply = QMessageBox.question(
-            self,
-            "Index Dropped Items",
-            msg,
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.Yes
+        # Modern styled confirmation dialog
+        from PySide6.QtWidgets import QDialog, QFrame, QGraphicsDropShadowEffect
+        from app.ui.theme_manager import get_theme_colors
+        c = get_theme_colors()
+        
+        confirm_dialog = QDialog(self)
+        confirm_dialog.setWindowTitle("Index Files")
+        confirm_dialog.setModal(True)
+        confirm_dialog.setFixedSize(400, 200)
+        
+        # Center on parent
+        confirm_dialog.move(
+            self.x() + (self.width() - 400) // 2,
+            self.y() + (self.height() - 200) // 2
         )
         
-        if reply != QMessageBox.Yes:
+        # Style the entire dialog
+        confirm_dialog.setStyleSheet(f"""
+            QDialog {{
+                background-color: {c['surface']};
+                border-radius: 16px;
+            }}
+        """)
+        
+        dialog_layout = QVBoxLayout(confirm_dialog)
+        dialog_layout.setContentsMargins(28, 24, 28, 24)
+        dialog_layout.setSpacing(16)
+        
+        # Icon + text header
+        header_row = QHBoxLayout()
+        header_row.setSpacing(14)
+        icon_lbl = QLabel("📂")
+        icon_lbl.setStyleSheet("font-size: 28px; background: transparent;")
+        header_row.addWidget(icon_lbl)
+        
+        msg_label = QLabel(msg)
+        msg_label.setStyleSheet(f"""
+            font-size: 18px;
+            font-weight: 600;
+            color: {c['text']};
+            background: transparent;
+        """)
+        header_row.addWidget(msg_label)
+        header_row.addStretch()
+        dialog_layout.addLayout(header_row)
+        
+        # Subtitle
+        sub_label = QLabel("Files will be scanned and made searchable.")
+        sub_label.setStyleSheet(f"color: {c['text_muted']}; font-size: 13px; background: transparent;")
+        dialog_layout.addWidget(sub_label)
+        
+        dialog_layout.addStretch()
+        
+        # Button row
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(12)
+        btn_row.addStretch()
+        
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.setMinimumHeight(40)
+        cancel_btn.setMinimumWidth(100)
+        cancel_btn.setCursor(Qt.PointingHandCursor)
+        cancel_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: transparent;
+                border: 1px solid {c['border_strong']};
+                border-radius: 10px;
+                color: {c['text_muted']};
+                font-size: 14px;
+                font-weight: 600;
+                padding: 8px 20px;
+            }}
+            QPushButton:hover {{
+                border-color: #7C4DFF;
+                color: #7C4DFF;
+            }}
+        """)
+        cancel_btn.clicked.connect(confirm_dialog.reject)
+        btn_row.addWidget(cancel_btn)
+        
+        confirm_btn = QPushButton("Index Now")
+        confirm_btn.setMinimumHeight(40)
+        confirm_btn.setMinimumWidth(120)
+        confirm_btn.setCursor(Qt.PointingHandCursor)
+        confirm_btn.setStyleSheet("""
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #7C4DFF, stop:1 #9575FF);
+                color: white;
+                border: none;
+                border-radius: 10px;
+                font-size: 14px;
+                font-weight: 600;
+                padding: 8px 24px;
+            }
+            QPushButton:hover {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #9575FF, stop:1 #B39DFF);
+            }
+        """)
+        confirm_btn.clicked.connect(confirm_dialog.accept)
+        btn_row.addWidget(confirm_btn)
+        
+        dialog_layout.addLayout(btn_row)
+        
+        # Apply dark/light title bar
+        from app.ui.theme_manager import apply_titlebar_theme
+        confirm_dialog.show()
+        apply_titlebar_theme(confirm_dialog)
+        
+        if confirm_dialog.exec() != QDialog.Accepted:
             return
         
         # Index folders

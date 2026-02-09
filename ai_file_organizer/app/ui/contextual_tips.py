@@ -283,26 +283,28 @@ class TipPopup(QFrame):
         container.setGraphicsEffect(shadow)
     
     def _apply_style(self):
-        self.setStyleSheet("""
-            QFrame#tipContainer {
-                background-color: white;
+        from app.ui.theme_manager import get_theme_colors
+        c = get_theme_colors()
+        self.setStyleSheet(f"""
+            QFrame#tipContainer {{
+                background-color: {c['surface']};
                 border-radius: 12px;
                 border: 2px solid rgba(124, 77, 255, 0.3);
-            }
+            }}
             
-            QLabel#tipTitle {
-                color: #1a1a2e;
+            QLabel#tipTitle {{
+                color: {c['text']};
                 font-size: 15px;
                 font-weight: 700;
-            }
+            }}
             
-            QLabel#tipMessage {
-                color: #555555;
+            QLabel#tipMessage {{
+                color: {c['text_secondary']};
                 font-size: 13px;
                 line-height: 1.4;
-            }
+            }}
             
-            QPushButton#gotItButton {
+            QPushButton#gotItButton {{
                 background-color: #7C4DFF;
                 border: none;
                 border-radius: 8px;
@@ -311,10 +313,10 @@ class TipPopup(QFrame):
                 font-weight: 600;
                 padding: 8px 20px;
                 min-width: 80px;
-            }
-            QPushButton#gotItButton:hover {
+            }}
+            QPushButton#gotItButton:hover {{
                 background-color: #9575FF;
-            }
+            }}
         """)
     
     def _on_got_it(self):

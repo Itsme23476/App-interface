@@ -241,18 +241,20 @@ class IndexProgressDialog(QDialog):
     
     def _setup_ui(self, folder_name: str):
         """Setup the dialog UI."""
+        from app.ui.theme_manager import get_theme_colors
+        c = get_theme_colors()
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(0, 0, 0, 0)
         
         # Container with styled background
         container = QFrame()
         container.setObjectName("progressContainer")
-        container.setStyleSheet("""
-            QFrame#progressContainer {
-                background-color: white;
+        container.setStyleSheet(f"""
+            QFrame#progressContainer {{
+                background-color: {c['surface']};
                 border-radius: 16px;
-                border: 2px solid rgba(124, 77, 255, 0.3);
-            }
+                border: 1px solid rgba(124, 77, 255, 0.25);
+            }}
         """)
         
         container_layout = QVBoxLayout(container)
@@ -267,10 +269,10 @@ class IndexProgressDialog(QDialog):
         header_layout.addWidget(icon_label)
         
         title_label = QLabel("Indexing Files")
-        title_label.setStyleSheet("""
+        title_label.setStyleSheet(f"""
             font-size: 20px;
             font-weight: 700;
-            color: #1a1a2e;
+            color: {c['text']};
         """)
         header_layout.addWidget(title_label)
         header_layout.addStretch()
@@ -279,19 +281,19 @@ class IndexProgressDialog(QDialog):
         
         # Folder info
         folder_label = QLabel(f"📁 {folder_name}")
-        folder_label.setStyleSheet("""
-            color: #666666;
+        folder_label.setStyleSheet(f"""
+            color: {c['text_secondary']};
             font-size: 14px;
             padding: 8px 12px;
-            background: #F8F6FF;
+            background: rgba(124, 77, 255, 0.06);
             border-radius: 8px;
         """)
         container_layout.addWidget(folder_label)
         
         # Progress info
         self.progress_label = QLabel(f"Preparing to index {self.total_files} files...")
-        self.progress_label.setStyleSheet("""
-            color: #444444;
+        self.progress_label.setStyleSheet(f"""
+            color: {c['text_secondary']};
             font-size: 14px;
         """)
         container_layout.addWidget(self.progress_label)
@@ -302,24 +304,24 @@ class IndexProgressDialog(QDialog):
         self.progress_bar.setValue(0)
         self.progress_bar.setTextVisible(False)
         self.progress_bar.setFixedHeight(12)
-        self.progress_bar.setStyleSheet("""
-            QProgressBar {
-                background-color: #E8E0FF;
+        self.progress_bar.setStyleSheet(f"""
+            QProgressBar {{
+                background-color: {c['border']};
                 border: none;
                 border-radius: 6px;
-            }
-            QProgressBar::chunk {
+            }}
+            QProgressBar::chunk {{
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:0, 
                     stop:0 #7C4DFF, stop:1 #9575FF);
                 border-radius: 6px;
-            }
+            }}
         """)
         container_layout.addWidget(self.progress_bar)
         
         # Current file label
         self.file_label = QLabel("")
-        self.file_label.setStyleSheet("""
-            color: #888888;
+        self.file_label.setStyleSheet(f"""
+            color: {c['text_muted']};
             font-size: 12px;
         """)
         self.file_label.setWordWrap(True)
@@ -335,21 +337,21 @@ class IndexProgressDialog(QDialog):
         self.skip_btn = QPushButton("⏭️ Skip Indexing")
         self.skip_btn.setCursor(Qt.PointingHandCursor)
         self.skip_btn.setMinimumHeight(40)
-        self.skip_btn.setStyleSheet("""
-            QPushButton {
+        self.skip_btn.setStyleSheet(f"""
+            QPushButton {{
                 background-color: transparent;
-                border: 2px solid #E0E0E0;
+                border: 1px solid {c['border_strong']};
                 border-radius: 10px;
-                color: #666666;
+                color: {c['text_muted']};
                 font-size: 13px;
                 font-weight: 600;
                 padding: 8px 16px;
-            }
-            QPushButton:hover {
+            }}
+            QPushButton:hover {{
                 border-color: #FF9800;
                 color: #FF9800;
-                background-color: rgba(255, 152, 0, 0.05);
-            }
+                background-color: rgba(255, 152, 0, 0.06);
+            }}
         """)
         self.skip_btn.setToolTip("Continue with already-indexed files only")
         self.skip_btn.clicked.connect(self._on_skip)
@@ -449,14 +451,16 @@ class EmptyFolderDialog(QDialog):
         self.setAttribute(Qt.WA_TranslucentBackground)
         
         # Main container
+        from app.ui.theme_manager import get_theme_colors
+        c = get_theme_colors()
         self.container = QFrame(self)
         self.container.setObjectName("emptyFolderContainer")
-        self.container.setStyleSheet("""
-            QFrame#emptyFolderContainer {
-                background-color: #FFFFFF;
+        self.container.setStyleSheet(f"""
+            QFrame#emptyFolderContainer {{
+                background-color: {c['surface']};
                 border-radius: 24px;
-                border: 1px solid #E0E0E0;
-            }
+                border: 1px solid {c['border']};
+            }}
         """)
         
         # Add drop shadow
@@ -484,20 +488,20 @@ class EmptyFolderDialog(QDialog):
         icon_label = QLabel("🗑️")
         icon_label.setStyleSheet("""
             font-size: 24px;
-            background-color: #FFF3E0;
+            background-color: rgba(255, 152, 0, 0.08);
             border-radius: 20px;
-            border: 2px solid #FFE0B2;
+            border: 1px solid rgba(255, 152, 0, 0.20);
         """)
         icon_label.setFixedSize(48, 48)
         icon_label.setAlignment(Qt.AlignCenter)
         header_layout.addWidget(icon_label)
         
         title_label = QLabel("Empty Folders Found")
-        title_label.setStyleSheet("""
+        title_label.setStyleSheet(f"""
             font-family: "Segoe UI", "SF Pro Display", sans-serif;
             font-size: 20px;
             font-weight: 700;
-            color: #1A1A2E;
+            color: {c['text']};
         """)
         header_layout.addWidget(title_label)
         header_layout.addStretch()
@@ -528,41 +532,42 @@ class EmptyFolderDialog(QDialog):
         
         # Description
         desc = QLabel("These folders are now empty. Select which ones to delete:")
-        desc.setStyleSheet("""
+        desc.setStyleSheet(f"""
             font-family: "Segoe UI", sans-serif;
             font-size: 13px;
-            color: #666666;
+            color: {c['text_muted']};
         """)
         layout.addWidget(desc)
         
         # Divider
         divider = QFrame()
         divider.setFixedHeight(1)
-        divider.setStyleSheet("background-color: #EEEEEE;")
+        divider.setStyleSheet(f"background-color: {c['border']};")
         layout.addWidget(divider)
         
         # Folder list with checkboxes
         self.folder_list = QListWidget()
-        self.folder_list.setStyleSheet("""
-            QListWidget {
-                border: 1px solid #E8DFFF;
+        self.folder_list.setStyleSheet(f"""
+            QListWidget {{
+                border: 1px solid {c['border']};
                 border-radius: 12px;
-                background-color: #FAFAFA;
+                background-color: {c['card']};
                 padding: 8px;
-            }
-            QListWidget::item {
+            }}
+            QListWidget::item {{
                 padding: 10px 12px;
                 border-radius: 8px;
                 font-family: "Segoe UI", sans-serif;
                 font-size: 13px;
-            }
-            QListWidget::item:hover {
-                background-color: #F5F0FF;
-            }
-            QListWidget::item:selected {
-                background-color: #E8DFFF;
-                color: #7C4DFF;
-            }
+                color: {c['text_muted']};
+            }}
+            QListWidget::item:hover {{
+                background-color: {c['input_bg']};
+            }}
+            QListWidget::item:selected {{
+                background-color: rgba(124, 77, 255, 0.12);
+                color: #B39DFF;
+            }}
         """)
         
         for folder_path in empty_folders:
@@ -588,20 +593,20 @@ class EmptyFolderDialog(QDialog):
         select_all_btn = QPushButton("Select All")
         select_all_btn.setMinimumHeight(36)
         select_all_btn.setCursor(Qt.PointingHandCursor)
-        select_all_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #F5F5F5;
-                color: #666666;
-                border: 1px solid #E0E0E0;
+        select_all_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {c['input_bg']};
+                color: {c['text_muted']};
+                border: 1px solid {c['border_strong']};
                 border-radius: 8px;
                 font-size: 12px;
                 padding: 6px 16px;
-            }
-            QPushButton:hover {
-                background-color: #E8DFFF;
+            }}
+            QPushButton:hover {{
+                background-color: rgba(124, 77, 255, 0.08);
                 border-color: #7C4DFF;
-                color: #7C4DFF;
-            }
+                color: #B39DFF;
+            }}
         """)
         select_all_btn.clicked.connect(self._select_all)
         selection_layout.addWidget(select_all_btn)
@@ -609,20 +614,20 @@ class EmptyFolderDialog(QDialog):
         deselect_all_btn = QPushButton("Deselect All")
         deselect_all_btn.setMinimumHeight(36)
         deselect_all_btn.setCursor(Qt.PointingHandCursor)
-        deselect_all_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #F5F5F5;
-                color: #666666;
-                border: 1px solid #E0E0E0;
+        deselect_all_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {c['input_bg']};
+                color: {c['text_muted']};
+                border: 1px solid {c['border_strong']};
                 border-radius: 8px;
                 font-size: 12px;
                 padding: 6px 16px;
-            }
-            QPushButton:hover {
-                background-color: #FFEBEE;
-                border-color: #EF9A9A;
-                color: #D32F2F;
-            }
+            }}
+            QPushButton:hover {{
+                background-color: rgba(211, 47, 47, 0.08);
+                border-color: #D32F2F;
+                color: #FF6B6B;
+            }}
         """)
         deselect_all_btn.clicked.connect(self._deselect_all)
         selection_layout.addWidget(deselect_all_btn)
@@ -637,21 +642,21 @@ class EmptyFolderDialog(QDialog):
         keep_all_btn = QPushButton("Keep All")
         keep_all_btn.setMinimumHeight(44)
         keep_all_btn.setCursor(Qt.PointingHandCursor)
-        keep_all_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #FFFFFF;
-                color: #666666;
-                border: 2px solid #E0E0E0;
+        keep_all_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {c['input_bg']};
+                color: {c['text_muted']};
+                border: 1px solid {c['border_strong']};
                 border-radius: 10px;
                 font-weight: 600;
                 font-size: 14px;
                 padding: 8px 24px;
-            }
-            QPushButton:hover {
-                background-color: #F5F5F5;
+            }}
+            QPushButton:hover {{
+                background-color: rgba(124, 77, 255, 0.08);
                 border-color: #7C4DFF;
-                color: #7C4DFF;
-            }
+                color: #B39DFF;
+            }}
         """)
         keep_all_btn.clicked.connect(self.reject)
         button_layout.addWidget(keep_all_btn)
@@ -735,6 +740,10 @@ class ModernConfirmDialog(QDialog):
         self.result_accepted = False
         self._drag_pos = None
         
+        # Get theme colors
+        from app.ui.theme_manager import get_theme_colors
+        c = get_theme_colors()
+        
         # Remove default window frame for custom styling
         self.setWindowFlags(self.windowFlags() | Qt.FramelessWindowHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
@@ -742,12 +751,12 @@ class ModernConfirmDialog(QDialog):
         # Main container with rounded corners and shadow
         self.container = QFrame(self)
         self.container.setObjectName("modernDialogContainer")
-        self.container.setStyleSheet("""
-            QFrame#modernDialogContainer {
-                background-color: #FFFFFF;
+        self.container.setStyleSheet(f"""
+            QFrame#modernDialogContainer {{
+                background-color: {c['surface']};
                 border-radius: 24px;
-                border: 1px solid #E0E0E0;
-            }
+                border: 1px solid {c['border']};
+            }}
         """)
         
         # Add subtle drop shadow effect
@@ -776,20 +785,20 @@ class ModernConfirmDialog(QDialog):
         icon_label = QLabel("✨")
         icon_label.setStyleSheet("""
             font-size: 26px;
-            background-color: #F3EEFF;
+            background-color: rgba(124, 77, 255, 0.08);
             border-radius: 22px;
-            border: 2px solid #E8DFFF;
+            border: 1px solid rgba(124, 77, 255, 0.20);
         """)
         icon_label.setFixedSize(52, 52)
         icon_label.setAlignment(Qt.AlignCenter)
         header_layout.addWidget(icon_label)
         
         title_label = QLabel(title)
-        title_label.setStyleSheet("""
+        title_label.setStyleSheet(f"""
             font-family: "Segoe UI", "SF Pro Display", sans-serif;
             font-size: 20px;
             font-weight: 700;
-            color: #1A1A2E;
+            color: {c['text']};
             letter-spacing: -0.3px;
         """)
         header_layout.addWidget(title_label)
@@ -823,17 +832,17 @@ class ModernConfirmDialog(QDialog):
         # Subtle divider line
         divider = QFrame()
         divider.setFixedHeight(1)
-        divider.setStyleSheet("background-color: #EEEEEE;")
+        divider.setStyleSheet(f"background-color: {c['border']};")
         layout.addWidget(divider)
         
         # Main message
         if message:
             msg_label = QLabel(message)
             msg_label.setWordWrap(True)
-            msg_label.setStyleSheet("""
+            msg_label.setStyleSheet(f"""
                 font-family: "Segoe UI", sans-serif;
                 font-size: 15px;
-                color: #444444;
+                color: {c['text_muted']};
                 line-height: 1.6;
             """)
             layout.addWidget(msg_label)
@@ -841,12 +850,12 @@ class ModernConfirmDialog(QDialog):
         # Details list (bullet points) - clean solid style
         if details:
             details_frame = QFrame()
-            details_frame.setStyleSheet("""
-                QFrame {
-                    background-color: #F8F8FA;
+            details_frame.setStyleSheet(f"""
+                QFrame {{
+                    background-color: {c['surface']};
                     border-radius: 16px;
-                    border: 1px solid #EEEEEE;
-                }
+                    border: 1px solid {c['border']};
+                }}
             """)
             details_layout = QVBoxLayout(details_frame)
             details_layout.setContentsMargins(20, 16, 20, 16)
@@ -863,10 +872,10 @@ class ModernConfirmDialog(QDialog):
                 detail_row.addWidget(dot)
                 
                 detail_label = QLabel(detail)
-                detail_label.setStyleSheet("""
+                detail_label.setStyleSheet(f"""
                     font-family: "Segoe UI", sans-serif;
                     font-size: 14px;
-                    color: #333333;
+                    color: {c['text']};
                     font-weight: 500;
                 """)
                 detail_row.addWidget(detail_label)
@@ -893,10 +902,10 @@ class ModernConfirmDialog(QDialog):
         if info_text:
             info_label = QLabel(info_text)
             info_label.setWordWrap(True)
-            info_label.setStyleSheet("""
+            info_label.setStyleSheet(f"""
                 font-family: "Segoe UI", sans-serif;
                 font-size: 13px;
-                color: #888888;
+                color: {c['text_muted']};
                 font-style: italic;
             """)
             layout.addWidget(info_label)
@@ -912,22 +921,22 @@ class ModernConfirmDialog(QDialog):
         no_btn.setMinimumHeight(46)
         no_btn.setMinimumWidth(120)
         no_btn.setCursor(Qt.PointingHandCursor)
-        no_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #FFFFFF;
-                color: #666666;
-                border: 2px solid #E8E8E8;
+        no_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {c['input_bg']};
+                color: {c['text_muted']};
+                border: 1px solid {c['border_strong']};
                 border-radius: 12px;
                 font-family: "Segoe UI", sans-serif;
                 font-weight: 600;
                 font-size: 14px;
                 padding: 10px 28px;
-            }
-            QPushButton:hover {
-                background-color: #FAFAFA;
-                border-color: #CCCCCC;
-                color: #444444;
-            }
+            }}
+            QPushButton:hover {{
+                background-color: {c['card']};
+                border-color: {c['text_muted']};
+                color: {c['text']};
+            }}
         """)
         no_btn.clicked.connect(self.reject)
         btn_layout.addWidget(no_btn)
@@ -1004,6 +1013,10 @@ class ModernInfoDialog(QDialog):
         self.setModal(True)
         self._drag_pos = None
         
+        # Get theme colors
+        from app.ui.theme_manager import get_theme_colors
+        c = get_theme_colors()
+        
         # Remove default window frame for custom styling
         self.setWindowFlags(self.windowFlags() | Qt.FramelessWindowHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
@@ -1011,12 +1024,12 @@ class ModernInfoDialog(QDialog):
         # Main container with rounded corners and shadow
         self.container = QFrame(self)
         self.container.setObjectName("modernInfoContainer")
-        self.container.setStyleSheet("""
-            QFrame#modernInfoContainer {
-                background-color: #FFFFFF;
+        self.container.setStyleSheet(f"""
+            QFrame#modernInfoContainer {{
+                background-color: {c['surface']};
                 border-radius: 24px;
-                border: 1px solid #E0E0E0;
-            }
+                border: 1px solid {c['border']};
+            }}
         """)
         
         # Add subtle drop shadow effect
@@ -1042,8 +1055,8 @@ class ModernInfoDialog(QDialog):
         header_layout.setSpacing(16)
         
         # Icon with appropriate color
-        icon_bg = "#FFF3E0" if is_warning else "#F3EEFF"
-        icon_border = "#FFE0B2" if is_warning else "#E8DFFF"
+        icon_bg = "rgba(255, 152, 0, 0.08)" if is_warning else "rgba(124, 77, 255, 0.08)"
+        icon_border = "rgba(255, 152, 0, 0.20)" if is_warning else "rgba(124, 77, 255, 0.20)"
         icon_label = QLabel(icon)
         icon_label.setStyleSheet(f"""
             font-size: 24px;
@@ -1056,11 +1069,11 @@ class ModernInfoDialog(QDialog):
         header_layout.addWidget(icon_label)
         
         title_label = QLabel(title)
-        title_label.setStyleSheet("""
+        title_label.setStyleSheet(f"""
             font-family: "Segoe UI", "SF Pro Display", sans-serif;
             font-size: 20px;
             font-weight: 700;
-            color: #1A1A2E;
+            color: {c['text']};
             letter-spacing: -0.3px;
         """)
         header_layout.addWidget(title_label)
@@ -1094,17 +1107,17 @@ class ModernInfoDialog(QDialog):
         # Subtle divider
         divider = QFrame()
         divider.setFixedHeight(1)
-        divider.setStyleSheet("background-color: #EEEEEE;")
+        divider.setStyleSheet(f"background-color: {c['border']};")
         layout.addWidget(divider)
         
         # Main message
         if message:
             msg_label = QLabel(message)
             msg_label.setWordWrap(True)
-            msg_label.setStyleSheet("""
+            msg_label.setStyleSheet(f"""
                 font-family: "Segoe UI", sans-serif;
                 font-size: 15px;
-                color: #444444;
+                color: {c['text_muted']};
                 line-height: 1.6;
             """)
             layout.addWidget(msg_label)
@@ -1112,12 +1125,12 @@ class ModernInfoDialog(QDialog):
         # Details list (bullet points)
         if details:
             details_frame = QFrame()
-            details_frame.setStyleSheet("""
-                QFrame {
-                    background-color: #F8F8FA;
+            details_frame.setStyleSheet(f"""
+                QFrame {{
+                    background-color: {c['surface']};
                     border-radius: 14px;
-                    border: 1px solid #EEEEEE;
-                }
+                    border: 1px solid {c['border']};
+                }}
             """)
             details_layout = QVBoxLayout(details_frame)
             details_layout.setContentsMargins(18, 14, 18, 14)
@@ -1134,10 +1147,10 @@ class ModernInfoDialog(QDialog):
                 
                 detail_label = QLabel(detail)
                 detail_label.setWordWrap(True)
-                detail_label.setStyleSheet("""
+                detail_label.setStyleSheet(f"""
                     font-family: "Segoe UI", sans-serif;
                     font-size: 14px;
-                    color: #555555;
+                    color: {c['text_muted']};
                 """)
                 detail_row.addWidget(detail_label)
                 detail_row.addStretch()
@@ -1150,10 +1163,10 @@ class ModernInfoDialog(QDialog):
         if info_text:
             info_label = QLabel(info_text)
             info_label.setWordWrap(True)
-            info_label.setStyleSheet("""
+            info_label.setStyleSheet(f"""
                 font-family: "Segoe UI", sans-serif;
                 font-size: 13px;
-                color: #888888;
+                color: {c['text_muted']};
                 font-style: italic;
             """)
             layout.addWidget(info_label)
@@ -1242,14 +1255,17 @@ class HistoryDialog(QDialog):
         self.setAttribute(Qt.WA_TranslucentBackground)
         
         # Main container
+        from app.ui.theme_manager import get_theme_colors
+        c = get_theme_colors()
+        self._theme_colors = c  # Store for use in other methods
         self.container = QFrame(self)
         self.container.setObjectName("historyDialogContainer")
-        self.container.setStyleSheet("""
-            QFrame#historyDialogContainer {
-                background-color: #FFFFFF;
+        self.container.setStyleSheet(f"""
+            QFrame#historyDialogContainer {{
+                background-color: {c['surface']};
                 border-radius: 24px;
-                border: 1px solid #E0E0E0;
-            }
+                border: 1px solid {c['border']};
+            }}
         """)
         
         # Add drop shadow
@@ -1277,20 +1293,20 @@ class HistoryDialog(QDialog):
         icon_label = QLabel("📋")
         icon_label.setStyleSheet("""
             font-size: 24px;
-            background-color: #F3EEFF;
+            background-color: rgba(124, 77, 255, 0.08);
             border-radius: 20px;
-            border: 2px solid #E8DFFF;
+            border: 1px solid rgba(124, 77, 255, 0.20);
         """)
         icon_label.setFixedSize(48, 48)
         icon_label.setAlignment(Qt.AlignCenter)
         header_layout.addWidget(icon_label)
         
         title_label = QLabel("Organization History")
-        title_label.setStyleSheet("""
+        title_label.setStyleSheet(f"""
             font-family: "Segoe UI", "SF Pro Display", sans-serif;
             font-size: 20px;
             font-weight: 700;
-            color: #1A1A2E;
+            color: {c['text']};
         """)
         header_layout.addWidget(title_label)
         header_layout.addStretch()
@@ -1322,7 +1338,7 @@ class HistoryDialog(QDialog):
         # Divider
         divider = QFrame()
         divider.setFixedHeight(1)
-        divider.setStyleSheet("background-color: #EEEEEE;")
+        divider.setStyleSheet(f"background-color: {c['border']};")
         layout.addWidget(divider)
         
         # History list container
@@ -1335,25 +1351,25 @@ class HistoryDialog(QDialog):
         scroll = QScrollArea()
         scroll.setWidget(self.history_list)
         scroll.setWidgetResizable(True)
-        scroll.setStyleSheet("""
-            QScrollArea {
+        scroll.setStyleSheet(f"""
+            QScrollArea {{
                 border: none;
                 background-color: transparent;
-            }
-            QScrollBar:vertical {
+            }}
+            QScrollBar:vertical {{
                 border: none;
-                background: #F5F5F5;
+                background: transparent;
                 width: 8px;
                 border-radius: 4px;
-            }
-            QScrollBar::handle:vertical {
-                background: #CCCCCC;
+            }}
+            QScrollBar::handle:vertical {{
+                background: {c['scrollbar_handle']};
                 border-radius: 4px;
                 min-height: 30px;
-            }
-            QScrollBar::handle:vertical:hover {
-                background: #AAAAAA;
-            }
+            }}
+            QScrollBar::handle:vertical:hover {{
+                background: #7C4DFF;
+            }}
         """)
         layout.addWidget(scroll, 1)
         
@@ -1367,20 +1383,20 @@ class HistoryDialog(QDialog):
         clear_btn = QPushButton("Clear History")
         clear_btn.setMinimumHeight(40)
         clear_btn.setCursor(Qt.PointingHandCursor)
-        clear_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #FFFFFF;
-                color: #999999;
-                border: 1px solid #E0E0E0;
+        clear_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {c['input_bg']};
+                color: {c['text_muted']};
+                border: 1px solid {c['border_strong']};
                 border-radius: 10px;
                 font-size: 13px;
                 padding: 8px 20px;
-            }
-            QPushButton:hover {
-                background-color: #FFF0F0;
-                border-color: #FFCCCC;
-                color: #CC6666;
-            }
+            }}
+            QPushButton:hover {{
+                background-color: rgba(211, 47, 47, 0.10);
+                border-color: rgba(211, 47, 47, 0.30);
+                color: #FF6B6B;
+            }}
         """)
         clear_btn.clicked.connect(self._clear_history)
         footer_layout.addWidget(clear_btn)
@@ -1412,15 +1428,16 @@ class HistoryDialog(QDialog):
         from app.core.apply import get_move_history
         
         history = get_move_history()
+        c = self._theme_colors
         
         if not history:
             # Show empty state
             empty_label = QLabel("No organization history yet")
             empty_label.setAlignment(Qt.AlignCenter)
-            empty_label.setStyleSheet("""
+            empty_label.setStyleSheet(f"""
                 font-family: "Segoe UI", sans-serif;
                 font-size: 15px;
-                color: #AAAAAA;
+                color: {c['text_muted']};
                 padding: 40px;
             """)
             self.history_layout.addWidget(empty_label)
@@ -1436,18 +1453,19 @@ class HistoryDialog(QDialog):
     def _add_history_item(self, item: dict):
         """Add a single history item to the list."""
         from datetime import datetime
+        c = self._theme_colors
         
         item_frame = QFrame()
-        item_frame.setStyleSheet("""
-            QFrame {
-                background-color: #FAFAFA;
+        item_frame.setStyleSheet(f"""
+            QFrame {{
+                background-color: {c['card']};
                 border-radius: 12px;
-                border: 1px solid #EEEEEE;
-            }
-            QFrame:hover {
-                background-color: #F5F0FF;
-                border-color: #E8DFFF;
-            }
+                border: 1px solid {c['border']};
+            }}
+            QFrame:hover {{
+                background-color: rgba(124, 77, 255, 0.06);
+                border-color: rgba(124, 77, 255, 0.15);
+            }}
         """)
         
         item_layout = QHBoxLayout(item_frame)
@@ -1473,11 +1491,11 @@ class HistoryDialog(QDialog):
             formatted_date = timestamp_str[:19] if timestamp_str else "Unknown date"
         
         date_label = QLabel(formatted_date)
-        date_label.setStyleSheet("""
+        date_label.setStyleSheet(f"""
             font-family: "Segoe UI", sans-serif;
             font-size: 14px;
             font-weight: 600;
-            color: #333333;
+            color: {c['text']};
             background: transparent;
             border: none;
         """)
@@ -1485,10 +1503,10 @@ class HistoryDialog(QDialog):
         
         files_count = item.get("successful_moves", item.get("total_files", 0))
         details_label = QLabel(f"{files_count} file(s) organized")
-        details_label.setStyleSheet("""
+        details_label.setStyleSheet(f"""
             font-family: "Segoe UI", sans-serif;
             font-size: 12px;
-            color: #888888;
+            color: {c['text_muted']};
             background: transparent;
             border: none;
         """)
@@ -1524,6 +1542,7 @@ class HistoryDialog(QDialog):
         """Show details of a specific organization operation in a scrollable dialog."""
         import json
         from pathlib import Path
+        c = self._theme_colors
         
         try:
             with open(log_file, 'r', encoding='utf-8') as f:
@@ -1546,12 +1565,12 @@ class HistoryDialog(QDialog):
             # Container
             container = QFrame(dialog)
             container.setObjectName("detailsContainer")
-            container.setStyleSheet("""
-                QFrame#detailsContainer {
-                    background-color: #FFFFFF;
+            container.setStyleSheet(f"""
+                QFrame#detailsContainer {{
+                    background-color: {c['surface']};
                     border-radius: 20px;
-                    border: 1px solid #E0E0E0;
-                }
+                    border: 1px solid {c['border']};
+                }}
             """)
             
             # Shadow
@@ -1577,13 +1596,13 @@ class HistoryDialog(QDialog):
             header.setSpacing(12)
             
             icon = QLabel("📋")
-            icon.setStyleSheet("font-size: 22px; background: #F3EEFF; border-radius: 18px; border: 2px solid #E8DFFF;")
+            icon.setStyleSheet("font-size: 22px; background: rgba(124, 77, 255, 0.12); border-radius: 18px; border: 1px solid rgba(124, 77, 255, 0.20);")
             icon.setFixedSize(44, 44)
             icon.setAlignment(Qt.AlignCenter)
             header.addWidget(icon)
             
             title = QLabel(f"Organized {len(moves)} file(s)")
-            title.setStyleSheet("font-family: 'Segoe UI'; font-size: 18px; font-weight: 700; color: #1A1A2E;")
+            title.setStyleSheet(f"font-family: 'Segoe UI'; font-size: 18px; font-weight: 700; color: {c['text']};")
             header.addWidget(title)
             header.addStretch()
             
@@ -1602,17 +1621,17 @@ class HistoryDialog(QDialog):
             # Divider
             divider = QFrame()
             divider.setFixedHeight(1)
-            divider.setStyleSheet("background: #EEEEEE;")
+            divider.setStyleSheet(f"background: {c['border']};")
             layout.addWidget(divider)
             
             # Scrollable file list
             scroll = QScrollArea()
             scroll.setWidgetResizable(True)
-            scroll.setStyleSheet("""
-                QScrollArea { border: none; background: transparent; }
-                QScrollBar:vertical { border: none; background: #F5F5F5; width: 6px; border-radius: 3px; }
-                QScrollBar::handle:vertical { background: #CCC; border-radius: 3px; min-height: 20px; }
-                QScrollBar::handle:vertical:hover { background: #AAA; }
+            scroll.setStyleSheet(f"""
+                QScrollArea {{ border: none; background: transparent; }}
+                QScrollBar:vertical {{ border: none; background: transparent; width: 6px; border-radius: 3px; }}
+                QScrollBar::handle:vertical {{ background: {c['scrollbar_handle']}; border-radius: 3px; min-height: 20px; }}
+                QScrollBar::handle:vertical:hover {{ background: #7C4DFF; }}
             """)
             
             list_widget = QWidget()
@@ -1626,9 +1645,9 @@ class HistoryDialog(QDialog):
                 to_folder = Path(move.get("to", "")).parent.name
                 
                 item = QLabel(f"📄 {from_name}  →  {to_folder}/")
-                item.setStyleSheet("""
-                    font-family: 'Segoe UI'; font-size: 13px; color: #444;
-                    padding: 8px 12px; background: #FAFAFA; border-radius: 8px;
+                item.setStyleSheet(f"""
+                    font-family: 'Segoe UI'; font-size: 13px; color: {c['text_muted']};
+                    padding: 8px 12px; background: {c['input_bg']}; border-radius: 8px;
                 """)
                 item.setWordWrap(True)
                 list_layout.addWidget(item)
@@ -1647,7 +1666,7 @@ class HistoryDialog(QDialog):
                     orig = r.get("original_name", "?")
                     new = r.get("new_name", "?")
                     rename_item = QLabel(f"  {orig}  →  {new}")
-                    rename_item.setStyleSheet("font-family: 'Segoe UI'; font-size: 12px; color: #666; padding: 4px 12px;")
+                    rename_item.setStyleSheet(f"font-family: 'Segoe UI'; font-size: 12px; color: {c['text_muted']}; padding: 4px 12px;")
                     list_layout.addWidget(rename_item)
             
             list_layout.addStretch()
@@ -1731,7 +1750,7 @@ class HistoryDialog(QDialog):
                 empty_label.setStyleSheet("""
                     font-family: "Segoe UI", sans-serif;
                     font-size: 15px;
-                    color: #AAAAAA;
+                    color: #7A7A90;
                     padding: 40px;
                 """)
                 self.history_layout.addWidget(empty_label)
@@ -1778,14 +1797,17 @@ class PinnedDialog(QDialog):
         self.setAttribute(Qt.WA_TranslucentBackground)
         
         # Main container
+        from app.ui.theme_manager import get_theme_colors
+        c = get_theme_colors()
+        self._theme_colors = c  # Store for use in other methods
         self.container = QFrame(self)
         self.container.setObjectName("pinnedDialogContainer")
-        self.container.setStyleSheet("""
-            QFrame#pinnedDialogContainer {
-                background-color: #FFFFFF;
+        self.container.setStyleSheet(f"""
+            QFrame#pinnedDialogContainer {{
+                background-color: {c['surface']};
                 border-radius: 24px;
-                border: 1px solid #E0E0E0;
-            }
+                border: 1px solid {c['border']};
+            }}
         """)
         
         # Add drop shadow
@@ -1813,20 +1835,20 @@ class PinnedDialog(QDialog):
         icon_label = QLabel("📌")
         icon_label.setStyleSheet("""
             font-size: 24px;
-            background-color: #F3EEFF;
+            background-color: rgba(124, 77, 255, 0.08);
             border-radius: 20px;
-            border: 2px solid #E8DFFF;
+            border: 1px solid rgba(124, 77, 255, 0.20);
         """)
         icon_label.setFixedSize(48, 48)
         icon_label.setAlignment(Qt.AlignCenter)
         header_layout.addWidget(icon_label)
         
         title_label = QLabel("Pinned Items")
-        title_label.setStyleSheet("""
+        title_label.setStyleSheet(f"""
             font-family: "Segoe UI", "SF Pro Display", sans-serif;
             font-size: 20px;
             font-weight: 700;
-            color: #1A1A2E;
+            color: {c['text']};
         """)
         header_layout.addWidget(title_label)
         header_layout.addStretch()
@@ -1857,17 +1879,17 @@ class PinnedDialog(QDialog):
         
         # Description
         desc = QLabel("Pinned files and folders will never be organized.")
-        desc.setStyleSheet("""
+        desc.setStyleSheet(f"""
             font-family: "Segoe UI", sans-serif;
             font-size: 13px;
-            color: #888888;
+            color: {c['text_muted']};
         """)
         layout.addWidget(desc)
         
         # Divider
         divider = QFrame()
         divider.setFixedHeight(1)
-        divider.setStyleSheet("background-color: #EEEEEE;")
+        divider.setStyleSheet(f"background-color: {c['border']};")
         layout.addWidget(divider)
         
         # Pinned items list container
@@ -1880,25 +1902,25 @@ class PinnedDialog(QDialog):
         scroll = QScrollArea()
         scroll.setWidget(self.pinned_list)
         scroll.setWidgetResizable(True)
-        scroll.setStyleSheet("""
-            QScrollArea {
+        scroll.setStyleSheet(f"""
+            QScrollArea {{
                 border: none;
                 background-color: transparent;
-            }
-            QScrollBar:vertical {
+            }}
+            QScrollBar:vertical {{
                 border: none;
-                background: #F5F5F5;
+                background: transparent;
                 width: 8px;
                 border-radius: 4px;
-            }
-            QScrollBar::handle:vertical {
-                background: #CCCCCC;
+            }}
+            QScrollBar::handle:vertical {{
+                background: {c['scrollbar_handle']};
                 border-radius: 4px;
                 min-height: 30px;
-            }
-            QScrollBar::handle:vertical:hover {
-                background: #AAAAAA;
-            }
+            }}
+            QScrollBar::handle:vertical:hover {{
+                background: #7C4DFF;
+            }}
         """)
         layout.addWidget(scroll, 1)
         
@@ -1914,16 +1936,16 @@ class PinnedDialog(QDialog):
         add_file_btn.setCursor(Qt.PointingHandCursor)
         add_file_btn.setStyleSheet("""
             QPushButton {
-                background-color: #F5F0FF;
+                background-color: rgba(124, 77, 255, 0.06);
                 color: #7C4DFF;
-                border: 1px solid #E8DFFF;
+                border: 1px solid rgba(124, 77, 255, 0.15);
                 border-radius: 10px;
                 font-size: 13px;
                 font-weight: 600;
                 padding: 8px 16px;
             }
             QPushButton:hover {
-                background-color: #E8DFFF;
+                background-color: rgba(124, 77, 255, 0.12);
                 border-color: #7C4DFF;
             }
         """)
@@ -1935,16 +1957,16 @@ class PinnedDialog(QDialog):
         add_folder_btn.setCursor(Qt.PointingHandCursor)
         add_folder_btn.setStyleSheet("""
             QPushButton {
-                background-color: #F5F0FF;
+                background-color: rgba(124, 77, 255, 0.06);
                 color: #7C4DFF;
-                border: 1px solid #E8DFFF;
+                border: 1px solid rgba(124, 77, 255, 0.15);
                 border-radius: 10px;
                 font-size: 13px;
                 font-weight: 600;
                 padding: 8px 16px;
             }
             QPushButton:hover {
-                background-color: #E8DFFF;
+                background-color: rgba(124, 77, 255, 0.12);
                 border-color: #7C4DFF;
             }
         """)
@@ -1961,20 +1983,20 @@ class PinnedDialog(QDialog):
         clear_btn = QPushButton("Unpin All")
         clear_btn.setMinimumHeight(40)
         clear_btn.setCursor(Qt.PointingHandCursor)
-        clear_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #FFFFFF;
-                color: #999999;
-                border: 1px solid #E0E0E0;
+        clear_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {c['input_bg']};
+                color: {c['text_muted']};
+                border: 1px solid {c['border_strong']};
                 border-radius: 10px;
                 font-size: 13px;
                 padding: 8px 20px;
-            }
-            QPushButton:hover {
-                background-color: #FFF0F0;
-                border-color: #FFCCCC;
-                color: #CC6666;
-            }
+            }}
+            QPushButton:hover {{
+                background-color: rgba(211, 47, 47, 0.10);
+                border-color: rgba(211, 47, 47, 0.30);
+                color: #FF6B6B;
+            }}
         """)
         clear_btn.clicked.connect(self._clear_all_pinned)
         footer_layout.addWidget(clear_btn)
@@ -2004,15 +2026,16 @@ class PinnedDialog(QDialog):
     def _load_pinned_items(self):
         """Load pinned items from settings."""
         pinned_paths = settings.get_pinned_paths()
+        c = self._theme_colors
         
         if not pinned_paths:
             # Show empty state
             empty_label = QLabel("No pinned items yet.\nPin files or folders to protect them from organization.")
             empty_label.setAlignment(Qt.AlignCenter)
-            empty_label.setStyleSheet("""
+            empty_label.setStyleSheet(f"""
                 font-family: "Segoe UI", sans-serif;
                 font-size: 14px;
-                color: #AAAAAA;
+                color: {c['text_muted']};
                 padding: 30px;
             """)
             self.pinned_layout.addWidget(empty_label)
@@ -2028,18 +2051,19 @@ class PinnedDialog(QDialog):
     def _add_pinned_item_row(self, path: str):
         """Add a single pinned item row."""
         from pathlib import Path
+        c = self._theme_colors
         
         item_frame = QFrame()
-        item_frame.setStyleSheet("""
-            QFrame {
-                background-color: #FAFAFA;
+        item_frame.setStyleSheet(f"""
+            QFrame {{
+                background-color: {c['card']};
                 border-radius: 12px;
-                border: 1px solid #EEEEEE;
-            }
-            QFrame:hover {
-                background-color: #F5F0FF;
-                border-color: #E8DFFF;
-            }
+                border: 1px solid {c['border']};
+            }}
+            QFrame:hover {{
+                background-color: rgba(124, 77, 255, 0.06);
+                border-color: rgba(124, 77, 255, 0.15);
+            }}
         """)
         
         item_layout = QHBoxLayout(item_frame)
@@ -2059,11 +2083,11 @@ class PinnedDialog(QDialog):
         info_layout.setSpacing(2)
         
         name_label = QLabel(p.name)
-        name_label.setStyleSheet("""
+        name_label.setStyleSheet(f"""
             font-family: "Segoe UI", sans-serif;
             font-size: 14px;
             font-weight: 600;
-            color: #333333;
+            color: {c['text']};
             background: transparent;
             border: none;
         """)
@@ -2074,10 +2098,10 @@ class PinnedDialog(QDialog):
         if len(parent_str) > 45:
             parent_str = "..." + parent_str[-42:]
         parent_label = QLabel(parent_str)
-        parent_label.setStyleSheet("""
+        parent_label.setStyleSheet(f"""
             font-family: "Segoe UI", sans-serif;
             font-size: 11px;
-            color: #999999;
+            color: {c['text_muted']};
             background: transparent;
             border: none;
         """)
@@ -2220,9 +2244,9 @@ class ApplyInstructionsDialog(QDialog):
         self.container.setObjectName("applyDialogContainer")
         self.container.setStyleSheet("""
             QFrame#applyDialogContainer {
-                background-color: #FFFFFF;
+                background-color: #111119;
                 border-radius: 20px;
-                border: 1px solid #E0E0E0;
+                border: 1px solid #1C1C28;
             }
         """)
         
@@ -2251,9 +2275,9 @@ class ApplyInstructionsDialog(QDialog):
         icon_label = QLabel("🔄")
         icon_label.setStyleSheet("""
             font-size: 24px;
-            background-color: #F3EEFF;
+            background-color: rgba(124, 77, 255, 0.08);
             border-radius: 20px;
-            border: 2px solid #E8DFFF;
+            border: 1px solid rgba(124, 77, 255, 0.20);
         """)
         icon_label.setFixedSize(44, 44)
         icon_label.setAlignment(Qt.AlignCenter)
@@ -2264,7 +2288,7 @@ class ApplyInstructionsDialog(QDialog):
             font-family: "Segoe UI", sans-serif;
             font-size: 18px;
             font-weight: 700;
-            color: #1A1A2E;
+            color: #E8E8F0;
         """)
         header_layout.addWidget(title_label)
         header_layout.addStretch()
@@ -2303,7 +2327,7 @@ class ApplyInstructionsDialog(QDialog):
         subtitle_label.setStyleSheet("""
             font-family: "Segoe UI", sans-serif;
             font-size: 13px;
-            color: #666666;
+            color: #7A7A90;
         """)
         layout.addWidget(subtitle_label)
         
@@ -2354,7 +2378,7 @@ class ApplyInstructionsDialog(QDialog):
             font-family: "Segoe UI", sans-serif;
             font-size: 14px;
             font-weight: 600;
-            color: {"#FFFFFF" if primary else "#333333"};
+            color: {"#FFFFFF" if primary else "#E8E8F0"};
             background: transparent;
         """)
         title_lbl.setAttribute(Qt.WA_TransparentForMouseEvents)
@@ -2364,7 +2388,7 @@ class ApplyInstructionsDialog(QDialog):
         subtitle_lbl.setStyleSheet(f"""
             font-family: "Segoe UI", sans-serif;
             font-size: 11px;
-            color: {"rgba(255,255,255,0.8)" if primary else "#888888"};
+            color: {"rgba(255,255,255,0.8)" if primary else "#7A7A90"};
             background: transparent;
         """)
         subtitle_lbl.setAttribute(Qt.WA_TransparentForMouseEvents)
@@ -2388,17 +2412,17 @@ class ApplyInstructionsDialog(QDialog):
         else:
             btn.setStyleSheet("""
                 QPushButton {
-                    background-color: #F8F8FA;
-                    border: 1px solid #E8E8E8;
+                    background-color: #111119;
+                    border: 1px solid #1C1C28;
                     border-radius: 12px;
                     text-align: left;
                 }
                 QPushButton:hover {
-                    background-color: #F0EEFF;
+                    background-color: rgba(124, 77, 255, 0.10);
                     border-color: #7C4DFF;
                 }
                 QPushButton:pressed {
-                    background-color: #E8E0FF;
+                    background-color: #1C1C28;
                 }
             """)
         
@@ -2439,39 +2463,41 @@ class WatchConfigDialog(QDialog):
         self.setMinimumWidth(650)
         self.setMinimumHeight(550)
         
-        # Set light theme for this dialog specifically as requested
-        self.setStyleSheet("""
-            QDialog {
-                background-color: #FFFFFF;
-                color: #1A1A1A;
-            }
-            QLabel {
-                color: #1A1A1A;
-            }
-            QScrollArea {
+        # Theme-aware styling
+        from app.ui.theme_manager import get_theme_colors
+        c = get_theme_colors()
+        self.setStyleSheet(f"""
+            QDialog {{
+                background-color: {c['bg']};
+                color: {c['text']};
+            }}
+            QLabel {{
+                color: {c['text']};
+            }}
+            QScrollArea {{
                 background: transparent;
                 border: none;
-            }
-            QScrollBar:vertical {
-                background: #F0F0F0;
-                width: 8px;
-                border-radius: 4px;
-            }
-            QScrollBar::handle:vertical {
-                background: #CCCCCC;
-                border-radius: 4px;
-            }
-            QLineEdit {
-                background-color: #FAFAFA;
-                border: 1px solid #E0E0E0;
+            }}
+            QScrollBar:vertical {{
+                background: transparent;
+                width: 6px;
+                border-radius: 3px;
+            }}
+            QScrollBar::handle:vertical {{
+                background: {c['scrollbar_handle']};
+                border-radius: 3px;
+            }}
+            QLineEdit {{
+                background-color: {c['bg']};
+                border: 1px solid {c['border']};
                 border-radius: 8px;
                 padding: 8px 12px;
-                color: #1A1A1A;
-            }
-            QLineEdit:focus {
+                color: {c['text']};
+            }}
+            QLineEdit:focus {{
                 border: 1px solid #7C4DFF;
-                background-color: #FFFFFF;
-            }
+                background-color: {c['card']};
+            }}
         """)
         
         # Track folder data: {path: instruction}
@@ -2487,6 +2513,12 @@ class WatchConfigDialog(QDialog):
         self._setup_ui()
         self._load_from_settings()
     
+    def showEvent(self, event):
+        """Apply dark/light title bar when dialog is shown."""
+        super().showEvent(event)
+        from app.ui.theme_manager import apply_titlebar_theme
+        apply_titlebar_theme(self)
+    
     def _setup_ui(self):
         """Setup the dialog UI."""
         layout = QVBoxLayout(self)
@@ -2497,15 +2529,17 @@ class WatchConfigDialog(QDialog):
         header_layout = QVBoxLayout()
         header_layout.setSpacing(6)
         
+        from app.ui.theme_manager import get_theme_colors as _gtc
+        _c = _gtc()
         header = QLabel("Watch & Auto-Organize Configuration")
-        header.setStyleSheet("font-size: 20px; font-weight: 700; color: #1A1A1A;")
+        header.setStyleSheet(f"font-size: 20px; font-weight: 700; color: {_c['text']};")
         header_layout.addWidget(header)
         
         subtitle = QLabel(
             "Add folders to watch for new files. Each folder can have its own organization instructions."
         )
         subtitle.setWordWrap(True)
-        subtitle.setStyleSheet("color: #666666; font-size: 14px;")
+        subtitle.setStyleSheet(f"color: {_c['text_muted']}; font-size: 14px;")
         header_layout.addWidget(subtitle)
         
         layout.addLayout(header_layout)
@@ -2552,13 +2586,13 @@ class WatchConfigDialog(QDialog):
         
         # Placeholder for when no folders
         self.no_folders_label = QLabel("No folders configured.\nClick '+ Add Folder' to start watching.")
-        self.no_folders_label.setStyleSheet("""
-            color: #999999;
+        self.no_folders_label.setStyleSheet(f"""
+            color: {_c['text_muted']};
             font-size: 14px;
             padding: 40px;
-            background: #F8F9FA;
+            background: {_c['surface']};
             border-radius: 12px;
-            border: 2px dashed #E0E0E0;
+            border: 2px dashed {_c['border_strong']};
         """)
         self.no_folders_label.setAlignment(Qt.AlignCenter)
         self.folders_layout.addWidget(self.no_folders_label)
@@ -2572,7 +2606,7 @@ class WatchConfigDialog(QDialog):
         line = QFrame()
         line.setFrameShape(QFrame.HLine)
         line.setFrameShadow(QFrame.Sunken)
-        line.setStyleSheet("background-color: #EEEEEE; border: none; max-height: 1px;")
+        line.setStyleSheet(f"background-color: {_c['border']}; border: none; max-height: 1px;")
         layout.addWidget(line)
         
         # Bottom Action buttons
@@ -2584,19 +2618,19 @@ class WatchConfigDialog(QDialog):
         cancel_btn.setMinimumHeight(44)
         cancel_btn.setMinimumWidth(100)
         cancel_btn.setCursor(Qt.PointingHandCursor)
-        cancel_btn.setStyleSheet("""
-            QPushButton {
+        cancel_btn.setStyleSheet(f"""
+            QPushButton {{
                 background-color: transparent;
-                color: #666666;
+                color: {_c['text_muted']};
                 border: none;
                 font-weight: 500;
                 font-size: 14px;
-            }
-            QPushButton:hover {
-                color: #1A1A1A;
-                background-color: #F5F5F5;
+            }}
+            QPushButton:hover {{
+                color: {_c['text']};
+                background-color: {_c['input_bg']};
                 border-radius: 8px;
-            }
+            }}
         """)
         cancel_btn.clicked.connect(self.reject)
         button_layout.addWidget(cancel_btn)
@@ -2659,17 +2693,21 @@ class WatchConfigDialog(QDialog):
         """Create a widget card for a folder."""
         folder_path = os.path.normpath(folder_path)
         
+        # Get theme colors
+        from app.ui.theme_manager import get_theme_colors
+        c = get_theme_colors()
+        
         # Store in data
         self.folder_data[folder_path] = instruction
         
         # Create card frame
         frame = QFrame()
-        frame.setStyleSheet("""
-            QFrame {
-                background-color: #F8F9FA;
-                border: 1px solid #E0E0E0;
+        frame.setStyleSheet(f"""
+            QFrame {{
+                background-color: {c['surface']};
+                border: 1px solid {c['border_strong']};
                 border-radius: 12px;
-            }
+            }}
         """)
         frame_layout = QVBoxLayout(frame)
         frame_layout.setSpacing(12)
@@ -2684,7 +2722,7 @@ class WatchConfigDialog(QDialog):
         header_row.addWidget(folder_icon)
         
         path_label = QLabel(folder_path)
-        path_label.setStyleSheet("font-weight: 600; font-size: 13px; color: #333333; border: none; background: transparent;")
+        path_label.setStyleSheet(f"font-weight: 600; font-size: 13px; color: {c['text']}; border: none; background: transparent;")
         path_label.setWordWrap(True)
         header_row.addWidget(path_label, 1)
         
@@ -2693,21 +2731,21 @@ class WatchConfigDialog(QDialog):
         remove_btn.setMinimumWidth(70)
         remove_btn.setCursor(Qt.PointingHandCursor)
         remove_btn.setToolTip("Remove this folder from auto-organize")
-        remove_btn.setStyleSheet("""
-            QPushButton {
+        remove_btn.setStyleSheet(f"""
+            QPushButton {{
                 background-color: transparent;
-                color: #999999;
-                border: 1px solid #DDDDDD;
+                color: {c['text_muted']};
+                border: 1px solid {c['border_strong']};
                 border-radius: 6px;
                 font-weight: 500;
                 font-size: 12px;
                 padding: 4px 10px;
-            }
-            QPushButton:hover {
-                background-color: #FFEBEE;
+            }}
+            QPushButton:hover {{
+                background-color: rgba(211, 47, 47, 0.12);
                 color: #D32F2F;
                 border-color: #D32F2F;
-            }
+            }}
         """)
         remove_btn.clicked.connect(lambda: self._remove_folder(folder_path))
         header_row.addWidget(remove_btn)
@@ -2719,7 +2757,7 @@ class WatchConfigDialog(QDialog):
         instruction_layout.setSpacing(6)
         
         instruction_label = QLabel("Organization Instruction (Optional)")
-        instruction_label.setStyleSheet("color: #666666; font-size: 11px; font-weight: 600; text-transform: uppercase; border: none; background: transparent;")
+        instruction_label.setStyleSheet(f"color: {c['text_muted']}; font-size: 11px; font-weight: 600; text-transform: uppercase; border: none; background: transparent;")
         instruction_layout.addWidget(instruction_label)
         
         # Input row with text field and mic button
@@ -2745,14 +2783,14 @@ class WatchConfigDialog(QDialog):
             QPushButton {
                 font-size: 11px;
                 font-weight: bold;
-                background-color: #F5F0FF;
+                background-color: rgba(124, 77, 255, 0.06);
                 border: 1px solid #7C4DFF;
                 border-radius: 6px;
                 color: #7C4DFF;
                 padding: 0px;
             }
             QPushButton:hover {
-                background-color: #EDE7FF;
+                background-color: rgba(124, 77, 255, 0.10);
             }
         """)
         mic_button.clicked.connect(lambda checked, fp=folder_path: self._toggle_folder_voice(fp))
@@ -2911,14 +2949,14 @@ class WatchConfigDialog(QDialog):
                     QPushButton {
                         font-size: 11px;
                         font-weight: bold;
-                        background-color: #F5F0FF;
+                        background-color: rgba(124, 77, 255, 0.06);
                         border: 1px solid #7C4DFF;
                         border-radius: 6px;
                         color: #7C4DFF;
                         padding: 0px;
                     }
                     QPushButton:hover {
-                        background-color: #EDE7FF;
+                        background-color: rgba(124, 77, 255, 0.10);
                     }
                 """)
                 mic_btn.setToolTip("Click to speak your instruction")
@@ -2956,6 +2994,11 @@ class OrganizePage(QWidget):
         self._init_auto_watcher()
         
         self.setup_ui()
+        
+        # Apply theme-aware styles and connect to theme changes
+        from app.ui.theme_manager import theme_manager
+        self._apply_theme_styles(theme_manager.current_theme)
+        theme_manager.theme_changed.connect(self._apply_theme_styles)
         
         # Check auto-start after UI is ready
         QTimer.singleShot(500, self._check_auto_start)
@@ -3016,7 +3059,7 @@ class OrganizePage(QWidget):
             QPushButton {
                 background-color: #7C4DFF;
                 color: white;
-                border: 2px solid #7C4DFF;
+                border: 1px solid #7C4DFF;
                 border-top-left-radius: 12px;
                 border-bottom-left-radius: 12px;
                 border-top-right-radius: 0px;
@@ -3030,13 +3073,14 @@ class OrganizePage(QWidget):
                 color: white;
             }
             QPushButton:!checked {
-                background-color: #FFFFFF;
-                color: #7C4DFF;
-                border: 2px solid #E0E0E0;
+                background-color: #16161F;
+                color: #7A7A90;
+                border: 1px solid #252535;
             }
             QPushButton:!checked:hover {
-                background-color: rgba(124, 77, 255, 0.05);
-                border-color: #7C4DFF;
+                background-color: rgba(124, 77, 255, 0.06);
+                border-color: rgba(124, 77, 255, 0.30);
+                color: #B39DFF;
             }
         """)
         tab_container.addWidget(self.tab_organize_now)
@@ -3049,9 +3093,9 @@ class OrganizePage(QWidget):
         self.tab_auto_organize.setChecked(False)
         self.tab_auto_organize.setStyleSheet("""
             QPushButton {
-                background-color: #FFFFFF;
-                color: #7C4DFF;
-                border: 2px solid #E0E0E0;
+                background-color: #16161F;
+                color: #7A7A90;
+                border: 1px solid #252535;
                 border-top-right-radius: 12px;
                 border-bottom-right-radius: 12px;
                 border-top-left-radius: 0px;
@@ -3066,12 +3110,13 @@ class OrganizePage(QWidget):
                 border-color: #7C4DFF;
             }
             QPushButton:!checked {
-                background-color: #FFFFFF;
-                color: #7C4DFF;
+                background-color: #16161F;
+                color: #7A7A90;
             }
             QPushButton:!checked:hover {
-                background-color: rgba(124, 77, 255, 0.05);
-                border-color: #7C4DFF;
+                background-color: rgba(124, 77, 255, 0.06);
+                border-color: rgba(124, 77, 255, 0.30);
+                color: #B39DFF;
             }
         """)
         tab_container.addWidget(self.tab_auto_organize)
@@ -3085,7 +3130,8 @@ class OrganizePage(QWidget):
         self.content_stack = QStackedWidget()
         
         # ----- PAGE 0: Organize Now -----
-        organize_now_page = QWidget()
+        self.organize_now_page = QWidget()
+        organize_now_page = self.organize_now_page
         organize_now_layout = QVBoxLayout(organize_now_page)
         organize_now_layout.setContentsMargins(0, 0, 0, 0)
         organize_now_layout.setSpacing(20)
@@ -3095,8 +3141,8 @@ class OrganizePage(QWidget):
         self.instruction_card.setObjectName("organizeCard")
         self.instruction_card.setStyleSheet("""
             QFrame#organizeCard {
-                background-color: rgba(124, 77, 255, 0.06);
-                border: 2px dashed rgba(124, 77, 255, 0.5);
+                background-color: #111119;
+                border: 1px solid #1C1C28;
                 border-radius: 20px;
                 padding: 24px;
             }
@@ -3123,17 +3169,17 @@ class OrganizePage(QWidget):
             QLineEdit {
                 font-size: 15px;
                 padding: 12px 16px;
-                background-color: #FFFFFF;
-                border: 2px solid #E0E0E0;
+                background-color: #0F0F1A;
+                border: 1px solid #1C1C28;
                 border-radius: 12px;
-                color: #1A1A1A;
+                color: #E8E8F0;
             }
             QLineEdit:focus {
-                border: 2px solid #7C4DFF;
-                background-color: #FFFFFF;
+                border: 1px solid #7C4DFF;
+                background-color: #12121E;
             }
             QLineEdit::placeholder {
-                color: #999999;
+                color: #4A4A5A;
             }
         """)
         self.instruction_input.textChanged.connect(self._update_generate_button)
@@ -3149,18 +3195,18 @@ class OrganizePage(QWidget):
         self.mic_button.setStyleSheet("""
             QPushButton {
                 font-size: 18px;
-                background-color: #FFFFFF;
-                border: 2px solid #E0E0E0;
+                background-color: #16161F;
+                border: 1px solid #1C1C28;
                 border-radius: 12px;
-                color: #1A1A1A;
+                color: #E8E8F0;
                 padding: 0px;
             }
             QPushButton:hover {
-                background-color: rgba(124, 77, 255, 0.05);
+                background-color: rgba(124, 77, 255, 0.08);
                 border-color: #7C4DFF;
             }
             QPushButton:pressed {
-                background-color: rgba(124, 77, 255, 0.1);
+                background-color: rgba(124, 77, 255, 0.12);
             }
         """)
         self.mic_button.clicked.connect(self._toggle_voice_recording)
@@ -3172,12 +3218,12 @@ class OrganizePage(QWidget):
         self.voice_worker = None
         self.is_recording_voice = False
         
-        examples_label = QLabel(
+        self._examples_label = QLabel(
             "💡 Examples: Organize by file type, Group photos by date, Sort by topic"
         )
-        examples_label.setStyleSheet("color: #808080; font-size: 12px; background: transparent;")
-        examples_label.setWordWrap(True)
-        instruction_layout.addWidget(examples_label)
+        self._examples_label.setStyleSheet("color: #4A4A5A; font-size: 12px; background: transparent;")
+        self._examples_label.setWordWrap(True)
+        instruction_layout.addWidget(self._examples_label)
         
         organize_now_layout.addWidget(self.instruction_card)
         
@@ -3186,8 +3232,8 @@ class OrganizePage(QWidget):
         self.dest_card.setObjectName("organizeCard")
         self.dest_card.setStyleSheet("""
             QFrame#organizeCard {
-                background-color: rgba(124, 77, 255, 0.06);
-                border: 2px dashed rgba(124, 77, 255, 0.5);
+                background-color: #111119;
+                border: 1px solid #1C1C28;
                 border-radius: 20px;
             }
         """)
@@ -3207,7 +3253,7 @@ class OrganizePage(QWidget):
         dest_info.addWidget(dest_title)
         
         self.dest_label = QLabel("Select where organized files will be moved...")
-        self.dest_label.setStyleSheet("color: #808080; font-size: 13px; background: transparent;")
+        self.dest_label.setStyleSheet("color: #7A7A90; font-size: 13px; background: transparent;")
         self.dest_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         dest_info.addWidget(self.dest_label)
         
@@ -3221,14 +3267,15 @@ class OrganizePage(QWidget):
             QPushButton {
                 background-color: transparent;
                 color: #7C4DFF;
-                border: 2px solid #7C4DFF;
+                border: 1px solid rgba(124, 77, 255, 0.30);
                 border-radius: 10px;
                 font-size: 14px;
                 font-weight: 600;
                 padding: 8px 16px;
             }
             QPushButton:hover {
-                background-color: rgba(124, 77, 255, 0.1);
+                background-color: rgba(124, 77, 255, 0.08);
+                border-color: #7C4DFF;
             }
         """)
         self.dest_button.clicked.connect(self.select_destination)
@@ -3247,9 +3294,9 @@ class OrganizePage(QWidget):
         self.generate_button.setCursor(Qt.PointingHandCursor)
         self.generate_button.setStyleSheet("""
             QPushButton {
-                background-color: rgba(124, 77, 255, 0.1);
+                background-color: rgba(124, 77, 255, 0.08);
                 color: #7C4DFF;
-                border: 2px solid #7C4DFF;
+                border: 1px solid rgba(124, 77, 255, 0.35);
                 border-radius: 12px;
                 font-weight: 700;
                 font-size: 15px;
@@ -3257,11 +3304,12 @@ class OrganizePage(QWidget):
             QPushButton:hover {
                 background-color: #7C4DFF;
                 color: white;
+                border-color: #7C4DFF;
             }
             QPushButton:disabled {
-                background-color: rgba(124, 77, 255, 0.1);
-                border: 2px solid #7C4DFF;
-                color: #7C4DFF;
+                background-color: #16161F;
+                border: 1px solid #1C1C28;
+                color: #4A4A5A;
             }
         """)
         self.generate_button.clicked.connect(self.generate_plan)
@@ -3274,9 +3322,9 @@ class OrganizePage(QWidget):
         self.apply_button.setCursor(Qt.PointingHandCursor)
         self.apply_button.setStyleSheet("""
             QPushButton {
-                background-color: rgba(76, 175, 80, 0.1);
+                background-color: rgba(76, 175, 80, 0.08);
                 color: #4CAF50;
-                border: 2px solid #4CAF50;
+                border: 1px solid rgba(76, 175, 80, 0.35);
                 border-radius: 12px;
                 font-weight: 700;
                 font-size: 15px;
@@ -3284,11 +3332,12 @@ class OrganizePage(QWidget):
             QPushButton:hover {
                 background-color: #4CAF50;
                 color: white;
+                border-color: #4CAF50;
             }
             QPushButton:disabled {
-                background-color: transparent;
-                border-color: #3A3A3A;
-                color: #606060;
+                background-color: #16161F;
+                border-color: #1C1C28;
+                color: #4A4A5A;
             }
         """)
         self.apply_button.clicked.connect(self.apply_organization)
@@ -3299,15 +3348,15 @@ class OrganizePage(QWidget):
         self.clear_button.setCursor(Qt.PointingHandCursor)
         self.clear_button.setStyleSheet("""
             QPushButton {
-                background-color: #FFFFFF;
+                background-color: transparent;
                 color: #7C4DFF;
-                border: 2px solid #7C4DFF;
+                border: 1px solid rgba(124, 77, 255, 0.30);
                 border-radius: 12px;
                 font-weight: 600;
                 font-size: 15px;
             }
             QPushButton:hover {
-                background-color: #F3EEFF;
+                background-color: rgba(124, 77, 255, 0.08);
             }
         """)
         self.clear_button.clicked.connect(self.clear_plan)
@@ -3321,22 +3370,22 @@ class OrganizePage(QWidget):
         self.undo_button.setToolTip("Undo the last organization (move files back)")
         self.undo_button.setStyleSheet("""
             QPushButton {
-                background-color: #FFFFFF;
+                background-color: transparent;
                 color: #9575FF;
-                border: 2px solid #9575FF;
+                border: 1px solid rgba(149, 117, 255, 0.30);
                 border-radius: 12px;
                 font-weight: 600;
                 font-size: 15px;
             }
             QPushButton:hover {
-                background-color: #F3EEFF;
-                color: #7C4DFF;
+                background-color: rgba(124, 77, 255, 0.08);
+                color: #B39DFF;
                 border-color: #7C4DFF;
             }
             QPushButton:disabled {
-                background-color: #FAFAFA;
-                border-color: #E8E8E8;
-                color: #CCCCCC;
+                background-color: #16161F;
+                border-color: #1C1C28;
+                color: #4A4A5A;
             }
         """)
         self.undo_button.clicked.connect(self.undo_last_organization)
@@ -3350,17 +3399,17 @@ class OrganizePage(QWidget):
         self.history_button.setToolTip("View past organization operations")
         self.history_button.setStyleSheet("""
             QPushButton {
-                background-color: #FFFFFF;
-                color: #666666;
-                border: 2px solid #E0E0E0;
+                background-color: transparent;
+                color: #7A7A90;
+                border: 1px solid #252535;
                 border-radius: 12px;
                 font-weight: 600;
                 font-size: 15px;
             }
             QPushButton:hover {
-                background-color: #F5F5F5;
+                background-color: rgba(124, 77, 255, 0.06);
                 border-color: #7C4DFF;
-                color: #7C4DFF;
+                color: #B39DFF;
             }
         """)
         self.history_button.clicked.connect(self._show_history_dialog)
@@ -3374,17 +3423,17 @@ class OrganizePage(QWidget):
         self.pinned_button.setToolTip("View and manage pinned files/folders that won't be organized")
         self.pinned_button.setStyleSheet("""
             QPushButton {
-                background-color: #FFFFFF;
-                color: #666666;
-                border: 2px solid #E0E0E0;
+                background-color: transparent;
+                color: #7A7A90;
+                border: 1px solid #252535;
                 border-radius: 12px;
                 font-weight: 600;
                 font-size: 15px;
             }
             QPushButton:hover {
-                background-color: #F5F5F5;
+                background-color: rgba(124, 77, 255, 0.06);
                 border-color: #7C4DFF;
-                color: #7C4DFF;
+                color: #B39DFF;
             }
         """)
         self.pinned_button.clicked.connect(self._show_pinned_dialog)
@@ -3396,18 +3445,18 @@ class OrganizePage(QWidget):
         self.edit_inputs_button.setCursor(Qt.PointingHandCursor)
         self.edit_inputs_button.setStyleSheet("""
             QPushButton {
-                background-color: #FFFFFF;
-                color: #666666;
-                border: 2px solid #E0E0E0;
+                background-color: transparent;
+                color: #7A7A90;
+                border: 1px solid #252535;
                 border-radius: 12px;
                 font-weight: 600;
                 font-size: 15px;
                 padding: 0px 20px;
             }
             QPushButton:hover {
-                background-color: #F5F5F5;
+                background-color: rgba(124, 77, 255, 0.06);
                 border-color: #7C4DFF;
-                color: #7C4DFF;
+                color: #B39DFF;
             }
         """)
         self.edit_inputs_button.clicked.connect(self._show_input_cards)
@@ -3426,26 +3475,26 @@ class OrganizePage(QWidget):
         action_widget.setLayout(action_layout)
         action_widget.setStyleSheet("background: transparent;")
         
-        action_scroll = QScrollArea()
-        action_scroll.setWidget(action_widget)
-        action_scroll.setWidgetResizable(True)
-        action_scroll.setFixedHeight(70)  # Fixed height for the button row + scrollbar space
-        action_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        action_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        action_scroll.setStyleSheet("""
+        self._action_scroll = QScrollArea()
+        self._action_scroll.setWidget(action_widget)
+        self._action_scroll.setWidgetResizable(True)
+        self._action_scroll.setFixedHeight(70)  # Fixed height for the button row + scrollbar space
+        self._action_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self._action_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._action_scroll.setStyleSheet("""
             QScrollArea {
                 border: none;
                 background: transparent;
             }
             QScrollBar:horizontal {
                 border: none;
-                background: #F0F0F0;
+                background: #1C1C28;
                 height: 8px;
                 border-radius: 4px;
                 margin-top: 4px;
             }
             QScrollBar::handle:horizontal {
-                background: #C0C0C0;
+                background: #252535;
                 border-radius: 4px;
                 min-width: 40px;
             }
@@ -3457,7 +3506,7 @@ class OrganizePage(QWidget):
             }
         """)
         
-        organize_now_layout.addWidget(action_scroll)
+        organize_now_layout.addWidget(self._action_scroll)
         
         # Progress and Status
         self.progress_bar = QProgressBar()
@@ -3466,7 +3515,7 @@ class OrganizePage(QWidget):
         organize_now_layout.addWidget(self.progress_bar)
         
         self.status_label = QLabel("")
-        self.status_label.setStyleSheet("color: #888; font-style: italic; font-size: 13px;")
+        self.status_label.setStyleSheet("color: #7A7A90; font-style: italic; font-size: 13px;")
         organize_now_layout.addWidget(self.status_label)
 
         # Results Area (Splitter: Tree + Details) - Hidden until plan is generated
@@ -3514,7 +3563,7 @@ class OrganizePage(QWidget):
             }
             QTreeWidget::item {
                 height: 38px;
-                color: #333333;
+                color: #E8E8F0;
                 border-radius: 10px;
                 padding-left: 8px;
                 margin: 2px 0px;
@@ -3551,7 +3600,7 @@ class OrganizePage(QWidget):
             font-family: "Segoe UI", sans-serif;
             font-size: 13px;
             font-weight: 500;
-            color: #888888;
+            color: #7A7A90;
             padding: 4px 0px;
         """)
         self.plan_summary_label.setVisible(False)
@@ -3563,7 +3612,7 @@ class OrganizePage(QWidget):
         self.existing_folders_note.setStyleSheet("""
             font-family: "Segoe UI", sans-serif;
             font-size: 12px;
-            color: #999999;
+            color: #4A4A5A;
             font-style: italic;
             padding: 2px 0px;
         """)
@@ -3611,7 +3660,8 @@ class OrganizePage(QWidget):
         self.content_stack.addWidget(organize_now_page)
         
         # ----- PAGE 1: Auto-Organize -----
-        auto_organize_page = QWidget()
+        self.auto_organize_page = QWidget()
+        auto_organize_page = self.auto_organize_page
         auto_organize_layout = QVBoxLayout(auto_organize_page)
         auto_organize_layout.setContentsMargins(0, 0, 0, 0)
         auto_organize_layout.setSpacing(20)
@@ -3638,16 +3688,16 @@ class OrganizePage(QWidget):
     def _create_auto_organize_section(self, parent_layout):
         """Create the Watch & Auto-Organize section matching app theme."""
         # Main card container
-        watch_card = QFrame()
-        watch_card.setObjectName("watchAutoCard")
-        watch_card.setStyleSheet("""
+        self.watch_card = QFrame()
+        self.watch_card.setObjectName("watchAutoCard")
+        self.watch_card.setStyleSheet("""
             QFrame#watchAutoCard {
-                background-color: rgba(124, 77, 255, 0.06);
-                border: 2px dashed rgba(124, 77, 255, 0.5);
+                background-color: #111119;
+                border: 1px solid #1C1C28;
                 border-radius: 20px;
             }
         """)
-        watch_layout = QVBoxLayout(watch_card)
+        watch_layout = QVBoxLayout(self.watch_card)
         watch_layout.setSpacing(12)
         watch_layout.setContentsMargins(24, 24, 24, 24)
         
@@ -3666,9 +3716,9 @@ class OrganizePage(QWidget):
         watch_title.setStyleSheet("font-size: 18px; font-weight: 600; color: #7C4DFF; background: transparent;")
         header_info.addWidget(watch_title)
         
-        watch_desc = QLabel("Monitor folders and organize new files automatically")
-        watch_desc.setStyleSheet("color: #808080; font-size: 13px; background: transparent;")
-        header_info.addWidget(watch_desc)
+        self._watch_desc = QLabel("Monitor folders and organize new files automatically")
+        self._watch_desc.setStyleSheet("color: #7A7A90; font-size: 13px; background: transparent;")
+        header_info.addWidget(self._watch_desc)
         
         header_row.addLayout(header_info, 1)
         watch_layout.addLayout(header_row)
@@ -3683,7 +3733,7 @@ class OrganizePage(QWidget):
         self.watch_folder_label = QLabel("📁 No folders configured")
         self.watch_folder_label.setStyleSheet("""
             font-size: 13px; 
-            color: #555555; 
+            color: #7A7A90; 
             background: transparent;
             padding: 4px 0;
         """)
@@ -3702,14 +3752,15 @@ class OrganizePage(QWidget):
             QPushButton {
                 background-color: transparent;
                 color: #7C4DFF;
-                border: 2px solid #7C4DFF;
+                border: 1px solid rgba(124, 77, 255, 0.30);
                 border-radius: 12px;
                 font-size: 14px;
                 font-weight: 600;
                 padding: 0 16px;
             }
             QPushButton:hover {
-                background-color: rgba(124, 77, 255, 0.1);
+                background-color: rgba(124, 77, 255, 0.08);
+                border-color: #7C4DFF;
             }
         """)
         self.watch_config_btn.clicked.connect(self._open_watch_config)
@@ -3748,11 +3799,289 @@ class OrganizePage(QWidget):
         self.watch_summary_label = QLabel("")
         self.watch_summary_label.setVisible(False)
         
-        parent_layout.addWidget(watch_card)
+        parent_layout.addWidget(self.watch_card)
         
         # Initial UI update
         self._update_watch_summary()
     
+    def _apply_theme_styles(self, theme=None):
+        """Re-apply all theme-dependent inline styles for the current theme."""
+        from app.ui.theme_manager import get_theme_colors
+        c = get_theme_colors(theme)
+
+        # ---- Cards ----
+        self.instruction_card.setStyleSheet(f"""
+            QFrame#organizeCard {{
+                background-color: {c['surface']};
+                border: 1px solid {c['border']};
+                border-radius: 20px;
+                padding: 24px;
+            }}
+        """)
+        self.dest_card.setStyleSheet(f"""
+            QFrame#organizeCard {{
+                background-color: {c['surface']};
+                border: 1px solid {c['border']};
+                border-radius: 20px;
+            }}
+        """)
+        self.watch_card.setStyleSheet(f"""
+            QFrame#watchAutoCard {{
+                background-color: {c['surface']};
+                border: 1px solid {c['border']};
+                border-radius: 20px;
+            }}
+        """)
+
+        # ---- Inputs ----
+        self.instruction_input.setStyleSheet(f"""
+            QLineEdit {{
+                font-size: 15px;
+                padding: 12px 16px;
+                background-color: {c['bg']};
+                border: 1px solid {c['border']};
+                border-radius: 12px;
+                color: {c['text']};
+            }}
+            QLineEdit:focus {{
+                border: 1px solid #7C4DFF;
+                background-color: {c['card']};
+            }}
+            QLineEdit::placeholder {{
+                color: {c['text_disabled']};
+            }}
+        """)
+
+        # ---- Mic button ----
+        self.mic_button.setStyleSheet(f"""
+            QPushButton {{
+                font-size: 18px;
+                background-color: {c['card']};
+                border: 1px solid {c['border']};
+                border-radius: 12px;
+                color: {c['text']};
+                padding: 0px;
+            }}
+            QPushButton:hover {{
+                background-color: rgba(124, 77, 255, 0.08);
+                border-color: #7C4DFF;
+            }}
+            QPushButton:pressed {{
+                background-color: rgba(124, 77, 255, 0.12);
+            }}
+        """)
+
+        # ---- Tab buttons ----
+        self.tab_organize_now.setStyleSheet(f"""
+            QPushButton {{
+                background-color: #7C4DFF;
+                color: white;
+                border: 1px solid #7C4DFF;
+                border-top-left-radius: 12px;
+                border-bottom-left-radius: 12px;
+                border-top-right-radius: 0px;
+                border-bottom-right-radius: 0px;
+                font-weight: 600;
+                font-size: 14px;
+                padding: 10px 20px;
+            }}
+            QPushButton:checked {{
+                background-color: #7C4DFF;
+                color: white;
+            }}
+            QPushButton:!checked {{
+                background-color: {c['tab_unchecked_bg']};
+                color: {c['tab_unchecked_text']};
+                border: 1px solid {c['tab_unchecked_border']};
+            }}
+            QPushButton:!checked:hover {{
+                background-color: rgba(124, 77, 255, 0.06);
+                border-color: rgba(124, 77, 255, 0.30);
+                color: #B39DFF;
+            }}
+        """)
+        self.tab_auto_organize.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {c['tab_unchecked_bg']};
+                color: {c['tab_unchecked_text']};
+                border: 1px solid {c['tab_unchecked_border']};
+                border-top-right-radius: 12px;
+                border-bottom-right-radius: 12px;
+                border-top-left-radius: 0px;
+                border-bottom-left-radius: 0px;
+                font-weight: 600;
+                font-size: 14px;
+                padding: 10px 20px;
+            }}
+            QPushButton:checked {{
+                background-color: #7C4DFF;
+                color: white;
+                border-color: #7C4DFF;
+            }}
+            QPushButton:!checked {{
+                background-color: {c['tab_unchecked_bg']};
+                color: {c['tab_unchecked_text']};
+            }}
+            QPushButton:!checked:hover {{
+                background-color: rgba(124, 77, 255, 0.06);
+                border-color: rgba(124, 77, 255, 0.30);
+                color: #B39DFF;
+            }}
+        """)
+
+        # ---- Generate button ----
+        self.generate_button.setStyleSheet(f"""
+            QPushButton {{
+                background-color: rgba(124, 77, 255, 0.08);
+                color: #7C4DFF;
+                border: 1px solid rgba(124, 77, 255, 0.35);
+                border-radius: 12px;
+                font-weight: 700;
+                font-size: 15px;
+            }}
+            QPushButton:hover {{
+                background-color: #7C4DFF;
+                color: white;
+                border-color: #7C4DFF;
+            }}
+            QPushButton:disabled {{
+                background-color: {c['card']};
+                border: 1px solid {c['border']};
+                color: {c['text_disabled']};
+            }}
+        """)
+
+        # ---- Apply button ----
+        self.apply_button.setStyleSheet(f"""
+            QPushButton {{
+                background-color: rgba(76, 175, 80, 0.08);
+                color: #4CAF50;
+                border: 1px solid rgba(76, 175, 80, 0.35);
+                border-radius: 12px;
+                font-weight: 700;
+                font-size: 15px;
+            }}
+            QPushButton:hover {{
+                background-color: #4CAF50;
+                color: white;
+                border-color: #4CAF50;
+            }}
+            QPushButton:disabled {{
+                background-color: {c['card']};
+                border-color: {c['border']};
+                color: {c['text_disabled']};
+            }}
+        """)
+
+        # ---- Undo button ----
+        self.undo_button.setStyleSheet(f"""
+            QPushButton {{
+                background-color: transparent;
+                color: #9575FF;
+                border: 1px solid rgba(149, 117, 255, 0.30);
+                border-radius: 12px;
+                font-weight: 600;
+                font-size: 15px;
+            }}
+            QPushButton:hover {{
+                background-color: rgba(124, 77, 255, 0.08);
+                color: #B39DFF;
+                border-color: #7C4DFF;
+            }}
+            QPushButton:disabled {{
+                background-color: {c['card']};
+                border-color: {c['border']};
+                color: {c['text_disabled']};
+            }}
+        """)
+
+        # ---- History, Pinned, Edit buttons ----
+        outline_btn_style = f"""
+            QPushButton {{
+                background-color: transparent;
+                color: {c['text_muted']};
+                border: 1px solid {c['border_strong']};
+                border-radius: 12px;
+                font-weight: 600;
+                font-size: 15px;
+            }}
+            QPushButton:hover {{
+                background-color: rgba(124, 77, 255, 0.06);
+                border-color: #7C4DFF;
+                color: #B39DFF;
+            }}
+        """
+        self.history_button.setStyleSheet(outline_btn_style)
+        self.pinned_button.setStyleSheet(outline_btn_style)
+        self.edit_inputs_button.setStyleSheet(outline_btn_style + """
+            QPushButton { padding: 0px 20px; }
+        """)
+
+        # ---- Labels ----
+        self.status_label.setStyleSheet(f"color: {c['text_muted']}; font-style: italic; font-size: 13px;")
+        self.dest_label.setStyleSheet(f"color: {c['text_muted']}; font-size: 13px; background: transparent;")
+        self._examples_label.setStyleSheet(f"color: {c['text_disabled']}; font-size: 12px; background: transparent;")
+        self.plan_summary_label.setStyleSheet(f"""
+            font-family: "Segoe UI", sans-serif;
+            font-size: 13px; font-weight: 500;
+            color: {c['text_muted']}; padding: 4px 0px;
+        """)
+        self.existing_folders_note.setStyleSheet(f"""
+            font-family: "Segoe UI", sans-serif;
+            font-size: 12px; color: {c['text_disabled']};
+            font-style: italic; padding: 2px 0px;
+        """)
+        self.watch_folder_label.setStyleSheet(f"""
+            font-size: 13px; color: {c['text_muted']};
+            background: transparent; padding: 4px 0;
+        """)
+        self._watch_desc.setStyleSheet(f"color: {c['text_muted']}; font-size: 13px; background: transparent;")
+
+        # ---- Action scroll area ----
+        self._action_scroll.setStyleSheet(f"""
+            QScrollArea {{
+                border: none; background: transparent;
+            }}
+            QScrollBar:horizontal {{
+                border: none; background: {c['scrollbar_bg']};
+                height: 8px; border-radius: 4px; margin-top: 4px;
+            }}
+            QScrollBar::handle:horizontal {{
+                background: {c['scrollbar_handle']};
+                border-radius: 4px; min-width: 40px;
+            }}
+            QScrollBar::handle:horizontal:hover {{
+                background: #7C4DFF;
+            }}
+            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
+                width: 0px;
+            }}
+        """)
+
+        # ---- Tree widget ----
+        self.plan_tree.setStyleSheet(f"""
+            QTreeWidget {{
+                background-color: transparent;
+                border: none;
+                font-family: "Segoe UI", sans-serif;
+                font-size: 14px; padding: 4px; outline: none;
+            }}
+            QTreeWidget::item {{
+                height: 38px; color: {c['text']};
+                border-radius: 10px; padding-left: 8px; margin: 2px 0px;
+            }}
+            QTreeWidget::item:hover {{
+                background-color: rgba(124, 77, 255, 0.08);
+            }}
+            QTreeWidget::item:selected {{
+                background-color: rgba(124, 77, 255, 0.15);
+                color: #7C4DFF; font-weight: 600;
+            }}
+            QTreeView::branch {{
+                background: transparent; width: 0px; border: none; image: none;
+            }}
+        """)
+
     def _open_watch_config(self):
         """Open the watch configuration dialog."""
         dialog = WatchConfigDialog(self)
@@ -3825,7 +4154,7 @@ class OrganizePage(QWidget):
             self.watch_folder_label.setText("📁 No folders configured")
             self.watch_folder_label.setStyleSheet("""
                 font-size: 13px; 
-                color: #888888; 
+                color: #7A7A90; 
                 background: transparent;
                 padding: 4px 0;
             """)
@@ -3837,7 +4166,7 @@ class OrganizePage(QWidget):
                 color = "#7C4DFF"
             else:
                 status_text = f"📁 {folder_count} folder{'s' if folder_count > 1 else ''} configured"
-                color = "#555555"
+                color = "#7A7A90"
             
             self.watch_folder_label.setText(status_text)
             self.watch_folder_label.setStyleSheet(f"""
@@ -3891,7 +4220,7 @@ class OrganizePage(QWidget):
                 }
                 QPushButton:disabled {
                     background-color: #3a3a3a;
-                    color: #666;
+                    color: #4A4A5A;
                 }
             """)
     
@@ -4120,7 +4449,7 @@ class OrganizePage(QWidget):
         
         # Show tips for the new tab after a short delay
         if hasattr(main_window, 'tips_manager'):
-            from PyQt5.QtCore import QTimer
+            from PySide6.QtCore import QTimer
             QTimer.singleShot(150, main_window.tips_manager.show_tips_for_visible_widgets)
     def _hide_input_cards(self):
         """Hide instruction and destination cards after plan is generated."""
@@ -4176,7 +4505,9 @@ class OrganizePage(QWidget):
         if folder:
             self.destination_path = Path(folder)
             self.dest_label.setText(str(self.destination_path))
-            self.dest_label.setStyleSheet("color: inherit; font-weight: bold;")
+            from app.ui.theme_manager import get_theme_colors
+            c = get_theme_colors()
+            self.dest_label.setStyleSheet(f"color: {c['text']}; font-weight: bold; font-size: 13px; background: transparent;")
             self._update_generate_button()
     
     def _update_generate_button(self):
@@ -4262,20 +4593,25 @@ class OrganizePage(QWidget):
     
     def _reset_mic_button(self):
         """Reset mic button to default state."""
+        from app.ui.theme_manager import get_theme_colors
+        c = get_theme_colors()
         self.mic_button.setText("🎤")
-        self.mic_button.setStyleSheet("""
-            QPushButton {
+        self.mic_button.setStyleSheet(f"""
+            QPushButton {{
                 font-size: 18px;
-                background-color: #f0f0f0;
-                border: 1px solid #ccc;
-                border-radius: 6px;
-            }
-            QPushButton:hover {
-                background-color: #e0e0e0;
-            }
-            QPushButton:pressed {
-                background-color: #d0d0d0;
-            }
+                background-color: {c['card']};
+                border: 1px solid {c['border']};
+                border-radius: 12px;
+                color: {c['text']};
+                padding: 0px;
+            }}
+            QPushButton:hover {{
+                background-color: rgba(124, 77, 255, 0.08);
+                border-color: #7C4DFF;
+            }}
+            QPushButton:pressed {{
+                background-color: rgba(124, 77, 255, 0.12);
+            }}
         """)
         self.mic_button.setToolTip("Click to speak your instruction (click again to stop)")
 
@@ -5156,8 +5492,8 @@ Caption: {file_info.get('caption', 'none')}
         menu = QMenu(self)
         menu.setStyleSheet("""
             QMenu {
-                background-color: #FFFFFF;
-                border: 1px solid #E0E0E0;
+                background-color: #111119;
+                border: 1px solid #1C1C28;
                 border-radius: 8px;
                 padding: 6px 4px;
             }
@@ -5166,10 +5502,11 @@ Caption: {file_info.get('caption', 'none')}
                 border-radius: 6px;
                 font-family: "Segoe UI", sans-serif;
                 font-size: 13px;
+                color: #E8E8F0;
             }
             QMenu::item:selected {
-                background-color: #F5F0FF;
-                color: #7C4DFF;
+                background-color: rgba(124, 77, 255, 0.10);
+                color: #B39DFF;
             }
         """)
         

@@ -29,6 +29,7 @@ class FileOperations:
         """
         Remove files from the index by their IDs.
         Does NOT delete actual files from disk.
+        Uses the same robust approach as clear_index.
         
         Args:
             file_ids: List of file IDs to remove
@@ -49,13 +50,23 @@ class FileOperations:
                 
                 for file_id in file_ids:
                     try:
-                        # Remove from FTS index first
-                        cursor.execute("DELETE FROM files_fts WHERE rowid = ?", (file_id,))
-                        # Remove from embeddings
-                        cursor.execute("DELETE FROM embeddings WHERE file_id = ?", (file_id,))
-                        # Remove from files table
+                        # Delete from files table first (like clear_index does)
                         cursor.execute("DELETE FROM files WHERE id = ?", (file_id,))
-                        stats['removed'] += 1
+                        if cursor.rowcount > 0:
+                            stats['removed'] += 1
+                        
+                        # Clean up FTS (ignore errors - may not exist for this ID)
+                        try:
+                            cursor.execute("DELETE FROM files_fts WHERE rowid = ?", (file_id,))
+                        except Exception:
+                            pass
+                        
+                        # Clean up embeddings (ignore errors - may not exist for this ID)
+                        try:
+                            cursor.execute("DELETE FROM embeddings WHERE file_id = ?", (file_id,))
+                        except Exception:
+                            pass
+                            
                     except Exception as e:
                         logger.error(f"Error removing file ID {file_id}: {e}")
                         stats['errors'] += 1

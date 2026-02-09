@@ -161,7 +161,7 @@ class QuickSearchOverlay(QDialog):
         self.results.viewport().installEventFilter(self)
         
         # Column widths: Open btn fixed, others stretch
-        self.results.setColumnWidth(0, 60)  # Open button column
+        self.results.setColumnWidth(0, 90)  # Open button column - wide enough for full label
         self.results.horizontalHeader().setSectionResizeMode(0, QHeaderView.Fixed)
         self.results.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
         self.results.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
@@ -550,27 +550,45 @@ class QuickSearchOverlay(QDialog):
         self._rows = rows
         self.results.setRowCount(len(rows))
         for i, r in enumerate(rows):
-            # Column 0: Open button - set directly without wrapper
+            # Column 0: Open button fills entire cell
             open_btn = QPushButton("Open")
-            open_btn.setObjectName("overlayOpenBtn")
-            open_btn.setFixedSize(52, 20)
             open_btn.setCursor(Qt.PointingHandCursor)
             open_btn.setToolTip("Open file")
             open_btn.clicked.connect(lambda checked, row=i: self._open_row(row))
+            open_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #7C4DFF;
+                    border: none;
+                    border-radius: 8px;
+                    color: white;
+                    font-size: 12px;
+                    font-weight: bold;
+                    padding: 0px;
+                    margin: 2px;
+                }
+                QPushButton:hover {
+                    background-color: #9575FF;
+                }
+                QPushButton:pressed {
+                    background-color: #6A3DE8;
+                }
+            """)
             self.results.setCellWidget(i, 0, open_btn)
-            self.results.setRowHeight(i, 26)  # Fixed row height
+            self.results.setRowHeight(i, 34)
             
             # Column 1: Name
-            name = QTableWidgetItem(r.get('file_name') or '')
+            name_text = r.get('file_name') or ''
+            name = QTableWidgetItem(name_text)
             name.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
             self.results.setItem(i, 1, name)
             
             # Column 2: Label
-            label = QTableWidgetItem(r.get('label') or '')
+            label_text = r.get('label') or ''
+            label = QTableWidgetItem(label_text)
             label.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
             self.results.setItem(i, 2, label)
             
-            # Column 3: Tags (show tags instead of file path)
+            # Column 3: Tags
             tags_val = r.get('tags') or ''
             if isinstance(tags_val, (list, tuple)):
                 tags_val = ', '.join(tags_val)
