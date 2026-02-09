@@ -1872,12 +1872,30 @@ class UpdateNotificationDialog(QDialog):
         self.setFixedWidth(380)
     
     def _on_download(self):
-        """Open download page and close dialog."""
-        from app.core.update_checker import open_download_page
+        """Start download and install process."""
         url = self.update_info.get('download_url', '')
-        if url:
+        if not url:
+            return
+        
+        # Check if it's a direct download link (zip/exe) or a page
+        if url.endswith('.zip') or url.endswith('.exe') or 'releases/download' in url:
+            # Direct download - use auto-updater
+            self._start_auto_update(url)
+        else:
+            # It's a page URL - open in browser
+            from app.core.update_checker import open_download_page
             open_download_page(url)
+            self.close()
+    
+    def _start_auto_update(self, download_url: str):
+        """Download and install update automatically."""
         self.close()
+        
+        # Show download progress dialog
+        parent = self.parent()
+        if parent:
+            dialog = UpdateDownloadDialog(parent, download_url, self.update_info)
+            dialog.exec()
     
     @staticmethod
     def show_update(parent, update_info: dict):
@@ -1892,6 +1910,239 @@ class UpdateNotificationDialog(QDialog):
             )
         dialog.show()
         return dialog
+
+
+class UpdateDownloadDialog(QDialog):
+    """
+    Dialog showing download progress for auto-updates.
+    Downloads, extracts, and applies updates automatically.
+    """
+    
+    def __init__(self, parent=None, download_url: str = "", update_info: dict = None):
+        super().__init__(parent)
+        self.download_url = download_url
+        self.update_info = update_info or {}
+        self.download_thread = None
+        self.extracted_path = None
+        
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.Dialog)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setModal(True)
+        self._setup_ui()
+        
+        # Start download after dialog is shown
+        QTimer.singleShot(500, self._start_download)
+    
+    def _setup_ui(self):
+        from app.ui.theme_manager import get_theme_colors
+        from PySide6.QtWidgets import QGraphicsDropShadowEffect
+        from PySide6.QtGui import QColor
+        c = get_theme_colors()
+        
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 16)
+        
+        # Container
+        self.container = QFrame()
+        self.container.setObjectName("downloadContainer")
+        self.container.setStyleSheet(f"""
+            QFrame#downloadContainer {{
+                background-color: {c['surface']};
+                border: 1px solid {c['border']};
+                border-radius: 16px;
+            }}
+        """)
+        
+        shadow = QGraphicsDropShadowEffect()
+        shadow.setBlurRadius(30)
+        shadow.setOffset(0, 8)
+        shadow.setColor(QColor(0, 0, 0, 60))
+        self.container.setGraphicsEffect(shadow)
+        
+        container_layout = QVBoxLayout(self.container)
+        container_layout.setContentsMargins(28, 24, 28, 24)
+        container_layout.setSpacing(16)
+        
+        # Icon and title
+        header = QHBoxLayout()
+        icon = QLabel("⬇️")
+        icon.setStyleSheet("font-size: 24px; background: transparent;")
+        header.addWidget(icon)
+        
+        title = QLabel("Downloading Update...")
+        title.setStyleSheet(f"""
+            font-size: 16px;
+            font-weight: 600;
+            color: {c['text']};
+            background: transparent;
+        """)
+        header.addWidget(title)
+        header.addStretch()
+        container_layout.addLayout(header)
+        
+        # Version info
+        latest = self.update_info.get('latest_version', '')
+        version_label = QLabel(f"Version {latest}")
+        version_label.setStyleSheet(f"font-size: 13px; color: {c['text_muted']}; background: transparent;")
+        container_layout.addWidget(version_label)
+        
+        # Progress bar
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setStyleSheet(f"""
+            QProgressBar {{
+                background: {c['card']};
+                border: none;
+                border-radius: 6px;
+                height: 8px;
+                text-align: center;
+            }}
+            QProgressBar::chunk {{
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #7C4DFF, stop:1 #9575FF);
+                border-radius: 6px;
+            }}
+        """)
+        self.progress_bar.setTextVisible(False)
+        container_layout.addWidget(self.progress_bar)
+        
+        # Status label
+        self.status_label = QLabel("Connecting...")
+        self.status_label.setStyleSheet(f"font-size: 12px; color: {c['text_muted']}; background: transparent;")
+        container_layout.addWidget(self.status_label)
+        
+        # Buttons (hidden initially, shown when ready)
+        self.btn_layout = QHBoxLayout()
+        self.btn_layout.setSpacing(12)
+        
+        self.cancel_btn = QPushButton("Cancel")
+        self.cancel_btn.setCursor(Qt.PointingHandCursor)
+        self.cancel_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent;
+                color: {c['text_muted']};
+                border: 1px solid {c['border']};
+                border-radius: 8px;
+                padding: 10px 20px;
+                font-size: 13px;
+            }}
+            QPushButton:hover {{
+                background: {c['card']};
+            }}
+        """)
+        self.cancel_btn.clicked.connect(self._on_cancel)
+        self.btn_layout.addWidget(self.cancel_btn)
+        
+        self.install_btn = QPushButton("Install & Restart")
+        self.install_btn.setCursor(Qt.PointingHandCursor)
+        self.install_btn.setStyleSheet("""
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #7C4DFF, stop:1 #9575FF);
+                color: white;
+                border: none;
+                border-radius: 8px;
+                padding: 10px 20px;
+                font-size: 13px;
+                font-weight: 600;
+            }
+            QPushButton:hover {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #9575FF, stop:1 #B39DFF);
+            }
+        """)
+        self.install_btn.clicked.connect(self._on_install)
+        self.install_btn.setVisible(False)
+        self.btn_layout.addWidget(self.install_btn)
+        
+        container_layout.addLayout(self.btn_layout)
+        
+        layout.addWidget(self.container)
+        self.setFixedWidth(360)
+    
+    def _start_download(self):
+        """Start download in background thread."""
+        import threading
+        
+        def download_thread():
+            from app.core.auto_updater import download_update, extract_update
+            
+            # Download
+            zip_path = download_update(
+                self.download_url,
+                progress_callback=self._on_progress
+            )
+            
+            if not zip_path:
+                QTimer.singleShot(0, lambda: self._on_error("Download failed"))
+                return
+            
+            # Extract
+            QTimer.singleShot(0, lambda: self._update_status("Extracting..."))
+            self.extracted_path = extract_update(zip_path)
+            
+            if not self.extracted_path:
+                QTimer.singleShot(0, lambda: self._on_error("Extraction failed"))
+                return
+            
+            # Ready to install
+            QTimer.singleShot(0, self._on_ready)
+        
+        self.download_thread = threading.Thread(target=download_thread, daemon=True)
+        self.download_thread.start()
+    
+    def _on_progress(self, downloaded: int, total: int):
+        """Update progress bar."""
+        if total > 0:
+            percent = int((downloaded / total) * 100)
+            QTimer.singleShot(0, lambda: self._update_progress(percent, downloaded, total))
+    
+    def _update_progress(self, percent: int, downloaded: int, total: int):
+        """Update UI with progress."""
+        self.progress_bar.setValue(percent)
+        mb_down = downloaded / (1024 * 1024)
+        mb_total = total / (1024 * 1024)
+        self.status_label.setText(f"Downloading... {mb_down:.1f} / {mb_total:.1f} MB")
+    
+    def _update_status(self, text: str):
+        """Update status label."""
+        self.status_label.setText(text)
+    
+    def _on_ready(self):
+        """Download complete, ready to install."""
+        self.progress_bar.setValue(100)
+        self.status_label.setText("Ready to install!")
+        self.cancel_btn.setText("Later")
+        self.install_btn.setVisible(True)
+    
+    def _on_error(self, message: str):
+        """Handle download error."""
+        self.status_label.setText(f"Error: {message}")
+        self.cancel_btn.setText("Close")
+        self.progress_bar.setStyleSheet(self.progress_bar.styleSheet().replace("#7C4DFF", "#FF6B6B"))
+    
+    def _on_cancel(self):
+        """Cancel download or close dialog."""
+        self.close()
+    
+    def _on_install(self):
+        """Apply update and restart app."""
+        if not self.extracted_path:
+            return
+        
+        self.status_label.setText("Installing update...")
+        self.install_btn.setEnabled(False)
+        self.cancel_btn.setEnabled(False)
+        
+        from app.core.auto_updater import apply_update_and_restart
+        
+        if apply_update_and_restart(self.extracted_path):
+            # Close the entire app
+            QApplication.quit()
+        else:
+            self._on_error("Installation failed")
+            self.cancel_btn.setEnabled(True)
 
 
 class HistoryDialog(QDialog):
