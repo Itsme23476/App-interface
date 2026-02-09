@@ -1612,9 +1612,13 @@ class MainWindow(QMainWindow):
         
         # Apply dark/light title bar
         from app.ui.theme_manager import apply_titlebar_theme
+        from PySide6.QtWidgets import QApplication
         
         # Populate table data BEFORE showing dialog
         self.refresh_debug_view()
+        
+        # Process events to ensure table layout is calculated with data
+        QApplication.processEvents()
         
         # Force column resize after data is loaded
         for col in range(1, self.debug_table.columnCount()):
@@ -1629,10 +1633,20 @@ class MainWindow(QMainWindow):
         # Update usage labels before showing
         self._update_usage_labels()
         
-        overlay.show()
+        # Process events again to finalize layout before showing
+        QApplication.processEvents()
+        
+        # Ensure overlay is properly sized and centered
+        overlay.resize(int(self.width() * 0.92), int(self.height() * 0.88))
+        overlay.move(
+            self.x() + (self.width() - overlay.width()) // 2,
+            self.y() + (self.height() - overlay.height()) // 2
+        )
+        
+        # Apply titlebar theme
         apply_titlebar_theme(overlay)
         
-        # Show the overlay
+        # Show the overlay (exec() handles show internally)
         overlay.exec()
         
         # After closing, restore widgets to main window (for next time)

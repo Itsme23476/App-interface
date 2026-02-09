@@ -205,6 +205,28 @@ class SupabaseAuth:
             logger.error(f"Sign out error: {error_msg}")
             return {'success': False, 'error': error_msg}
     
+    def reset_password(self, email: str) -> Dict[str, Any]:
+        """
+        Send password reset email to user.
+        
+        Args:
+            email: User's email address
+            
+        Returns:
+            dict with 'success' bool and optional 'error' message
+        """
+        if not self._auth_client:
+            return {'success': False, 'error': 'Supabase not available'}
+        
+        try:
+            self._auth_client.reset_password_for_email(email)
+            logger.info(f"Password reset email sent to: {email}")
+            return {'success': True}
+        except Exception as e:
+            error_msg = str(e)
+            logger.error(f"Password reset error: {error_msg}")
+            return {'success': False, 'error': error_msg}
+    
     def restore_session(self, access_token: str, refresh_token: str) -> Dict[str, Any]:
         """
         Restore a session from stored tokens.
