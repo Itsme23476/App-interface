@@ -285,6 +285,9 @@ class MainWindow(QMainWindow):
         # Auto-load indexed files on startup
         QTimer.singleShot(100, self.refresh_debug_view)
         
+        # Update usage labels on startup (after auth is ready)
+        QTimer.singleShot(500, self._update_usage_labels)
+        
         # Run database cleanup in background to remove stale entries
         # This prevents UNIQUE constraint errors from orphaned records
         QTimer.singleShot(2000, self._run_background_db_cleanup)
@@ -319,6 +322,9 @@ class MainWindow(QMainWindow):
         else:
             # Show contextual tips if onboarding is done
             QTimer.singleShot(1000, self._init_contextual_tips)
+        
+        # Check for updates in background (delay to not slow startup)
+        QTimer.singleShot(3000, self._check_for_updates)
     
     def _show_onboarding(self):
         """Display the onboarding overlay"""
@@ -344,6 +350,35 @@ class MainWindow(QMainWindow):
         settings.onboarding_remind_count = remind_count
         settings._save_config()
         logger.info(f"Onboarding reminder set (count: {remind_count})")
+    
+    def _check_for_updates(self):
+        """Check for app updates in background via GitHub Releases."""
+        try:
+            from app.version import VERSION, GITHUB_RELEASES_URL
+            from app.core.update_checker import check_for_updates
+            
+            # Run check in background thread to not block UI
+            import threading
+            
+            def check_thread():
+                update_info = check_for_updates(VERSION, GITHUB_RELEASES_URL)
+                if update_info:
+                    # Show notification on main thread
+                    QTimer.singleShot(0, lambda: self._show_update_notification(update_info))
+            
+            thread = threading.Thread(target=check_thread, daemon=True)
+            thread.start()
+            
+        except Exception as e:
+            logger.debug(f"Could not check for updates: {e}")
+    
+    def _show_update_notification(self, update_info: dict):
+        """Show update notification dialog."""
+        try:
+            from app.ui.organize_page import UpdateNotificationDialog
+            UpdateNotificationDialog.show_update(self, update_info)
+        except Exception as e:
+            logger.error(f"Could not show update notification: {e}")
         # Still show contextual tips even if they skipped
         QTimer.singleShot(500, self._init_contextual_tips)
     
@@ -980,6 +1015,19 @@ class MainWindow(QMainWindow):
         self.view_files_btn.clicked.connect(self._show_files_overlay)
         content_layout.addWidget(self.view_files_btn, 0, Qt.AlignCenter)
         
+        # Usage indicator label - shows media files remaining
+        self.usage_label = QLabel("")
+        self.usage_label.setObjectName("usageLabel")
+        self.usage_label.setAlignment(Qt.AlignCenter)
+        self.usage_label.setStyleSheet("""
+            QLabel {
+                font-size: 11px;
+                color: #7A7A90;
+                padding: 4px 0;
+            }
+        """)
+        content_layout.addWidget(self.usage_label, 0, Qt.AlignCenter)
+        
         # Add content container to scroll layout
         scroll_content_layout.addWidget(content_container, 1)
         
@@ -1210,9 +1258,53 @@ class MainWindow(QMainWindow):
         icon_label.setStyleSheet(f"font-size: 28px; background: transparent;")
         header.addWidget(icon_label)
         
+        # Title + usage indicator stacked vertically
+        title_container = QVBoxLayout()
+        title_container.setSpacing(2)
+        title_container.setContentsMargins(0, 0, 0, 0)
+        
         title = QLabel("Indexed Files")
         title.setStyleSheet(f"font-size: 24px; font-weight: 600; color: #7C4DFF; background: transparent;")
-        header.addWidget(title)
+        title_container.addWidget(title)
+        
+        # Usage indicator in overlay
+        self._overlay_usage_label = QLabel("")
+        self._overlay_usage_label.setStyleSheet(f"""
+            font-size: 11px; 
+            color: {subtitle_color}; 
+            background: transparent;
+            padding-left: 2px;
+        """)
+        title_container.addWidget(self._overlay_usage_label)
+        
+        header.addLayout(title_container)
+        
+        header.addSpacing(20)
+        
+        # Search bar in header
+        self._files_search_input = QLineEdit()
+        self._files_search_input.setPlaceholderText("🔍 Search files...")
+        self._files_search_input.setClearButtonEnabled(True)
+        self._files_search_input.setFixedWidth(220)
+        self._files_search_input.setFixedHeight(36)
+        self._files_search_input.setStyleSheet(f"""
+            QLineEdit {{
+                background-color: {card_bg};
+                border: 1px solid {border_color};
+                border-radius: 8px;
+                padding: 6px 12px;
+                font-size: 13px;
+                color: {text_color};
+            }}
+            QLineEdit:focus {{
+                border-color: #7C4DFF;
+            }}
+            QLineEdit::placeholder {{
+                color: {subtitle_color};
+            }}
+        """)
+        self._files_search_input.textChanged.connect(self._filter_indexed_files)
+        header.addWidget(self._files_search_input)
         
         header.addStretch()
         
@@ -1520,11 +1612,27 @@ class MainWindow(QMainWindow):
         
         # Apply dark/light title bar
         from app.ui.theme_manager import apply_titlebar_theme
+        
+        # Populate table data BEFORE showing dialog
+        self.refresh_debug_view()
+        
+        # Force column resize after data is loaded
+        for col in range(1, self.debug_table.columnCount()):
+            self.debug_table.resizeColumnToContents(col)
+        
+        # Ensure minimum width for key columns
+        if self.debug_table.columnWidth(1) < 200:  # File Name
+            self.debug_table.setColumnWidth(1, 200)
+        if self.debug_table.columnWidth(2) < 100:  # Category
+            self.debug_table.setColumnWidth(2, 100)
+        
+        # Update usage labels before showing
+        self._update_usage_labels()
+        
         overlay.show()
         apply_titlebar_theme(overlay)
         
         # Show the overlay
-        self.refresh_debug_view()
         overlay.exec()
         
         # After closing, restore widgets to main window (for next time)
@@ -1532,17 +1640,18 @@ class MainWindow(QMainWindow):
     
     def _clear_all_indexed(self, dialog=None):
         """Clear all indexed files from the database."""
-        from PySide6.QtWidgets import QMessageBox
         from app.core.database import file_index
+        from app.ui.organize_page import ModernConfirmDialog, ModernInfoDialog
         
-        reply = QMessageBox.question(
-            self, "Clear Index",
-            "Are you sure you want to remove all indexed files?\n\n"
-            "This will not delete your actual files, only the search index.",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No
+        confirmed = ModernConfirmDialog.ask(
+            self, 
+            title="Clear Index",
+            message="Are you sure you want to remove all indexed files?",
+            info_text="This will not delete your actual files, only the search index.",
+            yes_text="Clear",
+            no_text="Cancel"
         )
-        if reply == QMessageBox.Yes:
+        if confirmed:
             try:
                 # Use the proper file_index to clear
                 file_index.clear_index()
@@ -1559,7 +1668,7 @@ class MainWindow(QMainWindow):
                 logger.info("Index cleared by user")
             except Exception as e:
                 logger.error(f"Error clearing index: {e}")
-                QMessageBox.warning(self, "Error", f"Failed to clear index: {e}")
+                ModernInfoDialog.show_warning(self, "Error", f"Failed to clear index: {e}")
     
     def _update_view_files_button_count(self):
         """Update the View Files button with the current file count."""
@@ -2382,22 +2491,23 @@ class MainWindow(QMainWindow):
         import webbrowser
         from urllib.parse import quote
         from app.core.supabase_client import supabase_auth, SUPABASE_URL
+        from app.ui.organize_page import ModernInfoDialog
         
         if not supabase_auth.is_authenticated:
-            QMessageBox.warning(self, "Not Logged In", "Please sign in to manage your subscription.")
+            ModernInfoDialog.show_warning(self, "Not Logged In", "Please sign in to manage your subscription.")
             return
         
         # Get user info from the current_user dict
         current_user = supabase_auth.current_user
         if not current_user:
-            QMessageBox.warning(self, "Error", "Could not retrieve account info. Please try signing out and back in.")
+            ModernInfoDialog.show_warning(self, "Error", "Could not retrieve account info. Please try signing out and back in.")
             return
         
         user_id = current_user.get('id', '')
         email = current_user.get('email', '')
         
         if not email or not user_id:
-            QMessageBox.warning(self, "Error", "Could not retrieve account email. Please try signing out and back in.")
+            ModernInfoDialog.show_warning(self, "Error", "Could not retrieve account email. Please try signing out and back in.")
             return
         
         # Open billing portal via Supabase Edge Function
@@ -2408,22 +2518,22 @@ class MainWindow(QMainWindow):
             self.status_bar.showMessage("Opening subscription management...", 3000)
         except Exception as e:
             logger.error(f"Error opening billing portal: {e}")
-            QMessageBox.warning(self, "Error", "Could not open billing portal. Please try again.")
+            ModernInfoDialog.show_warning(self, "Error", "Could not open billing portal. Please try again.")
     
     def _rebuild_fts_index(self):
         """Rebuild the FTS search index to fix corruption."""
-        reply = QMessageBox.question(
+        from app.ui.organize_page import ModernConfirmDialog, ModernInfoDialog
+        
+        confirmed = ModernConfirmDialog.ask(
             self,
-            "Rebuild Search Index",
-            "This will rebuild the full-text search index.\n\n"
-            "Your indexed files and metadata will be preserved.\n"
-            "This may take a moment for large databases.\n\n"
-            "Continue?",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No
+            title="Rebuild Search Index",
+            message="This will rebuild the full-text search index.",
+            info_text="Your indexed files and metadata will be preserved. This may take a moment for large databases.",
+            yes_text="Rebuild",
+            no_text="Cancel"
         )
         
-        if reply != QMessageBox.Yes:
+        if not confirmed:
             return
         
         try:
@@ -2442,29 +2552,31 @@ class MainWindow(QMainWindow):
             self.rebuild_fts_btn.setText("Rebuild Search Index")
             
             if stats['errors'] == 0:
-                QMessageBox.information(
+                ModernInfoDialog.show_info(
                     self,
-                    "Success",
-                    f"Search index rebuilt successfully!\n\n"
-                    f"Indexed: {stats['indexed']} files"
+                    title="Success",
+                    message="Search index rebuilt successfully!",
+                    details=[f"Indexed: {stats['indexed']} files"]
                 )
                 self.status_bar.showMessage("Search index rebuilt successfully", 5000)
             else:
-                QMessageBox.warning(
+                ModernInfoDialog.show_warning(
                     self,
-                    "Partial Success",
-                    f"Search index rebuilt with some errors.\n\n"
-                    f"Indexed: {stats['indexed']} files\n"
-                    f"Errors: {stats['errors']}"
+                    title="Partial Success",
+                    message="Search index rebuilt with some errors.",
+                    details=[
+                        f"Indexed: {stats['indexed']} files",
+                        f"Errors: {stats['errors']}"
+                    ]
                 )
         except Exception as e:
             self.rebuild_fts_btn.setEnabled(True)
             self.rebuild_fts_btn.setText("Rebuild Search Index")
             logger.error(f"Error rebuilding FTS index: {e}")
-            QMessageBox.critical(
+            ModernInfoDialog.show_warning(
                 self,
-                "Error",
-                f"Failed to rebuild search index:\n\n{e}"
+                title="Error",
+                message=f"Failed to rebuild search index:\n\n{e}"
             )
     
     def _refresh_exclusions_list(self):
@@ -2493,14 +2605,17 @@ class MainWindow(QMainWindow):
     
     def _reset_exclusions(self):
         """Reset exclusions to default patterns."""
-        reply = QMessageBox.question(
+        from app.ui.organize_page import ModernConfirmDialog
+        
+        confirmed = ModernConfirmDialog.ask(
             self,
-            "Reset Exclusions",
-            "Reset all exclusion patterns to defaults?\n\nThis will remove any custom patterns you've added.",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No
+            title="Reset Exclusions",
+            message="Reset all exclusion patterns to defaults?",
+            info_text="This will remove any custom patterns you've added.",
+            yes_text="Reset",
+            no_text="Cancel"
         )
-        if reply == QMessageBox.Yes:
+        if confirmed:
             settings.reset_exclusions_to_defaults()
             self._refresh_exclusions_list()
             self.status_bar.showMessage("Exclusions reset to defaults", 3000)
@@ -2516,15 +2631,18 @@ class MainWindow(QMainWindow):
     
     def _sign_out(self):
         """Sign out the current user and show login dialog."""
-        reply = QMessageBox.question(
+        from app.ui.organize_page import ModernConfirmDialog
+        
+        confirmed = ModernConfirmDialog.ask(
             self,
-            "Sign Out",
-            "Are you sure you want to sign out?",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No
+            title="Sign Out",
+            message="Are you sure you want to sign out?",
+            info_text="You'll need to sign in again to use the app.",
+            yes_text="Sign Out",
+            no_text="Cancel"
         )
         
-        if reply == QMessageBox.Yes:
+        if confirmed:
             # Sign out from Supabase
             supabase_auth.sign_out()
             settings.clear_auth_tokens()
@@ -2547,17 +2665,18 @@ class MainWindow(QMainWindow):
     
     def _resync_file_dates(self):
         """Resync file dates from Windows filesystem."""
-        reply = QMessageBox.question(
+        from app.ui.organize_page import ModernConfirmDialog, ModernInfoDialog
+        
+        confirmed = ModernConfirmDialog.ask(
             self,
-            "Resync File Dates",
-            "This will re-read file creation and modification dates from Windows\n"
-            "for all indexed files. This may take a moment.\n\n"
-            "Continue?",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.Yes
+            title="Resync File Dates",
+            message="Re-read file creation and modification dates from Windows for all indexed files?",
+            info_text="This may take a moment for large databases.",
+            yes_text="Resync",
+            no_text="Cancel"
         )
         
-        if reply != QMessageBox.Yes:
+        if not confirmed:
             return
         
         self.resync_dates_btn.setEnabled(False)
@@ -2580,23 +2699,23 @@ class MainWindow(QMainWindow):
             )
             
             metadata_count = stats.get('exif_found', 0)
-            QMessageBox.information(
+            ModernInfoDialog.show_info(
                 self,
-                "Resync Complete",
-                f"File dates resynced:\n\n"
-                f"• Updated: {stats['updated']} files\n"
-                f"• Metadata dates extracted: {metadata_count} files\n"
-                f"  (from EXIF, Office docs, PDFs, filenames)\n"
-                f"• Not found: {stats['not_found']} files\n"
-                f"• Errors: {stats['errors']} files\n\n"
-                "Date filters now use the best available date\n"
-                "for each file type."
+                title="Resync Complete",
+                message="File dates resynced successfully!",
+                details=[
+                    f"Updated: {stats['updated']} files",
+                    f"Metadata dates extracted: {metadata_count} files",
+                    f"Not found: {stats['not_found']} files",
+                    f"Errors: {stats['errors']} files"
+                ],
+                info_text="Date filters now use the best available date for each file type."
             )
             
         except Exception as e:
             logger.error(f"Error resyncing file dates: {e}")
             self.resync_status_label.setText("Error!")
-            QMessageBox.warning(self, "Error", f"Failed to resync file dates:\n{e}")
+            ModernInfoDialog.show_warning(self, "Error", f"Failed to resync file dates:\n{e}")
         
         finally:
             self.resync_dates_btn.setEnabled(True)
@@ -3896,48 +4015,47 @@ class MainWindow(QMainWindow):
     def _check_ollama_status(self):
         """Check if Ollama is running and list available models."""
         import requests
+        from app.ui.organize_page import ModernInfoDialog
+        
         try:
             r = requests.get("http://localhost:11434/api/tags", timeout=3)
             if r.ok:
                 data = r.json()
                 models = [m.get('name', 'unknown') for m in data.get('models', [])]
                 if models:
-                    model_list = "\n• ".join(models)
-                    QMessageBox.information(
+                    ModernInfoDialog.show_info(
                         self, 
-                        "Ollama Status", 
-                        f"✓ Ollama is running!\n\nInstalled models:\n• {model_list}\n\n"
-                        f"Tip: To install new models, run:\n  ollama pull <model-name>"
+                        title="Ollama Status", 
+                        message="✓ Ollama is running!",
+                        details=[f"• {model}" for model in models],
+                        info_text="Tip: To install new models, run: ollama pull <model-name>"
                     )
                 else:
-                    QMessageBox.information(
+                    ModernInfoDialog.show_info(
                         self, 
-                        "Ollama Status", 
-                        "✓ Ollama is running, but no models are installed.\n\n"
-                        "Install the recommended model (handles both text AND images):\n"
-                        "  ollama pull qwen2.5vl:3b"
+                        title="Ollama Status", 
+                        message="✓ Ollama is running, but no models are installed.",
+                        info_text="Install the recommended model:\n  ollama pull qwen2.5vl:3b"
                     )
             else:
-                QMessageBox.warning(
+                ModernInfoDialog.show_warning(
                     self, 
-                    "Ollama Status", 
-                    "Ollama is not responding.\n\nMake sure Ollama is running."
+                    title="Ollama Status", 
+                    message="Ollama is not responding.",
+                    info_text="Make sure Ollama is running."
                 )
         except requests.exceptions.ConnectionError:
-            QMessageBox.warning(
+            ModernInfoDialog.show_warning(
                 self, 
-                "Ollama Status", 
-                "Ollama is not running.\n\n"
-                "Start it by:\n"
-                "1. Open a terminal\n"
-                "2. Run: ollama serve\n\n"
-                "Or download from: https://ollama.com"
+                title="Ollama Status", 
+                message="Ollama is not running.",
+                info_text="Start it by:\n1. Open a terminal\n2. Run: ollama serve\n\nOr download from: https://ollama.com"
             )
         except Exception as e:
-            QMessageBox.warning(
+            ModernInfoDialog.show_warning(
                 self, 
-                "Ollama Status", 
-                f"Error checking Ollama status:\n{str(e)}"
+                title="Ollama Status", 
+                message=f"Error checking Ollama status:\n{str(e)}"
             )
 
     def on_toggle_gpt_rerank(self, checked: bool):
@@ -3964,7 +4082,8 @@ class MainWindow(QMainWindow):
     def on_qs_save_shortcut(self):
         sc = (self.qs_shortcut_input.text() or '').strip()
         if not sc:
-            QMessageBox.warning(self, "Shortcut", "Please enter a shortcut (e.g., ctrl+alt+h)")
+            from app.ui.organize_page import ModernInfoDialog
+            ModernInfoDialog.show_warning(self, "Shortcut", "Please enter a shortcut (e.g., ctrl+alt+h)")
             return
         settings.set_quick_search_shortcut(sc)
         self.status_bar.showMessage(f"Quick Search shortcut saved: {sc}")
@@ -4024,9 +4143,11 @@ class MainWindow(QMainWindow):
                 self.debug_table.clearSelection()
                 self.debug_table.setCurrentCell(-1, -1)
             else:
-                QMessageBox.critical(self, "Save Error", "Failed to save your edit.")
+                from app.ui.organize_page import ModernInfoDialog
+                ModernInfoDialog.show_warning(self, "Save Error", "Failed to save your edit.")
         except Exception as e:
-            QMessageBox.critical(self, "Edit Error", f"Failed to apply edit:\n{e}")
+            from app.ui.organize_page import ModernInfoDialog
+            ModernInfoDialog.show_warning(self, "Edit Error", f"Failed to apply edit:\n{e}")
     
     def on_debug_cell_double_clicked(self, row: int, col: int):
         """Show full cell content in a popup when double-clicked, with edit option."""
@@ -4254,7 +4375,8 @@ class MainWindow(QMainWindow):
     
     def on_scan_error(self, error: str):
         """Handle scan error."""
-        QMessageBox.critical(self, "Scan Error", f"Error scanning directory:\n{error}")
+        from app.ui.organize_page import ModernInfoDialog
+        ModernInfoDialog.show_warning(self, "Scan Error", f"Error scanning directory:\n{error}")
         self.progress_bar.setVisible(False)
         self.scan_button.setEnabled(True)
         self.status_bar.showMessage("Scan failed")
@@ -4314,7 +4436,8 @@ Move Plan Summary:
         
         if not is_valid:
             error_text = "\n".join(errors)
-            QMessageBox.critical(self, "Validation Error", f"Move plan validation failed:\n{error_text}")
+            from app.ui.organize_page import ModernInfoDialog
+            ModernInfoDialog.show_warning(self, "Validation Error", f"Move plan validation failed:\n{error_text}")
             return
         
         # Check disk space
@@ -4323,19 +4446,23 @@ Move Plan Summary:
         )
         
         if not has_space:
-            QMessageBox.critical(self, "Insufficient Space", space_error)
+            from app.ui.organize_page import ModernInfoDialog
+            ModernInfoDialog.show_warning(self, "Insufficient Space", space_error)
             return
         
         # Confirm action
-        reply = QMessageBox.question(
-            self, "Confirm Moves",
-            f"Are you sure you want to move {len(self.move_plan)} files?\n\n"
-            "This action cannot be undone in this version.",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No
+        from app.ui.organize_page import ModernConfirmDialog
+        
+        confirmed = ModernConfirmDialog.ask(
+            self, 
+            title="Confirm Moves",
+            message=f"Are you sure you want to move {len(self.move_plan)} files?",
+            info_text="This action cannot be undone in this version.",
+            yes_text="Move Files",
+            no_text="Cancel"
         )
         
-        if reply != QMessageBox.Yes:
+        if not confirmed:
             return
         
         # Apply moves
@@ -4652,6 +4779,13 @@ Move Plan Summary:
             self.status_bar.showMessage("Indexing failed")
             return
         
+        # Check if index limit was exceeded
+        if result.get('limit_exceeded'):
+            limit_info = result.get('limit_info', {})
+            self._show_upgrade_dialog(limit_info)
+            self.status_bar.showMessage("Index limit reached - upgrade for more")
+            return
+        
         if result.get('cancelled'):
             self.status_bar.showMessage(
                 f"Indexing cancelled. Indexed {result.get('indexed_files', 0)} files before cancellation."
@@ -4661,6 +4795,8 @@ Move Plan Summary:
             self.update_search_statistics(stats)
             self.search_button.setEnabled(True)
             self.refresh_debug_view()
+            # Update usage labels to reflect any files indexed before cancel
+            self._update_usage_labels()
             return
         
         # Update search statistics
@@ -4687,6 +4823,46 @@ Move Plan Summary:
         # Update info label
         if hasattr(self, 'debug_info_label'):
             self.debug_info_label.setText(f"Showing {indexed_count} indexed files")
+        
+        # Update usage labels to reflect new count
+        self._update_usage_labels()
+    
+    def _show_upgrade_dialog(self, limit_info: dict):
+        """Show upgrade dialog when index limit is reached."""
+        from app.ui.organize_page import ModernConfirmDialog, ModernInfoDialog
+        from app.core.supabase_client import supabase_auth, INDEX_LIMIT_STARTER, INDEX_LIMIT_ULTRA
+        
+        remaining = limit_info.get('remaining', 0)
+        limit = limit_info.get('limit', INDEX_LIMIT_STARTER)
+        plan = limit_info.get('plan', 'starter')
+        
+        if plan == 'ultra':
+            # Ultra users hit their 5000 limit - no upgrade available
+            ModernInfoDialog.show_info(
+                self,
+                title="Index Limit Reached",
+                message=f"You've reached your Ultra plan limit of {INDEX_LIMIT_ULTRA} media files this month.",
+                details=[
+                    "Your limit will reset at the start of your next billing cycle.",
+                    "Text files are unlimited and can still be indexed."
+                ]
+            )
+        else:
+            # Starter users - offer upgrade to Ultra
+            confirmed = ModernConfirmDialog.ask(
+                self,
+                title="Index Limit Reached",
+                message=f"You've reached your monthly limit of {limit} media files.",
+                info_text=f"Upgrade to Ultra for {INDEX_LIMIT_ULTRA} media files per month!",
+                highlight_text=f"Current plan: {plan.title()} | Used: {limit - remaining}/{limit}",
+                yes_text="Upgrade to Ultra ($49/mo)",
+                no_text="Maybe Later"
+            )
+            
+            if confirmed:
+                # Open upgrade checkout
+                supabase_auth.open_upgrade_checkout()
+                self.status_bar.showMessage("Opening upgrade checkout...", 5000)
     
     def on_index_error(self, error: str):
         """Handle index error."""
@@ -5841,67 +6017,32 @@ Move Plan Summary:
         if not file_ids:
             return
         
-        # Confirm removal
-        reply = QMessageBox.question(
+        # Confirm removal with modern dialog
+        from app.ui.organize_page import ModernConfirmDialog
+        
+        confirmed = ModernConfirmDialog.ask(
             self,
-            "Remove from Index",
-            f"Remove {len(file_ids)} file(s) from the index?\n\nThe actual files will NOT be deleted from your PC.",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No
+            title="Remove from Index",
+            message=f"Remove {len(file_ids)} file(s) from the index?",
+            info_text="The actual files will NOT be deleted from your PC.",
+            yes_text="Remove",
+            no_text="Cancel"
         )
         
-        if reply != QMessageBox.Yes:
+        if not confirmed:
             return
         
-        # Show progress dialog with theme-aware styling
-        from app.ui.theme_manager import get_theme_colors, apply_titlebar_theme
-        c = get_theme_colors()
+        # Show modern progress dialog
+        from app.ui.organize_page import ModernProgressDialog
         
-        progress = QProgressDialog("Removing files from index...", "Cancel", 0, 0, self)
-        progress.setWindowTitle("File Search Assistant")
-        progress.setWindowModality(Qt.WindowModal)
-        progress.setMinimumDuration(0)
-        progress.setMinimumWidth(280)
-        progress.setStyleSheet(f"""
-            QProgressDialog {{
-                background-color: {c['surface']};
-            }}
-            QLabel {{
-                color: {c['text']};
-                font-size: 14px;
-                padding: 8px;
-            }}
-            QProgressBar {{
-                border: none;
-                border-radius: 6px;
-                background-color: {c['border']};
-                height: 12px;
-                text-align: center;
-            }}
-            QProgressBar::chunk {{
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #7C4DFF, stop:1 #9575FF);
-                border-radius: 6px;
-            }}
-            QPushButton {{
-                background-color: #7C4DFF;
-                color: white;
-                border: none;
-                border-radius: 8px;
-                padding: 8px 20px;
-                font-size: 13px;
-                font-weight: 600;
-                min-width: 80px;
-            }}
-            QPushButton:hover {{
-                background-color: #9575FF;
-            }}
-            QPushButton:pressed {{
-                background-color: #6A3DE8;
-            }}
-        """)
-        progress.show()
-        apply_titlebar_theme(progress)
-        QApplication.processEvents()
+        progress = ModernProgressDialog.create(
+            self,
+            title="Removing from Index",
+            message=f"Removing {len(file_ids)} file(s) from the search index...",
+            icon="🗑️",
+            can_cancel=True,
+            indeterminate=True
+        )
         
         # Run in background thread
         self._batch_worker = BatchOperationWorker('remove', file_ids=file_ids)
@@ -5923,66 +6064,32 @@ Move Plan Summary:
         if not file_paths:
             return
         
-        reply = QMessageBox.question(
+        from app.ui.organize_page import ModernConfirmDialog
+        
+        confirmed = ModernConfirmDialog.ask(
             self,
-            "Re-index Files",
-            f"Re-index {len(file_paths)} file(s)?\n\nThis will refresh their metadata and AI analysis.",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No
+            title="Re-index Files",
+            message=f"Re-index {len(file_paths)} file(s)?",
+            info_text="This will refresh their metadata and AI analysis.",
+            yes_text="Re-index",
+            no_text="Cancel"
         )
         
-        if reply != QMessageBox.Yes:
+        if not confirmed:
             return
         
-        # Show progress dialog with theme-aware styling
-        from app.ui.theme_manager import get_theme_colors, apply_titlebar_theme
-        c = get_theme_colors()
+        # Show modern progress dialog
+        from app.ui.organize_page import ModernProgressDialog
         
-        progress = QProgressDialog("Re-indexing files...", "Cancel", 0, len(file_paths), self)
-        progress.setWindowTitle("File Search Assistant")
-        progress.setWindowModality(Qt.WindowModal)
-        progress.setMinimumDuration(0)
-        progress.setMinimumWidth(280)
-        progress.setStyleSheet(f"""
-            QProgressDialog {{
-                background-color: {c['surface']};
-            }}
-            QLabel {{
-                color: {c['text']};
-                font-size: 14px;
-                padding: 8px;
-            }}
-            QProgressBar {{
-                border: none;
-                border-radius: 6px;
-                background-color: {c['border']};
-                height: 12px;
-                text-align: center;
-            }}
-            QProgressBar::chunk {{
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #7C4DFF, stop:1 #9575FF);
-                border-radius: 6px;
-            }}
-            QPushButton {{
-                background-color: #7C4DFF;
-                color: white;
-                border: none;
-                border-radius: 8px;
-                padding: 8px 20px;
-                font-size: 13px;
-                font-weight: 600;
-                min-width: 80px;
-            }}
-            QPushButton:hover {{
-                background-color: #9575FF;
-            }}
-            QPushButton:pressed {{
-                background-color: #6A3DE8;
-            }}
-        """)
-        progress.show()
-        apply_titlebar_theme(progress)
-        QApplication.processEvents()
+        progress = ModernProgressDialog.create(
+            self,
+            title="Re-indexing Files",
+            message=f"Refreshing metadata and AI analysis for {len(file_paths)} file(s)...",
+            icon="🔄",
+            can_cancel=True,
+            indeterminate=False
+        )
+        progress.set_progress(0, len(file_paths), "Starting...")
         
         # Run in background thread
         self._batch_worker = BatchOperationWorker('reindex', file_paths=file_paths)
@@ -6003,16 +6110,20 @@ Move Plan Summary:
         if not file_ids:
             return
         
-        # Show input dialog for tags
-        tags_text, ok = QInputDialog.getText(
+        # Show modern input dialog for tags
+        from app.ui.organize_page import ModernInputDialog
+        
+        tags_text, accepted = ModernInputDialog.get_input(
             self,
-            "Add Tags",
-            f"Enter tags to add to {len(file_ids)} file(s):\n(separate multiple tags with commas)",
-            QLineEdit.Normal,
-            ""
+            title="Add Tags",
+            message=f"Enter tags to add to {len(file_ids)} file(s):",
+            placeholder="Separate multiple tags with commas",
+            icon="🏷️",
+            ok_text="Add Tags",
+            cancel_text="Cancel"
         )
         
-        if not ok or not tags_text.strip():
+        if not accepted or not tags_text.strip():
             return
         
         # Parse tags
@@ -6020,12 +6131,17 @@ Move Plan Summary:
         if not new_tags:
             return
         
-        # Show progress dialog
-        progress = QProgressDialog("Adding tags...", None, 0, 0, self)
-        progress.setWindowModality(Qt.WindowModal)
-        progress.setMinimumDuration(0)
-        progress.show()
-        QApplication.processEvents()
+        # Show modern progress dialog
+        from app.ui.organize_page import ModernProgressDialog
+        
+        progress = ModernProgressDialog.create(
+            self,
+            title="Adding Tags",
+            message=f"Adding {len(new_tags)} tag(s) to {len(file_ids)} file(s)...",
+            icon="🏷️",
+            can_cancel=False,
+            indeterminate=True
+        )
         
         # Run in background thread
         self._batch_worker = BatchOperationWorker('add_tags', file_ids=file_ids, extra_data={'tags': new_tags})
@@ -6037,40 +6153,48 @@ Move Plan Summary:
         )
         self._batch_worker.start()
     
-    def _on_batch_progress(self, progress: QProgressDialog, current: int, total: int, message: str):
+    def _on_batch_progress(self, progress, current: int, total: int, message: str):
         """Update progress dialog during batch operation."""
-        progress.setMaximum(total)
-        progress.setValue(current)
-        progress.setLabelText(message)
-        QApplication.processEvents()
+        # Works with both ModernProgressDialog and QProgressDialog
+        if hasattr(progress, 'set_progress'):
+            progress.set_progress(current, total, message)
+        else:
+            progress.setMaximum(total)
+            progress.setValue(current)
+            progress.setLabelText(message)
+            QApplication.processEvents()
     
     def _on_batch_operation_complete(self, operation: str, result: dict, progress: QProgressDialog, source: str, extra: dict = None):
         """Handle batch operation completion."""
         progress.close()
         
+        from app.ui.organize_page import ModernInfoDialog
+        
         if operation == 'remove':
-            QMessageBox.information(
+            ModernInfoDialog.show_info(
                 self,
-                "Remove Complete",
-                f"Removed {result.get('removed', 0)} file(s) from index.\n"
-                f"Errors: {result.get('errors', 0)}"
+                title="Remove Complete",
+                message=f"Removed {result.get('removed', 0)} file(s) from index.",
+                details=[f"Errors: {result.get('errors', 0)}"] if result.get('errors', 0) > 0 else None
             )
         elif operation == 'reindex':
-            QMessageBox.information(
+            ModernInfoDialog.show_info(
                 self,
-                "Re-index Complete",
-                f"Updated: {result.get('updated', 0)}\n"
-                f"Not found: {result.get('not_found', 0)}\n"
-                f"Errors: {result.get('errors', 0)}"
+                title="Re-index Complete",
+                message=f"Updated {result.get('updated', 0)} file(s).",
+                details=[
+                    f"Not found: {result.get('not_found', 0)}",
+                    f"Errors: {result.get('errors', 0)}"
+                ] if (result.get('not_found', 0) > 0 or result.get('errors', 0) > 0) else None
             )
         elif operation == 'add_tags':
             tags = extra.get('tags', []) if extra else []
-            QMessageBox.information(
+            ModernInfoDialog.show_info(
                 self,
-                "Tags Added",
-                f"Added tags to {result.get('updated', 0)} file(s).\n"
-                f"Tags: {', '.join(tags)}\n"
-                f"Errors: {result.get('errors', 0)}"
+                title="Tags Added",
+                message=f"Added tags to {result.get('updated', 0)} file(s).",
+                details=[f"Tags: {', '.join(tags)}"],
+                info_text=f"Errors: {result.get('errors', 0)}" if result.get('errors', 0) > 0 else ""
             )
         
         # Refresh views
@@ -6794,7 +6918,80 @@ Move Plan Summary:
         stats_text = f"Indexed: {total_files} files ({files_with_ocr} with OCR) - {total_size_mb} MB"
         self.search_stats_label.setText(stats_text)
 
+    def _update_usage_labels(self):
+        """Update the usage indicator labels (main tab and overlay)."""
+        try:
+            from app.core.supabase_client import supabase_auth, INDEX_LIMIT_STARTER, INDEX_LIMIT_ULTRA
+            
+            # Get current usage
+            usage = supabase_auth.get_index_usage()
+            plan = supabase_auth.get_plan_tier()
+            
+            if plan == 'free':
+                usage_text = "Sign in to track media indexing"
+            else:
+                limit = INDEX_LIMIT_ULTRA if plan == 'ultra' else INDEX_LIMIT_STARTER
+                count = usage.get('count', 0)
+                remaining = max(0, limit - count)
+                usage_text = f"{count:,} / {limit:,} media files indexed • {remaining:,} remaining"
+            
+            # Update main tab label
+            if hasattr(self, 'usage_label') and self.usage_label:
+                from app.ui.theme_manager import get_theme_colors
+                c = get_theme_colors()
+                self.usage_label.setText(usage_text)
+                self.usage_label.setStyleSheet(f"""
+                    QLabel {{
+                        font-size: 11px;
+                        color: {c['text_muted']};
+                        padding: 4px 0;
+                    }}
+                """)
+            
+            # Update overlay label if it exists
+            if hasattr(self, '_overlay_usage_label') and self._overlay_usage_label:
+                self._overlay_usage_label.setText(usage_text)
+                
+        except Exception as e:
+            logger.debug(f"Could not update usage labels: {e}")
+            if hasattr(self, 'usage_label') and self.usage_label:
+                self.usage_label.setText("")
+
     # Debug functionality methods
+    def _filter_indexed_files(self, search_text: str):
+        """Filter the indexed files table based on search text."""
+        if not hasattr(self, 'debug_table'):
+            return
+        
+        search = search_text.lower().strip()
+        
+        # Columns to search:
+        # 1: File Name, 2: Category, 5: Label, 6: Tags, 7: Caption, 11: Purpose, 14: File Path
+        searchable_cols = [1, 2, 5, 6, 7, 11, 14]
+        
+        for row in range(self.debug_table.rowCount()):
+            if not search:
+                # Show all rows when search is empty
+                self.debug_table.setRowHidden(row, False)
+                continue
+            
+            # Check all searchable columns
+            match = False
+            for col in searchable_cols:
+                item = self.debug_table.item(row, col)
+                if item and search in item.text().lower():
+                    match = True
+                    break
+            
+            self.debug_table.setRowHidden(row, not match)
+        
+        # Update selection count label
+        visible_count = sum(1 for row in range(self.debug_table.rowCount()) if not self.debug_table.isRowHidden(row))
+        if search:
+            self.debug_selection_count_label.setText(f"{visible_count} files found")
+        else:
+            self._on_debug_selection_changed()
+    
     def refresh_debug_view(self):
         """Refresh the debug view with current database contents."""
         # Skip if debug table doesn't exist (hidden in MVP mode)

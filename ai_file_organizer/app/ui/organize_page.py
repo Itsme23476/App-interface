@@ -23,7 +23,7 @@ from PySide6.QtWidgets import (
     QProgressBar, QMessageBox, QFileDialog, QGroupBox,
     QSplitter, QFrame, QSizePolicy, QScrollArea,
     QDialog, QListWidget, QListWidgetItem, QCheckBox,
-    QSpacerItem, QStackedWidget, QButtonGroup
+    QSpacerItem, QStackedWidget, QButtonGroup, QApplication
 )
 from PySide6.QtCore import Qt, QThread, Signal, QTimer
 
@@ -1236,6 +1236,664 @@ class ModernInfoDialog(QDialog):
         dialog.exec()
 
 
+class ModernInputDialog(QDialog):
+    """
+    Modern styled input dialog for text input.
+    Matches the app's theme with clean, minimal design.
+    """
+    
+    def __init__(self, parent=None, title: str = "Input", message: str = "",
+                 placeholder: str = "", icon: str = "✏️",
+                 ok_text: str = "OK", cancel_text: str = "Cancel"):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setMinimumWidth(420)
+        self.setModal(True)
+        self._drag_pos = None
+        self.input_text = ""
+        
+        # Get theme colors
+        from app.ui.theme_manager import get_theme_colors
+        c = get_theme_colors()
+        
+        # Remove default window frame for custom styling
+        self.setWindowFlags(self.windowFlags() | Qt.FramelessWindowHint)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        
+        # Main container with rounded corners and shadow
+        self.container = QFrame(self)
+        self.container.setObjectName("modernInputContainer")
+        self.container.setStyleSheet(f"""
+            QFrame#modernInputContainer {{
+                background-color: {c['surface']};
+                border-radius: 24px;
+                border: 1px solid {c['border']};
+            }}
+        """)
+        
+        # Add subtle drop shadow effect
+        from PySide6.QtWidgets import QGraphicsDropShadowEffect
+        from PySide6.QtGui import QColor
+        shadow = QGraphicsDropShadowEffect(self)
+        shadow.setBlurRadius(25)
+        shadow.setXOffset(0)
+        shadow.setYOffset(4)
+        shadow.setColor(QColor(0, 0, 0, 40))
+        self.container.setGraphicsEffect(shadow)
+        
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(20, 20, 20, 20)
+        main_layout.addWidget(self.container)
+        
+        layout = QVBoxLayout(self.container)
+        layout.setContentsMargins(32, 28, 32, 28)
+        layout.setSpacing(18)
+        
+        # Header with icon and title
+        header_layout = QHBoxLayout()
+        header_layout.setSpacing(16)
+        
+        icon_label = QLabel(icon)
+        icon_label.setStyleSheet("""
+            font-size: 24px;
+            background-color: rgba(124, 77, 255, 0.08);
+            border-radius: 22px;
+            border: 1px solid rgba(124, 77, 255, 0.20);
+        """)
+        icon_label.setFixedSize(52, 52)
+        icon_label.setAlignment(Qt.AlignCenter)
+        header_layout.addWidget(icon_label)
+        
+        title_label = QLabel(title)
+        title_label.setStyleSheet(f"""
+            font-family: "Segoe UI", "SF Pro Display", sans-serif;
+            font-size: 20px;
+            font-weight: 700;
+            color: {c['text']};
+            letter-spacing: -0.3px;
+        """)
+        header_layout.addWidget(title_label)
+        header_layout.addStretch()
+        
+        # Close button
+        close_btn = QPushButton("X")
+        close_btn.setFixedSize(36, 36)
+        close_btn.setCursor(Qt.PointingHandCursor)
+        close_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #7C4DFF;
+                color: white;
+                border: none;
+                border-radius: 18px;
+                font-size: 20px;
+                font-weight: bold;
+                font-family: Arial, Helvetica, sans-serif;
+                padding: 0px;
+                margin: 0px;
+            }
+            QPushButton:hover {
+                background-color: #5E35B1;
+            }
+        """)
+        close_btn.clicked.connect(self.reject)
+        header_layout.addWidget(close_btn)
+        
+        layout.addLayout(header_layout)
+        
+        # Message
+        if message:
+            msg_label = QLabel(message)
+            msg_label.setWordWrap(True)
+            msg_label.setStyleSheet(f"""
+                font-family: "Segoe UI", sans-serif;
+                font-size: 14px;
+                color: {c['text_muted']};
+                line-height: 1.5;
+            """)
+            layout.addWidget(msg_label)
+        
+        # Input field
+        self.input_field = QLineEdit()
+        self.input_field.setPlaceholderText(placeholder)
+        self.input_field.setMinimumHeight(48)
+        self.input_field.setStyleSheet(f"""
+            QLineEdit {{
+                background-color: {c['input_bg']};
+                border: 2px solid {c['border']};
+                border-radius: 12px;
+                padding: 12px 16px;
+                font-family: "Segoe UI", sans-serif;
+                font-size: 14px;
+                color: {c['text']};
+            }}
+            QLineEdit:focus {{
+                border-color: #7C4DFF;
+            }}
+            QLineEdit::placeholder {{
+                color: {c['text_muted']};
+            }}
+        """)
+        layout.addWidget(self.input_field)
+        
+        layout.addSpacing(8)
+        
+        # Buttons
+        btn_layout = QHBoxLayout()
+        btn_layout.setSpacing(12)
+        btn_layout.addStretch()
+        
+        cancel_btn = QPushButton(cancel_text)
+        cancel_btn.setMinimumHeight(46)
+        cancel_btn.setMinimumWidth(100)
+        cancel_btn.setCursor(Qt.PointingHandCursor)
+        cancel_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {c['input_bg']};
+                color: {c['text_muted']};
+                border: 1px solid {c['border_strong']};
+                border-radius: 12px;
+                font-family: "Segoe UI", sans-serif;
+                font-weight: 600;
+                font-size: 14px;
+                padding: 10px 24px;
+            }}
+            QPushButton:hover {{
+                background-color: {c['card']};
+                border-color: {c['text_muted']};
+                color: {c['text']};
+            }}
+        """)
+        cancel_btn.clicked.connect(self.reject)
+        btn_layout.addWidget(cancel_btn)
+        
+        ok_btn = QPushButton(ok_text)
+        ok_btn.setMinimumHeight(46)
+        ok_btn.setMinimumWidth(100)
+        ok_btn.setCursor(Qt.PointingHandCursor)
+        ok_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #7C4DFF;
+                color: white;
+                border: none;
+                border-radius: 12px;
+                font-family: "Segoe UI", sans-serif;
+                font-weight: 600;
+                font-size: 14px;
+                padding: 10px 24px;
+            }
+            QPushButton:hover {
+                background-color: #9575FF;
+            }
+        """)
+        ok_btn.clicked.connect(self._on_ok)
+        btn_layout.addWidget(ok_btn)
+        
+        layout.addLayout(btn_layout)
+        
+        # Focus the input field
+        self.input_field.setFocus()
+    
+    def _on_ok(self):
+        self.input_text = self.input_field.text()
+        self.accept()
+    
+    def get_text(self) -> str:
+        return self.input_text
+    
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+            event.accept()
+    
+    def mouseMoveEvent(self, event):
+        if self._drag_pos is not None and event.buttons() == Qt.LeftButton:
+            self.move(event.globalPosition().toPoint() - self._drag_pos)
+            event.accept()
+    
+    def mouseReleaseEvent(self, event):
+        self._drag_pos = None
+        event.accept()
+    
+    @staticmethod
+    def get_input(parent, title: str, message: str, placeholder: str = "",
+                  icon: str = "✏️", ok_text: str = "OK", cancel_text: str = "Cancel") -> tuple:
+        """Show input dialog and return (text, accepted)."""
+        dialog = ModernInputDialog(parent, title, message, placeholder, icon, ok_text, cancel_text)
+        result = dialog.exec()
+        return (dialog.get_text(), result == QDialog.Accepted)
+
+
+class ModernProgressDialog(QDialog):
+    """
+    Modern styled progress dialog matching the app's theme.
+    Features animated progress bar, clean design, and optional cancel button.
+    """
+    
+    cancelled = Signal()
+    
+    def __init__(self, parent=None, title: str = "Processing", message: str = "",
+                 icon: str = "⏳", can_cancel: bool = True, indeterminate: bool = False):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setMinimumWidth(400)
+        self.setModal(True)
+        self._drag_pos = None
+        self._cancelled = False
+        self._indeterminate = indeterminate
+        
+        # Get theme colors
+        from app.ui.theme_manager import get_theme_colors
+        c = get_theme_colors()
+        self._colors = c
+        
+        # Remove default window frame for custom styling
+        self.setWindowFlags(self.windowFlags() | Qt.FramelessWindowHint)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        
+        # Main container with rounded corners and shadow
+        self.container = QFrame(self)
+        self.container.setObjectName("modernProgressContainer")
+        self.container.setStyleSheet(f"""
+            QFrame#modernProgressContainer {{
+                background-color: {c['surface']};
+                border-radius: 20px;
+                border: 1px solid {c['border']};
+            }}
+        """)
+        
+        # Add subtle drop shadow effect
+        from PySide6.QtWidgets import QGraphicsDropShadowEffect
+        from PySide6.QtGui import QColor
+        shadow = QGraphicsDropShadowEffect(self)
+        shadow.setBlurRadius(25)
+        shadow.setXOffset(0)
+        shadow.setYOffset(4)
+        shadow.setColor(QColor(0, 0, 0, 40))
+        self.container.setGraphicsEffect(shadow)
+        
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(16, 16, 16, 16)
+        main_layout.addWidget(self.container)
+        
+        layout = QVBoxLayout(self.container)
+        layout.setContentsMargins(28, 24, 28, 24)
+        layout.setSpacing(16)
+        
+        # Header with icon and title
+        header_layout = QHBoxLayout()
+        header_layout.setSpacing(14)
+        
+        # Animated icon
+        self.icon_label = QLabel(icon)
+        self.icon_label.setStyleSheet("""
+            font-size: 28px;
+            background-color: rgba(124, 77, 255, 0.10);
+            border-radius: 24px;
+            border: 1px solid rgba(124, 77, 255, 0.20);
+        """)
+        self.icon_label.setFixedSize(56, 56)
+        self.icon_label.setAlignment(Qt.AlignCenter)
+        header_layout.addWidget(self.icon_label)
+        
+        # Title and message in vertical layout
+        title_layout = QVBoxLayout()
+        title_layout.setSpacing(4)
+        
+        self.title_label = QLabel(title)
+        self.title_label.setStyleSheet(f"""
+            font-family: "Segoe UI", "SF Pro Display", sans-serif;
+            font-size: 18px;
+            font-weight: 700;
+            color: {c['text']};
+            letter-spacing: -0.2px;
+        """)
+        title_layout.addWidget(self.title_label)
+        
+        self.message_label = QLabel(message)
+        self.message_label.setWordWrap(True)
+        self.message_label.setStyleSheet(f"""
+            font-family: "Segoe UI", sans-serif;
+            font-size: 13px;
+            color: {c['text_muted']};
+        """)
+        title_layout.addWidget(self.message_label)
+        
+        header_layout.addLayout(title_layout, 1)
+        layout.addLayout(header_layout)
+        
+        # Progress bar container
+        progress_container = QFrame()
+        progress_container.setStyleSheet(f"""
+            QFrame {{
+                background-color: {c['card']};
+                border-radius: 12px;
+                border: 1px solid {c['border']};
+            }}
+        """)
+        progress_layout = QVBoxLayout(progress_container)
+        progress_layout.setContentsMargins(16, 14, 16, 14)
+        progress_layout.setSpacing(10)
+        
+        # Status text
+        self.status_label = QLabel("Initializing...")
+        self.status_label.setStyleSheet(f"""
+            font-family: "Segoe UI", sans-serif;
+            font-size: 13px;
+            color: {c['text']};
+            font-weight: 500;
+        """)
+        progress_layout.addWidget(self.status_label)
+        
+        # Progress bar
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setTextVisible(False)
+        self.progress_bar.setMinimumHeight(8)
+        self.progress_bar.setMaximumHeight(8)
+        
+        if indeterminate:
+            self.progress_bar.setRange(0, 0)  # Indeterminate mode
+        else:
+            self.progress_bar.setRange(0, 100)
+            self.progress_bar.setValue(0)
+        
+        self.progress_bar.setStyleSheet(f"""
+            QProgressBar {{
+                border: none;
+                border-radius: 4px;
+                background-color: {c['border']};
+            }}
+            QProgressBar::chunk {{
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, 
+                    stop:0 #7C4DFF, stop:0.5 #9575FF, stop:1 #7C4DFF);
+                border-radius: 4px;
+            }}
+        """)
+        progress_layout.addWidget(self.progress_bar)
+        
+        # Count label (e.g., "3 of 10 files")
+        self.count_label = QLabel("")
+        self.count_label.setStyleSheet(f"""
+            font-family: "Segoe UI", sans-serif;
+            font-size: 12px;
+            color: {c['text_muted']};
+        """)
+        self.count_label.setAlignment(Qt.AlignRight)
+        progress_layout.addWidget(self.count_label)
+        
+        layout.addWidget(progress_container)
+        
+        # Cancel button (optional)
+        if can_cancel:
+            btn_layout = QHBoxLayout()
+            btn_layout.addStretch()
+            
+            self.cancel_btn = QPushButton("Cancel")
+            self.cancel_btn.setMinimumHeight(42)
+            self.cancel_btn.setMinimumWidth(100)
+            self.cancel_btn.setCursor(Qt.PointingHandCursor)
+            self.cancel_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #7C4DFF;
+                    color: white;
+                    border: none;
+                    border-radius: 10px;
+                    font-family: "Segoe UI", sans-serif;
+                    font-weight: 600;
+                    font-size: 14px;
+                    padding: 10px 28px;
+                }
+                QPushButton:hover {
+                    background-color: #9575FF;
+                }
+                QPushButton:pressed {
+                    background-color: #6A3DE8;
+                }
+            """)
+            self.cancel_btn.clicked.connect(self._on_cancel)
+            btn_layout.addWidget(self.cancel_btn)
+            
+            layout.addLayout(btn_layout)
+    
+    def _on_cancel(self):
+        self._cancelled = True
+        self.cancelled.emit()
+        self.close()
+    
+    def is_cancelled(self) -> bool:
+        return self._cancelled
+    
+    def set_progress(self, current: int, total: int, status: str = ""):
+        """Update progress bar and status text."""
+        if total > 0:
+            self.progress_bar.setRange(0, total)
+            self.progress_bar.setValue(current)
+            self.count_label.setText(f"{current} of {total}")
+        if status:
+            self.status_label.setText(status)
+        QApplication.processEvents()
+    
+    def set_status(self, status: str):
+        """Update only the status text."""
+        self.status_label.setText(status)
+        QApplication.processEvents()
+    
+    def set_message(self, message: str):
+        """Update the message below the title."""
+        self.message_label.setText(message)
+        QApplication.processEvents()
+    
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+            event.accept()
+    
+    def mouseMoveEvent(self, event):
+        if self._drag_pos is not None and event.buttons() == Qt.LeftButton:
+            self.move(event.globalPosition().toPoint() - self._drag_pos)
+            event.accept()
+    
+    def mouseReleaseEvent(self, event):
+        self._drag_pos = None
+        event.accept()
+    
+    @staticmethod
+    def create(parent, title: str, message: str = "", icon: str = "⏳",
+               can_cancel: bool = True, indeterminate: bool = False):
+        """Create and show a modern progress dialog."""
+        dialog = ModernProgressDialog(parent, title, message, icon, can_cancel, indeterminate)
+        dialog.show()
+        QApplication.processEvents()
+        return dialog
+
+
+class UpdateNotificationDialog(QDialog):
+    """
+    Modern styled dialog to notify users about available updates.
+    Shows version info, release notes, and download button.
+    """
+    
+    def __init__(self, parent=None, update_info: dict = None):
+        super().__init__(parent)
+        self.update_info = update_info or {}
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.Dialog)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setModal(False)  # Non-blocking
+        self._setup_ui()
+    
+    def _setup_ui(self):
+        from app.ui.theme_manager import get_theme_colors
+        c = get_theme_colors()
+        
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 16)
+        
+        # Container with shadow
+        self.container = QFrame()
+        self.container.setObjectName("updateContainer")
+        self.container.setStyleSheet(f"""
+            QFrame#updateContainer {{
+                background-color: {c['surface']};
+                border: 1px solid {c['border']};
+                border-radius: 16px;
+            }}
+        """)
+        
+        # Add shadow
+        shadow = QGraphicsDropShadowEffect()
+        shadow.setBlurRadius(30)
+        shadow.setOffset(0, 8)
+        shadow.setColor(QColor(0, 0, 0, 60))
+        self.container.setGraphicsEffect(shadow)
+        
+        container_layout = QVBoxLayout(self.container)
+        container_layout.setContentsMargins(24, 20, 24, 20)
+        container_layout.setSpacing(16)
+        
+        # Header with icon and close button
+        header = QHBoxLayout()
+        
+        # Sparkle icon
+        icon = QLabel("✨")
+        icon.setStyleSheet("font-size: 28px; background: transparent;")
+        header.addWidget(icon)
+        
+        # Title
+        title = QLabel("Update Available!")
+        title.setStyleSheet(f"""
+            font-size: 18px;
+            font-weight: 600;
+            color: {c['text']};
+            background: transparent;
+        """)
+        header.addWidget(title)
+        
+        header.addStretch()
+        
+        # Close button
+        close_btn = QPushButton("✕")
+        close_btn.setFixedSize(28, 28)
+        close_btn.setCursor(Qt.PointingHandCursor)
+        close_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent;
+                border: none;
+                border-radius: 14px;
+                font-size: 14px;
+                color: {c['text_muted']};
+            }}
+            QPushButton:hover {{
+                background: {c['card']};
+                color: {c['text']};
+            }}
+        """)
+        close_btn.clicked.connect(self.close)
+        header.addWidget(close_btn)
+        
+        container_layout.addLayout(header)
+        
+        # Version info
+        current = self.update_info.get('current_version', '1.0.0')
+        latest = self.update_info.get('latest_version', '1.0.1')
+        
+        version_label = QLabel(f"Version {latest} is ready")
+        version_label.setStyleSheet(f"""
+            font-size: 14px;
+            color: {c['text_muted']};
+            background: transparent;
+        """)
+        container_layout.addWidget(version_label)
+        
+        # Release notes (if any)
+        notes = self.update_info.get('release_notes', '')
+        if notes:
+            notes_label = QLabel(notes)
+            notes_label.setWordWrap(True)
+            notes_label.setStyleSheet(f"""
+                font-size: 13px;
+                color: {c['text_muted']};
+                background: {c['card']};
+                border-radius: 8px;
+                padding: 12px;
+            """)
+            container_layout.addWidget(notes_label)
+        
+        # Buttons
+        btn_layout = QHBoxLayout()
+        btn_layout.setSpacing(12)
+        
+        # Later button
+        later_btn = QPushButton("Later")
+        later_btn.setCursor(Qt.PointingHandCursor)
+        later_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent;
+                color: {c['text_muted']};
+                border: 1px solid {c['border']};
+                border-radius: 8px;
+                padding: 10px 20px;
+                font-size: 14px;
+                font-weight: 500;
+            }}
+            QPushButton:hover {{
+                background: {c['card']};
+                color: {c['text']};
+            }}
+        """)
+        later_btn.clicked.connect(self.close)
+        btn_layout.addWidget(later_btn)
+        
+        # Download button
+        download_btn = QPushButton("Download Update")
+        download_btn.setCursor(Qt.PointingHandCursor)
+        download_btn.setStyleSheet("""
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #7C4DFF, stop:1 #9575FF);
+                color: white;
+                border: none;
+                border-radius: 8px;
+                padding: 10px 24px;
+                font-size: 14px;
+                font-weight: 600;
+            }
+            QPushButton:hover {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #9575FF, stop:1 #B39DFF);
+            }
+        """)
+        download_btn.clicked.connect(self._on_download)
+        btn_layout.addWidget(download_btn)
+        
+        container_layout.addLayout(btn_layout)
+        
+        layout.addWidget(self.container)
+        
+        # Set fixed width
+        self.setFixedWidth(380)
+    
+    def _on_download(self):
+        """Open download page and close dialog."""
+        from app.core.update_checker import open_download_page
+        url = self.update_info.get('download_url', '')
+        if url:
+            open_download_page(url)
+        self.close()
+    
+    @staticmethod
+    def show_update(parent, update_info: dict):
+        """Show update notification dialog."""
+        dialog = UpdateNotificationDialog(parent, update_info)
+        # Position in top-right corner
+        if parent:
+            parent_geo = parent.geometry()
+            dialog.move(
+                parent_geo.right() - dialog.width() - 20,
+                parent_geo.top() + 60
+            )
+        dialog.show()
+        return dialog
+
+
 class HistoryDialog(QDialog):
     """
     Modern dialog showing organization history with undo capability.
@@ -2235,6 +2893,11 @@ class ApplyInstructionsDialog(QDialog):
         self.result_choice = self.CONTINUE_WATCHING
         self._drag_pos = None
         
+        # Get theme colors
+        from app.ui.theme_manager import get_theme_colors
+        c = get_theme_colors()
+        self._theme_colors = c
+        
         # Remove default window frame for custom styling
         self.setWindowFlags(self.windowFlags() | Qt.FramelessWindowHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
@@ -2242,12 +2905,12 @@ class ApplyInstructionsDialog(QDialog):
         # Main container
         self.container = QFrame(self)
         self.container.setObjectName("applyDialogContainer")
-        self.container.setStyleSheet("""
-            QFrame#applyDialogContainer {
-                background-color: #111119;
+        self.container.setStyleSheet(f"""
+            QFrame#applyDialogContainer {{
+                background-color: {c['surface']};
                 border-radius: 20px;
-                border: 1px solid #1C1C28;
-            }
+                border: 1px solid {c['border']};
+            }}
         """)
         
         # Add drop shadow
@@ -2284,11 +2947,11 @@ class ApplyInstructionsDialog(QDialog):
         header_layout.addWidget(icon_label)
         
         title_label = QLabel("Apply New Instructions")
-        title_label.setStyleSheet("""
+        title_label.setStyleSheet(f"""
             font-family: "Segoe UI", sans-serif;
             font-size: 18px;
             font-weight: 700;
-            color: #E8E8F0;
+            color: {c['text']};
         """)
         header_layout.addWidget(title_label)
         header_layout.addStretch()
@@ -2324,10 +2987,10 @@ class ApplyInstructionsDialog(QDialog):
             subtitle = f"Found {file_count} existing files"
         
         subtitle_label = QLabel(subtitle)
-        subtitle_label.setStyleSheet("""
+        subtitle_label.setStyleSheet(f"""
             font-family: "Segoe UI", sans-serif;
             font-size: 13px;
-            color: #7A7A90;
+            color: {c['text_muted']};
         """)
         layout.addWidget(subtitle_label)
         
@@ -2364,6 +3027,7 @@ class ApplyInstructionsDialog(QDialog):
     
     def _create_option_button(self, title: str, subtitle: str, primary: bool = False) -> QPushButton:
         """Create a styled option button with title and subtitle."""
+        c = self._theme_colors
         btn = QPushButton()
         btn.setCursor(Qt.PointingHandCursor)
         btn.setMinimumHeight(56)
@@ -2378,7 +3042,7 @@ class ApplyInstructionsDialog(QDialog):
             font-family: "Segoe UI", sans-serif;
             font-size: 14px;
             font-weight: 600;
-            color: {"#FFFFFF" if primary else "#E8E8F0"};
+            color: {"#FFFFFF" if primary else c['text']};
             background: transparent;
         """)
         title_lbl.setAttribute(Qt.WA_TransparentForMouseEvents)
@@ -2388,7 +3052,7 @@ class ApplyInstructionsDialog(QDialog):
         subtitle_lbl.setStyleSheet(f"""
             font-family: "Segoe UI", sans-serif;
             font-size: 11px;
-            color: {"rgba(255,255,255,0.8)" if primary else "#7A7A90"};
+            color: {"rgba(255,255,255,0.8)" if primary else c['text_muted']};
             background: transparent;
         """)
         subtitle_lbl.setAttribute(Qt.WA_TransparentForMouseEvents)
@@ -2410,20 +3074,20 @@ class ApplyInstructionsDialog(QDialog):
                 }
             """)
         else:
-            btn.setStyleSheet("""
-                QPushButton {
-                    background-color: #111119;
-                    border: 1px solid #1C1C28;
+            btn.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: {c['surface']};
+                    border: 1px solid {c['border']};
                     border-radius: 12px;
                     text-align: left;
-                }
-                QPushButton:hover {
+                }}
+                QPushButton:hover {{
                     background-color: rgba(124, 77, 255, 0.10);
                     border-color: #7C4DFF;
-                }
-                QPushButton:pressed {
-                    background-color: #1C1C28;
-                }
+                }}
+                QPushButton:pressed {{
+                    background-color: {c['card']};
+                }}
             """)
         
         return btn

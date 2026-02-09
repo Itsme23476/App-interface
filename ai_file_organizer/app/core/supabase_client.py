@@ -30,8 +30,14 @@ logger = logging.getLogger(__name__)
 SUPABASE_URL = "https://gsvccxhdgcshiwgjvgfi.supabase.co"
 SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImdzdmNjeGhkZ2NzaGl3Z2p2Z2ZpIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjczOTY2NTIsImV4cCI6MjA4Mjk3MjY1Mn0.Sbb6YJjlQ_ig2LCcs9zz_Be1kU-iIHBx4Vu4nzCPyTM"
 
-# Stripe configuration
-STRIPE_PRICE_ID = "price_1SeEv5BATYQXewwiQ5XO32PD"
+# Stripe configuration - Pricing Plans
+STRIPE_PRICE_ID_STARTER = "price_1SeEv5BATYQXewwiQ5XO32PD"  # Starter plan
+STRIPE_PRICE_ID_ULTRA = "price_1SuJOxBATYQXewwiuqsqAcMJ"  # Ultra plan $49/month
+STRIPE_PRICE_ID = STRIPE_PRICE_ID_STARTER  # Default for checkout
+
+# Index limits per plan (images, videos, audio only - text files are unlimited)
+INDEX_LIMIT_STARTER = 1000   # 1000 media files per month for starter
+INDEX_LIMIT_ULTRA = 5000     # 5000 media files per month for ultra
 
 
 class SupabaseAuth:
@@ -307,9 +313,12 @@ class SupabaseAuth:
             logger.error(f"[SUB CHECK] Exception: {error_msg}")
             return {'has_subscription': False, 'status': None, 'error': error_msg}
     
-    def open_checkout(self) -> bool:
+    def open_checkout(self, price_id: str = None) -> bool:
         """
         Open Stripe checkout in browser for subscription.
+        
+        Args:
+            price_id: Optional specific price ID (defaults to starter plan)
         
         Returns:
             True if browser was opened successfully
@@ -320,18 +329,238 @@ class SupabaseAuth:
         
         email = self._user.get('email', '')
         user_id = self._user.get('id', '')
+        checkout_price = price_id or STRIPE_PRICE_ID
         
         # Create checkout URL with user info
         # This will redirect to our Supabase Edge Function that creates a Stripe Checkout Session
-        checkout_url = f"{SUPABASE_URL}/functions/v1/create-checkout?user_id={user_id}&email={email}&price_id={STRIPE_PRICE_ID}"
+        checkout_url = f"{SUPABASE_URL}/functions/v1/create-checkout?user_id={user_id}&email={email}&price_id={checkout_price}"
         
         try:
             webbrowser.open(checkout_url)
-            logger.info(f"Opened checkout for user: {email}")
+            logger.info(f"Opened checkout for user: {email}, price: {checkout_price}")
             return True
         except Exception as e:
             logger.error(f"Failed to open checkout: {e}")
             return False
+    
+    def get_plan_tier(self) -> str:
+        """
+        Get current user's plan tier based on their subscription price_id.
+        
+        Returns:
+            'ultra' for Ultra plan, 'starter' for Starter plan, 'free' for no subscription
+        """
+        if not self._subscription:
+            # Try to refresh subscription info
+            self.check_subscription()
+        
+        if not self._subscription:
+            return 'free'
+        
+        price_id = self._subscription.get('price_id', '')
+        status = self._subscription.get('status', '')
+        
+        if status not in ('active', 'trialing'):
+            return 'free'
+        
+        if price_id == STRIPE_PRICE_ID_ULTRA:
+            return 'ultra'
+        else:
+            return 'starter'
+    
+    def get_index_limit(self) -> int:
+        """Get the index limit for current user's plan (images, videos, audio only)."""
+        tier = self.get_plan_tier()
+        if tier == 'ultra':
+            return INDEX_LIMIT_ULTRA
+        elif tier == 'starter':
+            return INDEX_LIMIT_STARTER
+        else:
+            return 0  # No subscription = no indexing
+    
+    def get_current_period_start(self) -> Optional[str]:
+        """Get current billing period start date."""
+        if not self._subscription:
+            self.check_subscription()
+        
+        if self._subscription:
+            return self._subscription.get('current_period_start')
+        return None
+    
+    def get_index_usage(self) -> Dict[str, Any]:
+        """
+        Get current index usage for the billing period.
+        
+        Returns:
+            dict with 'count', 'limit', 'remaining', 'period_start'
+        """
+        if not self._user:
+            return {'count': 0, 'limit': 0, 'remaining': 0, 'error': 'Not authenticated'}
+        
+        try:
+            user_id = self._user.get('id')
+            period_start = self.get_current_period_start()
+            limit = self.get_index_limit()
+            
+            if not period_start:
+                # No subscription, no usage tracking
+                return {'count': 0, 'limit': limit, 'remaining': limit}
+            
+            db_client = self._get_db_client()
+            if not db_client:
+                return {'count': 0, 'limit': limit, 'remaining': limit, 'error': 'Database not available'}
+            
+            # Query index_usage table for current period - just filter by user_id
+            # (period_start comparison can fail due to timestamp format differences)
+            response = db_client.from_('index_usage').select('*').eq(
+                'user_id', user_id
+            ).execute()
+            
+            logger.debug(f"[USAGE] Query response for user {user_id}: {response.data}")
+            
+            if response.data and len(response.data) > 0:
+                # Find the record that matches our period (compare date portion only)
+                target_date = period_start[:10] if period_start else None  # Extract YYYY-MM-DD
+                count = 0
+                for record in response.data:
+                    record_period = record.get('period_start', '')
+                    # Compare date portion to handle format differences
+                    if record_period and target_date and record_period[:10] == target_date:
+                        count = record.get('indexed_count', 0)
+                        logger.debug(f"[USAGE] Found matching record: count={count}")
+                        break
+                    # Fallback: use most recent record if no exact match
+                    if not count:
+                        count = record.get('indexed_count', 0)
+            else:
+                count = 0
+            
+            logger.debug(f"[USAGE] Returning count={count}, limit={limit}")
+            return {
+                'count': count,
+                'limit': limit,
+                'remaining': max(0, limit - count),
+                'period_start': period_start
+            }
+            
+        except Exception as e:
+            logger.error(f"Error getting index usage: {e}")
+            return {'count': 0, 'limit': 0, 'remaining': 0, 'error': str(e)}
+    
+    def increment_index_usage(self, count: int = 1) -> bool:
+        """
+        Increment the index usage count for current billing period.
+        
+        Args:
+            count: Number to increment by (default 1)
+            
+        Returns:
+            True if successful
+        """
+        if not self._user:
+            logger.warning("Cannot increment usage: not authenticated")
+            return False
+        
+        try:
+            user_id = self._user.get('id')
+            period_start = self.get_current_period_start()
+            
+            if not period_start:
+                logger.warning("Cannot increment usage: no subscription period")
+                return False
+            
+            db_client = self._get_db_client()
+            if not db_client:
+                logger.warning("Cannot increment usage: database not available")
+                return False
+            
+            # Query all records for this user
+            response = db_client.from_('index_usage').select('*').eq(
+                'user_id', user_id
+            ).execute()
+            
+            now = datetime.now().isoformat()
+            target_date = period_start[:10]  # Extract YYYY-MM-DD for comparison
+            
+            # Find matching record by date portion
+            existing_record = None
+            for record in (response.data or []):
+                record_period = record.get('period_start', '')
+                if record_period and record_period[:10] == target_date:
+                    existing_record = record
+                    break
+            
+            if existing_record:
+                # Update existing record
+                current_count = existing_record.get('indexed_count', 0)
+                record_id = existing_record.get('id')
+                db_client.from_('index_usage').update({
+                    'indexed_count': current_count + count,
+                    'updated_at': now
+                }).eq('id', record_id).execute()
+                logger.info(f"Updated index usage: {current_count} + {count} = {current_count + count}")
+            else:
+                # Insert new record
+                db_client.from_('index_usage').insert({
+                    'user_id': user_id,
+                    'period_start': period_start,
+                    'indexed_count': count,
+                    'created_at': now,
+                    'updated_at': now
+                }).execute()
+                logger.info(f"Created new index usage record with count={count}")
+            
+            logger.info(f"Incremented index usage by {count} for user {user_id}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error incrementing index usage: {e}")
+            return False
+    
+    def can_index_media(self, count: int = 1) -> Dict[str, Any]:
+        """
+        Check if user can index more images/videos.
+        
+        Args:
+            count: Number of files to index
+            
+        Returns:
+            dict with 'allowed', 'remaining', 'limit', 'plan'
+        """
+        tier = self.get_plan_tier()
+        
+        if tier == 'free':
+            return {
+                'allowed': False,
+                'remaining': 0,
+                'limit': 0,
+                'plan': 'free',
+                'reason': 'Subscription required to index files'
+            }
+        
+        usage = self.get_index_usage()
+        remaining = usage.get('remaining', 0)
+        limit = usage.get('limit', 0)
+        
+        if remaining >= count:
+            return {
+                'allowed': True,
+                'remaining': remaining,
+                'limit': limit,
+                'plan': tier
+            }
+        else:
+            return {
+                'allowed': False,
+                'remaining': remaining,
+                'limit': limit,
+                'plan': tier,
+                'reason': f'Index limit reached ({limit} files/month). Upgrade to Pro for more.'
+            }
+    
+    def open_upgrade_checkout(self) -> bool:
+        """Open checkout for upgrading to Ultra plan."""
+        return self.open_checkout(price_id=STRIPE_PRICE_ID_ULTRA)
 
 
 # Global instance

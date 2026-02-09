@@ -24,6 +24,34 @@ logger = logging.getLogger(__name__)
 # Parallel processing settings
 MAX_CONCURRENT_AI_REQUESTS = 50  # Tier 2: 5,000 RPM allows 50-80 safely
 
+# Media file extensions that count against the index limit
+MEDIA_EXTENSIONS = {
+    # Images
+    '.jpg', '.jpeg', '.png', '.gif', '.svg', '.webp', '.bmp', '.tiff', '.tif',
+    '.heic', '.heif', '.raw', '.cr2', '.nef', '.arw',
+    # Videos
+    '.mp4', '.mov', '.avi', '.mkv', '.wmv', '.flv', '.webm', '.m4v',
+    # Audio
+    '.mp3', '.wav', '.m4a', '.aac', '.flac', '.ogg', '.wma', '.aiff', '.alac',
+}
+
+
+def is_media_file(file_path: Path) -> bool:
+    """Check if a file is an image, video, or audio that counts against the index limit."""
+    return file_path.suffix.lower() in MEDIA_EXTENSIONS
+
+
+def count_media_files(files: list) -> int:
+    """Count how many media files (images/videos/audio) are in the file list."""
+    count = 0
+    for f in files:
+        # Check all possible path keys (scan uses 'source_path', others use 'path' or 'file_path')
+        path = f.get('path') or f.get('file_path') or f.get('source_path')
+        if path:
+            if is_media_file(Path(path)):
+                count += 1
+    return count
+
 class SearchService:
     """High-level search service for file discovery."""
     
@@ -51,6 +79,56 @@ class SearchService:
     def is_paused(self) -> bool:
         """Check if indexing is currently paused."""
         return self._pause_flag.is_set()
+    
+    def _check_index_limit(self, media_count: int) -> Dict[str, Any]:
+        """
+        Check if user can index the given number of media files.
+        
+        Args:
+            media_count: Number of media files to index
+            
+        Returns:
+            Dict with 'allowed', 'remaining', 'limit', 'plan', and optionally 'reason'
+        """
+        try:
+            from app.core.supabase_client import supabase_auth
+            
+            if not supabase_auth.is_authenticated:
+                # Not authenticated - allow indexing but warn
+                logger.warning("User not authenticated, skipping index limit check")
+                return {'allowed': True, 'remaining': 999999, 'limit': 999999, 'plan': 'unknown'}
+            
+            return supabase_auth.can_index_media(media_count)
+            
+        except Exception as e:
+            logger.error(f"Error checking index limit: {e}")
+            # On error, allow indexing to not block users
+            return {'allowed': True, 'remaining': 999999, 'limit': 999999, 'plan': 'unknown', 'error': str(e)}
+    
+    def _update_index_usage(self, media_count: int) -> bool:
+        """
+        Update the index usage after successfully indexing media files.
+        
+        Args:
+            media_count: Number of media files that were indexed
+            
+        Returns:
+            True if successful
+        """
+        if media_count <= 0:
+            return True
+            
+        try:
+            from app.core.supabase_client import supabase_auth
+            
+            if not supabase_auth.is_authenticated:
+                return True
+            
+            return supabase_auth.increment_index_usage(media_count)
+            
+        except Exception as e:
+            logger.error(f"Error updating index usage: {e}")
+            return False
     
     def _wait_if_paused(self):
         """Block while paused, checking every 100ms. Returns True if should continue, False if cancelled."""
@@ -277,7 +355,7 @@ class SearchService:
             total = len(files)
             
             if progress_cb:
-                progress_cb(0, total, "Starting parallel indexing...")
+                progress_cb(0, total, "Checking index limits...")
             
             if total == 0:
                 return {
@@ -286,6 +364,25 @@ class SearchService:
                     'files_with_ocr': 0,
                     'directory': str(directory_path)
                 }
+            
+            # Check media file limit before indexing
+            media_count = count_media_files(files)
+            logger.info(f"Found {media_count} media files (images/videos/audio) out of {total} total files")
+            limit_check = self._check_index_limit(media_count)
+            
+            if not limit_check['allowed']:
+                logger.warning(f"Index limit exceeded: {limit_check.get('reason', 'Unknown')}")
+                return {
+                    'total_files': total,
+                    'indexed_files': 0,
+                    'files_with_ocr': 0,
+                    'directory': str(directory_path),
+                    'limit_exceeded': True,
+                    'limit_info': limit_check
+                }
+            
+            if progress_cb:
+                progress_cb(0, total, "Starting parallel indexing...")
             
             # Process files in parallel
             indexed_count = 0
@@ -393,23 +490,37 @@ class SearchService:
             
             if cancelled:
                 logger.info(f"Indexing cancelled after {indexed_count} files ({skipped_count} skipped)")
+                # Still update usage for files that WERE indexed before cancellation
+                if indexed_count > 0 and media_count > 0:
+                    media_indexed = min(media_count, indexed_count)
+                    self._update_index_usage(media_indexed)
+                    logger.info(f"Updated index usage: +{media_indexed} media files (before cancel)")
                 return {
                     'total_files': total,
                     'indexed_files': indexed_count,
                     'skipped_files': skipped_count,
                     'files_with_ocr': ocr_count,
                     'directory': str(directory_path),
-                    'cancelled': True
+                    'cancelled': True,
+                    'media_indexed': min(media_count, indexed_count) if indexed_count > 0 else 0
                 }
             
             logger.info(f"Indexed {indexed_count} files, skipped {skipped_count} unchanged ({ocr_count} with OCR)")
+            
+            # Update index usage for media files
+            if indexed_count > 0 and media_count > 0:
+                # Calculate how many media files were actually indexed (not skipped)
+                media_indexed = min(media_count, indexed_count)
+                self._update_index_usage(media_indexed)
+                logger.info(f"Updated index usage: +{media_indexed} media files")
             
             return {
                 'total_files': total,
                 'indexed_files': indexed_count,
                 'skipped_files': skipped_count,
                 'files_with_ocr': ocr_count,
-                'directory': str(directory_path)
+                'directory': str(directory_path),
+                'media_indexed': media_count if indexed_count > 0 else 0
             }
             
         except Exception as e:
