@@ -15,6 +15,7 @@ sys.path.insert(0, str(project_root))
 
 from PySide6.QtWidgets import QApplication, QMessageBox
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QIcon
 from app.ui.main_window import MainWindow
 from app.ui.auth_dialog import AuthDialog
 from app.core.logging_config import setup_logging
@@ -59,6 +60,11 @@ def main():
     app.setApplicationName("File Search Assistant")
     app.setApplicationVersion("1.0.0")
     app.setOrganizationName("File Search Assistant")
+    
+    # Set application icon (shows in taskbar and window title bar)
+    icon_path = project_root / 'resources' / 'icon 2.png'
+    if icon_path.exists():
+        app.setWindowIcon(QIcon(str(icon_path)))
     
     # Apply saved theme (dark/light)
     try:

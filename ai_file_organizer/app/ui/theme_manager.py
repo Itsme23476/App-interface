@@ -193,13 +193,21 @@ class ThemeManager(QObject):
         self.theme_changed.emit(theme)
     
     def _apply_windows_titlebar(self, theme: str):
-        """Set Windows title bar to dark or light using DwmSetWindowAttribute."""
+        """Set Windows title bar to dark or light using DwmSetWindowAttribute.
+        
+        Enhanced for Windows 11 24H2 compatibility with DWMWA_CAPTION_COLOR fallback.
+        """
         if sys.platform != 'win32':
             return
         try:
             import ctypes
             import ctypes.wintypes
             dark_value = 1 if theme == 'dark' else 0
+            
+            # Direct caption color for Windows 11 (COLORREF format: 0x00BBGGRR)
+            # Match our dark theme background (#0A0A12 -> BGR: 0x00120A0A)
+            # Light theme: white (#FFFFFF -> BGR: 0x00FFFFFF)
+            caption_color = 0x00120A0A if theme == 'dark' else 0x00FFFFFF
 
             app = QApplication.instance()
             if not app:
@@ -208,9 +216,15 @@ class ThemeManager(QObject):
             # Constants
             DWMWA_USE_IMMERSIVE_DARK_MODE = 20
             DWMWA_USE_IMMERSIVE_DARK_MODE_LEGACY = 19
+            DWMWA_CAPTION_COLOR = 35  # Windows 11 only - directly sets title bar color
             SWP_FRAMECHANGED = 0x0020
             SWP_NOZORDER = 0x0004
             SWP_NOACTIVATE = 0x0010
+            SWP_NOMOVE = 0x0002
+            SWP_NOSIZE = 0x0001
+            # RedrawWindow flags
+            RDW_INVALIDATE = 0x0001
+            RDW_FRAME = 0x0400
 
             for widget in app.topLevelWidgets():
                 try:
@@ -220,7 +234,7 @@ class ThemeManager(QObject):
                     
                     hwnd_ptr = ctypes.wintypes.HWND(hwnd)
                     
-                    # Try attribute 20 first (Win11/Win10 2004+), then 19 (older)
+                    # Method 1: Set immersive dark mode (Win10 2004+ and Win11)
                     for attr in (DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_USE_IMMERSIVE_DARK_MODE_LEGACY):
                         result = ctypes.windll.dwmapi.DwmSetWindowAttribute(
                             hwnd_ptr,
@@ -231,23 +245,26 @@ class ThemeManager(QObject):
                         if result == 0:  # S_OK
                             break
                     
-                    # Force title bar redraw - aggressive approach for Win11 24H2
-                    # Get current window rect
-                    rect = ctypes.wintypes.RECT()
-                    ctypes.windll.user32.GetWindowRect(hwnd_ptr, ctypes.byref(rect))
-                    width = rect.right - rect.left
-                    height = rect.bottom - rect.top
-                    
-                    # Briefly resize by 1px then restore (forces frame redraw)
-                    ctypes.windll.user32.SetWindowPos(
-                        hwnd_ptr, None,
-                        rect.left, rect.top, width + 1, height,
-                        SWP_NOZORDER | SWP_NOACTIVATE
+                    # Method 2: Directly set caption color (Windows 11 only)
+                    # This is more reliable on Win11 24H2 and forces the color
+                    ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                        hwnd_ptr,
+                        ctypes.wintypes.DWORD(DWMWA_CAPTION_COLOR),
+                        ctypes.byref(ctypes.wintypes.DWORD(caption_color)),
+                        ctypes.sizeof(ctypes.wintypes.DWORD),
                     )
+                    
+                    # Force redraw of the non-client area (title bar)
+                    ctypes.windll.user32.RedrawWindow(
+                        hwnd_ptr, None, None,
+                        RDW_INVALIDATE | RDW_FRAME
+                    )
+                    
+                    # Trigger frame change notification
                     ctypes.windll.user32.SetWindowPos(
                         hwnd_ptr, None,
-                        rect.left, rect.top, width, height,
-                        SWP_FRAMECHANGED | SWP_NOZORDER | SWP_NOACTIVATE
+                        0, 0, 0, 0,
+                        SWP_FRAMECHANGED | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE
                     )
                     
                 except Exception:
@@ -303,6 +320,7 @@ def apply_titlebar_theme(widget):
     
     Call this in a dialog's showEvent to ensure dark/light title bar.
     Works only on Windows 10 (2004+) and Windows 11.
+    Enhanced for Windows 11 24H2 with DWMWA_CAPTION_COLOR support.
     """
     if sys.platform != 'win32':
         return
@@ -311,7 +329,11 @@ def apply_titlebar_theme(widget):
         import ctypes
         import ctypes.wintypes
         
-        dark_value = 1 if settings.theme == 'dark' else 0
+        theme = settings.theme
+        dark_value = 1 if theme == 'dark' else 0
+        # Direct caption color (COLORREF format: 0x00BBGGRR)
+        caption_color = 0x00120A0A if theme == 'dark' else 0x00FFFFFF
+        
         hwnd = int(widget.winId())
         if not hwnd:
             return
@@ -319,11 +341,16 @@ def apply_titlebar_theme(widget):
         hwnd_ptr = ctypes.wintypes.HWND(hwnd)
         
         # Constants
+        DWMWA_CAPTION_COLOR = 35  # Windows 11 only
         SWP_FRAMECHANGED = 0x0020
         SWP_NOZORDER = 0x0004
         SWP_NOACTIVATE = 0x0010
+        SWP_NOMOVE = 0x0002
+        SWP_NOSIZE = 0x0001
+        RDW_INVALIDATE = 0x0001
+        RDW_FRAME = 0x0400
         
-        # Try attribute 20 first (Win11/Win10 2004+), then 19
+        # Method 1: Set immersive dark mode (Win10 2004+ and Win11)
         for attr in (20, 19):
             result = ctypes.windll.dwmapi.DwmSetWindowAttribute(
                 hwnd_ptr,
@@ -334,22 +361,25 @@ def apply_titlebar_theme(widget):
             if result == 0:  # S_OK
                 break
         
-        # Force title bar redraw - aggressive approach for Win11 24H2
-        rect = ctypes.wintypes.RECT()
-        ctypes.windll.user32.GetWindowRect(hwnd_ptr, ctypes.byref(rect))
-        width = rect.right - rect.left
-        height = rect.bottom - rect.top
-        
-        # Briefly resize by 1px then restore (forces frame redraw)
-        ctypes.windll.user32.SetWindowPos(
-            hwnd_ptr, None,
-            rect.left, rect.top, width + 1, height,
-            SWP_NOZORDER | SWP_NOACTIVATE
+        # Method 2: Directly set caption color (Windows 11 only)
+        ctypes.windll.dwmapi.DwmSetWindowAttribute(
+            hwnd_ptr,
+            ctypes.wintypes.DWORD(DWMWA_CAPTION_COLOR),
+            ctypes.byref(ctypes.wintypes.DWORD(caption_color)),
+            ctypes.sizeof(ctypes.wintypes.DWORD),
         )
+        
+        # Force redraw of the non-client area (title bar)
+        ctypes.windll.user32.RedrawWindow(
+            hwnd_ptr, None, None,
+            RDW_INVALIDATE | RDW_FRAME
+        )
+        
+        # Trigger frame change notification
         ctypes.windll.user32.SetWindowPos(
             hwnd_ptr, None,
-            rect.left, rect.top, width, height,
-            SWP_FRAMECHANGED | SWP_NOZORDER | SWP_NOACTIVATE
+            0, 0, 0, 0,
+            SWP_FRAMECHANGED | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE
         )
     except Exception:
         pass
