@@ -1,11 +1,10 @@
-name: Build Windows Installer
+﻿name: Build Windows Installer
 
 on:
   release:
     types: [created]
-  workflow_dispatch:  # Allow manual trigger
+  workflow_dispatch:
 
-# Required permissions for uploading to releases
 permissions:
   contents: write
 
@@ -27,8 +26,6 @@ jobs:
           python -m pip install --upgrade pip
           pip install pyinstaller
           pip install -r ai_file_organizer/requirements.txt
-          
-          # Verify PySide6 is installed correctly
           python -c "import PySide6; print(f'PySide6 version: {PySide6.__version__}')"
           python -c "from PySide6.QtWidgets import QApplication; print('QtWidgets OK')"
           python -c "from PySide6.QtCore import QCoreApplication; print('QtCore OK')"
@@ -36,12 +33,6 @@ jobs:
       - name: Build with PyInstaller
         run: |
           cd ai_file_organizer
-          
-          # Build with proper PySide6 collection
-          # --collect-all PySide6: Collects all Qt modules, plugins, and data
-          # --collect-all shiboken6: Collects the PySide6 bindings layer
-          # --hidden-import: Explicitly include modules that might not be detected
-          
           $baseArgs = @(
             "--name", "Lumina",
             "--windowed",
@@ -67,30 +58,16 @@ jobs:
             "--hidden-import", "spellchecker",
             "--noconfirm"
           )
-          
-          # Add icon if exists
           if (Test-Path "resources/iconnn.ico") {
-            echo "Building with icon from resources/iconnn.ico..."
+            echo "Building with icon..."
             $baseArgs += @("--icon", "resources/iconnn.ico")
-          } else {
-            echo "WARNING: Icon not found at resources/iconnn.ico, building without icon..."
           }
-          
-          # Add the main script
           $baseArgs += "main.py"
-          
-          echo "Running PyInstaller with args: $baseArgs"
           pyinstaller @baseArgs
-          
-          echo "=== Build complete ==="
-          echo "Checking output size..."
           $exePath = "dist\Lumina.exe"
           if (Test-Path $exePath) {
             $size = (Get-Item $exePath).Length / 1MB
             echo "EXE size: $([math]::Round($size, 2)) MB"
-            if ($size -lt 50) {
-              echo "WARNING: EXE seems too small! Expected 80-150 MB for PySide6 app"
-            }
           }
           dir dist
         shell: pwsh
@@ -101,7 +78,6 @@ jobs:
             echo "Build successful!"
           } else {
             echo "ERROR: EXE not found!"
-            Get-ChildItem -Recurse ai_file_organizer | Select-Object FullName
             exit 1
           }
         shell: pwsh
@@ -109,18 +85,12 @@ jobs:
       - name: Create Inno Setup installer script
         run: |
           $version = "${{ github.ref_name }}"
-          if ([string]::IsNullOrEmpty($version) -or $version -eq "refs/heads/main") { 
-            $version = "1.0.0" 
-          }
-          # Remove 'V' or 'v' prefix if present
+          if ([string]::IsNullOrEmpty($version) -or $version -eq "refs/heads/main") { $version = "1.0.0" }
           $version = $version -replace '^[Vv]', ''
-          
-          # Check if icon exists for installer
           $iconLine = ""
           if (Test-Path "ai_file_organizer/resources/iconnn.ico") {
             $iconLine = "SetupIconFile=ai_file_organizer\resources\iconnn.ico"
           }
-          
           @"
           [Setup]
           AppName=Lumina
@@ -180,3 +150,36 @@ jobs:
             installer/*.exe
             ai_file_organizer/dist/*.exe
           fail_on_unmatched_files: true
+      
+      - name: Update Supabase app_version table
+        if: github.event_name == 'release'
+        env:
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: |
+          $version = "${{ github.ref_name }}" -replace '^[Vv]', ''
+          $releaseName = "${{ github.event.release.name }}"
+          if ([string]::IsNullOrEmpty($releaseName)) { $releaseName = "Lumina v$version" }
+          $releaseNotes = "${{ github.event.release.body }}" -replace '"', '\"' -replace "`r`n", ' ' -replace "`n", ' '
+          $downloadUrl = "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/Lumina-Setup-v$version.exe"
+          
+          echo "Updating Supabase with version: $version"
+          
+          if ([string]::IsNullOrEmpty($env:SUPABASE_SERVICE_KEY)) {
+            echo "::warning::SUPABASE_SERVICE_KEY not set. Add it to repository secrets."
+            exit 0
+          }
+          
+          $body = "{`"version`":`"$version`",`"download_url`":`"$downloadUrl`",`"release_name`":`"$releaseName`",`"release_notes`":`"$releaseNotes`",`"is_required`":false}"
+          
+          try {
+            Invoke-RestMethod -Uri "https://gsvccxhdgcshiwgjvgfi.supabase.co/rest/v1/app_version" -Method Post -Headers @{
+              "apikey" = $env:SUPABASE_SERVICE_KEY
+              "Authorization" = "Bearer $env:SUPABASE_SERVICE_KEY"
+              "Content-Type" = "application/json"
+              "Prefer" = "return=minimal"
+            } -Body $body
+            echo "Successfully updated Supabase"
+          } catch {
+            echo "::warning::Failed to update Supabase: $($_.Exception.Message)"
+          }
+        shell: pwsh

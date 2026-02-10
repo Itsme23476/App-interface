@@ -6,9 +6,9 @@ VERSION = "1.0.0"
 BUILD_DATE = "2026-02-11"
 APP_NAME = "Lumina"
 
-# GitHub repository info for automatic update checks
+# GitHub repository info (for reference)
 GITHUB_OWNER = "Itsme23476"
 GITHUB_REPO = "App-interface"
 
-# GitHub Releases API - automatically detects new releases
-GITHUB_RELEASES_URL = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/releases/latest"
+# Update checking is now done via Supabase (app_version table)
+# This allows updates to work even with private GitHub repos

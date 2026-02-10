@@ -585,5 +585,47 @@ class SupabaseAuth:
         return self.open_checkout(price_id=STRIPE_PRICE_ID_ULTRA)
 
 
+def get_latest_app_version() -> Optional[Dict[str, Any]]:
+    """
+    Fetch the latest app version from Supabase (public access, no auth required).
+    
+    Returns:
+        Dict with version info: {version, download_url, release_notes, release_name, is_required}
+        or None if failed
+    """
+    if not SUPABASE_AVAILABLE:
+        logger.warning("Supabase not available for version check")
+        return None
+    
+    try:
+        # Create anonymous client (no auth needed due to RLS policy)
+        client = SyncPostgrestClient(
+            base_url=f"{SUPABASE_URL}/rest/v1",
+            headers={"apikey": SUPABASE_ANON_KEY}
+        )
+        
+        # Query latest version (order by published_at desc, limit 1)
+        response = client.from_("app_version").select("*").order("published_at", desc=True).limit(1).execute()
+        
+        if response.data and len(response.data) > 0:
+            version_data = response.data[0]
+            logger.info(f"Fetched app version from Supabase: {version_data.get('version')}")
+            return {
+                'version': version_data.get('version'),
+                'download_url': version_data.get('download_url'),
+                'release_notes': version_data.get('release_notes', ''),
+                'release_name': version_data.get('release_name', ''),
+                'published_at': version_data.get('published_at', ''),
+                'is_required': version_data.get('is_required', False)
+            }
+        else:
+            logger.info("No app version found in Supabase")
+            return None
+            
+    except Exception as e:
+        logger.info(f"Could not fetch app version from Supabase: {e}")
+        return None
+
+
 # Global instance
 supabase_auth = SupabaseAuth()

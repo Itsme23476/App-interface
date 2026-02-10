@@ -352,16 +352,16 @@ class MainWindow(QMainWindow):
         logger.info(f"Onboarding reminder set (count: {remind_count})")
     
     def _check_for_updates(self):
-        """Check for app updates in background via GitHub Releases."""
+        """Check for app updates in background via Supabase."""
         try:
-            from app.version import VERSION, GITHUB_RELEASES_URL
+            from app.version import VERSION
             from app.core.update_checker import check_for_updates
             
             # Run check in background thread to not block UI
             import threading
             
             def check_thread():
-                update_info = check_for_updates(VERSION, GITHUB_RELEASES_URL)
+                update_info = check_for_updates(VERSION)
                 if update_info:
                     # Show notification on main thread
                     QTimer.singleShot(0, lambda: self._show_update_notification(update_info))

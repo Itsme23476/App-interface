@@ -1,6 +1,6 @@
 """
 Update checker for Lumina - File Search Assistant.
-Uses GitHub Releases API to automatically detect new versions.
+Uses Supabase to check for new versions (works with private GitHub repos).
 """
 
 import logging
@@ -19,7 +19,7 @@ def compare_versions(current: str, latest: str) -> bool:
     """
     try:
         from packaging import version
-        # Strip 'v' prefix if present (GitHub tags often use v1.0.0)
+        # Strip 'v' prefix if present
         current_clean = current.lstrip('v')
         latest_clean = latest.lstrip('v')
         return version.parse(latest_clean) > version.parse(current_clean)
@@ -28,94 +28,69 @@ def compare_versions(current: str, latest: str) -> bool:
         return latest.lstrip('v') > current.lstrip('v')
 
 
-def check_for_updates_github(current_version: str, github_url: str) -> Optional[Dict[str, Any]]:
+def check_for_updates_supabase(current_version: str) -> Optional[Dict[str, Any]]:
     """
-    Check for updates using GitHub Releases API.
+    Check for updates using Supabase app_version table.
+    
+    This method works even with private GitHub repos since version info
+    is stored in Supabase with public read access.
     
     Args:
         current_version: Current app version (e.g., "1.0.0")
-        github_url: GitHub API URL for latest release
         
     Returns:
         Dict with update info if available, None otherwise
     """
     try:
-        import urllib.request
-        import json
+        from app.core.supabase_client import get_latest_app_version
         
-        logger.info(f"Checking for updates via GitHub Releases...")
+        logger.info("Checking for updates via Supabase...")
         
-        # GitHub API request with proper headers
-        request = urllib.request.Request(
-            github_url,
-            headers={
-                'User-Agent': f'AIFileOrganizer/{current_version}',
-                'Accept': 'application/vnd.github.v3+json'
-            }
-        )
+        version_info = get_latest_app_version()
         
-        with urllib.request.urlopen(request, timeout=10) as response:
-            data = json.loads(response.read().decode('utf-8'))
+        if not version_info:
+            logger.info("No version info found in Supabase")
+            return None
         
-        # Extract version from tag_name (e.g., "v1.1.0" -> "1.1.0")
-        latest_version = data.get('tag_name', '').lstrip('v')
+        latest_version = version_info.get('version', '').lstrip('v')
         
         if not latest_version:
-            logger.debug("No version tag found in release")
+            logger.info("No version found in Supabase response")
             return None
         
         if compare_versions(current_version, latest_version):
             logger.info(f"Update available: {current_version} -> {latest_version}")
             
-            # Get download URL - prefer the release page, or first asset if available
-            download_url = data.get('html_url', '')  # Release page URL
-            
-            # If there are downloadable assets, get the first one (usually the installer)
-            assets = data.get('assets', [])
-            if assets:
-                # Look for .exe or .zip files first
-                for asset in assets:
-                    name = asset.get('name', '').lower()
-                    if name.endswith('.exe') or name.endswith('.zip') or name.endswith('.msi'):
-                        download_url = asset.get('browser_download_url', download_url)
-                        break
-            
             return {
                 'current_version': current_version,
                 'latest_version': latest_version,
-                'download_url': download_url,
-                'release_notes': data.get('body', ''),
-                'release_name': data.get('name', f'Version {latest_version}'),
-                'published_at': data.get('published_at', ''),
-                'required': False
+                'download_url': version_info.get('download_url', ''),
+                'release_notes': version_info.get('release_notes', ''),
+                'release_name': version_info.get('release_name', f'Version {latest_version}'),
+                'published_at': version_info.get('published_at', ''),
+                'required': version_info.get('is_required', False)
             }
         else:
             logger.info(f"App is up to date (v{current_version})")
             return None
             
-    except urllib.error.HTTPError as e:
-        if e.code == 404:
-            logger.debug("No releases found on GitHub yet")
-        else:
-            logger.debug(f"GitHub API error: {e}")
-        return None
     except Exception as e:
-        logger.debug(f"Could not check for updates: {e}")
+        logger.info(f"Could not check for updates via Supabase: {e}")
         return None
 
 
-def check_for_updates(current_version: str, check_url: str) -> Optional[Dict[str, Any]]:
+def check_for_updates(current_version: str, check_url: str = None) -> Optional[Dict[str, Any]]:
     """
-    Check for updates - wrapper that uses GitHub Releases API.
+    Check for updates using Supabase.
     
     Args:
         current_version: Current app version
-        check_url: GitHub Releases API URL
+        check_url: Ignored (kept for backwards compatibility)
         
     Returns:
         Dict with update info if available, None otherwise
     """
-    return check_for_updates_github(current_version, check_url)
+    return check_for_updates_supabase(current_version)
 
 
 def open_download_page(url: str) -> bool:
