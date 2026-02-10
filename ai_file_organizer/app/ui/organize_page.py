@@ -4742,7 +4742,7 @@ class OrganizePage(QWidget):
         layout.setSpacing(20)
         
         # Header
-        header = QLabel("AI File Organizer")
+        header = QLabel("Lumina")
         header.setObjectName("heroHeading")
         layout.addWidget(header)
         

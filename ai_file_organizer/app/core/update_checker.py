@@ -1,5 +1,5 @@
 """
-Update checker for the AI File Organizer app.
+Update checker for Lumina - File Search Assistant.
 Uses GitHub Releases API to automatically detect new versions.
 """
 

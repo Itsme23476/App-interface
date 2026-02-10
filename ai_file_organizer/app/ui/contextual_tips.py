@@ -1,5 +1,5 @@
 """
-Contextual Tips System for AI File Organizer
+Contextual Tips System for Lumina
 Provides pulsing dot indicators and spotlight popups for feature discovery
 """
 

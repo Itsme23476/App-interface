@@ -1,9 +1,10 @@
 """
-Version information for the AI File Organizer app.
+Version information for Lumina - File Search Assistant.
 """
 
 VERSION = "1.0.0"
-BUILD_DATE = "2026-02-09"
+BUILD_DATE = "2026-02-11"
+APP_NAME = "Lumina"
 
 # GitHub repository info for automatic update checks
 GITHUB_OWNER = "Itsme23476"

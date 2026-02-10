@@ -1,5 +1,5 @@
 """
-Interactive Onboarding Overlay for AI File Organizer
+Interactive Onboarding Overlay for Lumina
 A floating panel that guides users through the app's features
 """
 
@@ -144,7 +144,7 @@ class OnboardingAnimation(QWidget):
         p.setPen(self._purple)
         font = QFont("Segoe UI", 11, QFont.Bold)
         p.setFont(font)
-        p.drawText(QRectF(0, cy + 30, self.width(), 25), Qt.AlignCenter, "AI File Organizer")
+        p.drawText(QRectF(0, cy + 30, self.width(), 25), Qt.AlignCenter, "Lumina")
     
     def _draw_star(self, p: QPainter, cx, cy, size):
         """Draw a 4-point sparkle star"""
@@ -659,7 +659,7 @@ class OnboardingOverlay(QDialog):
         # highlight: attribute name on main_window to spotlight
         self.steps = [
             {
-                "title": "Welcome to AI File Organizer! 🎉",
+                "title": "Welcome to Lumina! 🎉",
                 "description": "• Quick tour of key features\n• Takes about 30 seconds\n• Use ← → keys to navigate",
                 "nav_index": None,
                 "button_text": "Let's Go!",

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-File Search Assistant - v1.0
+Lumina - File Search Assistant v1.0
 A privacy-first desktop application for intelligent file search and quick path autofill.
 Instantly find and autofill file paths in any application using global hotkeys.
 """
@@ -9,8 +9,17 @@ import sys
 import os
 from pathlib import Path
 
+# Handle PyInstaller bundled path vs running from source
+if hasattr(sys, '_MEIPASS'):
+    # Running as bundled exe - resources are in temp extraction folder
+    project_root = Path(sys._MEIPASS)
+    source_root = Path(sys._MEIPASS)
+else:
+    # Running from source
+    project_root = Path(__file__).parent
+    source_root = project_root
+
 # Add the project root to Python path for consistent imports
-project_root = Path(__file__).parent
 sys.path.insert(0, str(project_root))
 
 from PySide6.QtWidgets import QApplication, QMessageBox
@@ -57,12 +66,15 @@ def main():
     
     # Create Qt application
     app = QApplication(sys.argv)
-    app.setApplicationName("File Search Assistant")
+    app.setApplicationName("Lumina")
     app.setApplicationVersion("1.0.0")
-    app.setOrganizationName("File Search Assistant")
+    app.setOrganizationName("Lumina")
     
     # Set application icon (shows in taskbar and window title bar)
-    icon_path = project_root / 'resources' / 'icon 2.png'
+    # Try ICO first (for Windows), then PNG as fallback
+    icon_path = source_root / 'resources' / 'iconnn.ico'
+    if not icon_path.exists():
+        icon_path = source_root / 'resources' / 'icon.png'
     if icon_path.exists():
         app.setWindowIcon(QIcon(str(icon_path)))
     
