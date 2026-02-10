@@ -2,7 +2,7 @@
 Version information for Lumina - File Search Assistant.
 """
 
-VERSION = "1.0.0"
+VERSION = "1.9.0"
 BUILD_DATE = "2026-02-11"
 APP_NAME = "Lumina"
 
