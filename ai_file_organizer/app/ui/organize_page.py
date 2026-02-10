@@ -23,7 +23,8 @@ from PySide6.QtWidgets import (
     QProgressBar, QMessageBox, QFileDialog, QGroupBox,
     QSplitter, QFrame, QSizePolicy, QScrollArea,
     QDialog, QListWidget, QListWidgetItem, QCheckBox,
-    QSpacerItem, QStackedWidget, QButtonGroup, QApplication
+    QSpacerItem, QStackedWidget, QButtonGroup, QApplication,
+    QRadioButton
 )
 from PySide6.QtCore import Qt, QThread, Signal, QTimer
 
@@ -3366,6 +3367,635 @@ class ApplyInstructionsDialog(QDialog):
             event.accept()
 
 
+class ApplyInstructionsDialogPerFolder(QDialog):
+    """
+    Enhanced dialog for choosing how to apply new instructions PER FOLDER.
+    Shows each folder with its own set of options (Re-organize All, Organize As-Is, Skip).
+    """
+    
+    # Result constants (same as ApplyInstructionsDialog for compatibility)
+    REORGANIZE_ALL = 1
+    ORGANIZE_AS_IS = 2
+    CONTINUE_WATCHING = 3
+    
+    def __init__(self, parent=None, folder_info: List[Dict] = None):
+        """
+        Args:
+            parent: Parent widget
+            folder_info: List of dicts with 'path', 'file_count', 'subfolder_count' keys
+        """
+        super().__init__(parent)
+        self.setWindowTitle("Apply Instructions")
+        self.setMinimumWidth(520)
+        self.setMinimumHeight(300)
+        self.setModal(True)
+        self._drag_pos = None
+        
+        # Default to empty list
+        self.folder_info = folder_info or []
+        
+        # Store per-folder choices: {folder_path: choice}
+        self.folder_choices = {}
+        self._radio_groups = {}  # {folder_path: QButtonGroup}
+        
+        # Get theme colors
+        from app.ui.theme_manager import get_theme_colors
+        c = get_theme_colors()
+        self._theme_colors = c
+        
+        # Remove default window frame for custom styling
+        self.setWindowFlags(self.windowFlags() | Qt.FramelessWindowHint)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        
+        # Main container
+        self.container = QFrame(self)
+        self.container.setObjectName("applyDialogContainer")
+        self.container.setStyleSheet(f"""
+            QFrame#applyDialogContainer {{
+                background-color: {c['surface']};
+                border-radius: 20px;
+                border: 1px solid {c['border']};
+            }}
+        """)
+        
+        # Add drop shadow
+        from PySide6.QtWidgets import QGraphicsDropShadowEffect
+        from PySide6.QtGui import QColor
+        shadow = QGraphicsDropShadowEffect(self)
+        shadow.setBlurRadius(25)
+        shadow.setXOffset(0)
+        shadow.setYOffset(4)
+        shadow.setColor(QColor(0, 0, 0, 40))
+        self.container.setGraphicsEffect(shadow)
+        
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(20, 20, 20, 20)
+        main_layout.addWidget(self.container)
+        
+        layout = QVBoxLayout(self.container)
+        layout.setContentsMargins(28, 24, 28, 24)
+        layout.setSpacing(16)
+        
+        # Header
+        header_layout = QHBoxLayout()
+        header_layout.setSpacing(12)
+        
+        icon_label = QLabel("🔄")
+        icon_label.setStyleSheet("""
+            font-size: 24px;
+            background-color: rgba(124, 77, 255, 0.08);
+            border-radius: 20px;
+            border: 1px solid rgba(124, 77, 255, 0.20);
+        """)
+        icon_label.setFixedSize(44, 44)
+        icon_label.setAlignment(Qt.AlignCenter)
+        header_layout.addWidget(icon_label)
+        
+        title_label = QLabel("Apply New Instructions")
+        title_label.setStyleSheet(f"""
+            font-family: "Segoe UI", sans-serif;
+            font-size: 18px;
+            font-weight: 700;
+            color: {c['text']};
+        """)
+        header_layout.addWidget(title_label)
+        header_layout.addStretch()
+        
+        close_btn = QPushButton("X")
+        close_btn.setFixedSize(32, 32)
+        close_btn.setCursor(Qt.PointingHandCursor)
+        close_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #7C4DFF;
+                color: white;
+                border: none;
+                border-radius: 16px;
+                font-size: 18px;
+                font-weight: bold;
+                font-family: Arial, Helvetica, sans-serif;
+                padding: 0px;
+                margin: 0px;
+            }
+            QPushButton:hover {
+                background-color: #5E35B1;
+            }
+        """)
+        close_btn.clicked.connect(self._on_cancel)
+        header_layout.addWidget(close_btn)
+        
+        layout.addLayout(header_layout)
+        
+        # Subtitle
+        subtitle_label = QLabel("Choose how to handle each folder:")
+        subtitle_label.setStyleSheet(f"""
+            font-family: "Segoe UI", sans-serif;
+            font-size: 13px;
+            color: {c['text_muted']};
+        """)
+        layout.addWidget(subtitle_label)
+        
+        # Scrollable area for folders
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setStyleSheet(f"""
+            QScrollArea {{
+                background: transparent;
+                border: none;
+            }}
+            QScrollArea > QWidget > QWidget {{
+                background: transparent;
+            }}
+            QScrollBar:vertical {{
+                background: {c['surface']};
+                width: 8px;
+                border-radius: 4px;
+            }}
+            QScrollBar::handle:vertical {{
+                background: {c['border']};
+                border-radius: 4px;
+                min-height: 30px;
+            }}
+            QScrollBar::handle:vertical:hover {{
+                background: #7C4DFF;
+            }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+                height: 0px;
+            }}
+        """)
+        
+        scroll_content = QWidget()
+        scroll_layout = QVBoxLayout(scroll_content)
+        scroll_layout.setContentsMargins(0, 0, 8, 0)
+        scroll_layout.setSpacing(12)
+        
+        # Create row for each folder
+        for folder_data in self.folder_info:
+            folder_path = folder_data.get('path', '')
+            file_count = folder_data.get('file_count', 0)
+            subfolder_count = folder_data.get('subfolder_count', 0)
+            
+            folder_widget = self._create_folder_row(folder_path, file_count, subfolder_count)
+            scroll_layout.addWidget(folder_widget)
+        
+        scroll_layout.addStretch()
+        scroll.setWidget(scroll_content)
+        
+        # Set max height for scroll area
+        max_scroll_height = min(300, 80 * len(self.folder_info) + 20)
+        scroll.setMaximumHeight(max_scroll_height)
+        
+        layout.addWidget(scroll)
+        
+        # Apply button
+        apply_btn = QPushButton("Apply Changes")
+        apply_btn.setCursor(Qt.PointingHandCursor)
+        apply_btn.setFixedHeight(44)
+        apply_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #7C4DFF;
+                color: white;
+                font-family: "Segoe UI", sans-serif;
+                font-size: 14px;
+                font-weight: 600;
+                border: none;
+                border-radius: 12px;
+            }
+            QPushButton:hover {
+                background-color: #9575FF;
+            }
+            QPushButton:pressed {
+                background-color: #6A3DE8;
+            }
+        """)
+        apply_btn.clicked.connect(self._on_apply)
+        layout.addWidget(apply_btn)
+    
+    def _create_folder_row(self, folder_path: str, file_count: int, subfolder_count: int) -> QFrame:
+        """Create a styled row for a folder with radio button options."""
+        c = self._theme_colors
+        
+        row = QFrame()
+        row.setStyleSheet(f"""
+            QFrame {{
+                background-color: {c['card']};
+                border-radius: 12px;
+                border: 1px solid {c['border']};
+            }}
+        """)
+        
+        row_layout = QVBoxLayout(row)
+        row_layout.setContentsMargins(16, 12, 16, 12)
+        row_layout.setSpacing(8)
+        
+        # Folder info line
+        info_layout = QHBoxLayout()
+        info_layout.setSpacing(8)
+        
+        folder_icon = QLabel("📁")
+        folder_icon.setStyleSheet("font-size: 16px; background: transparent;")
+        info_layout.addWidget(folder_icon)
+        
+        # Truncate long paths
+        display_path = folder_path
+        if len(display_path) > 45:
+            display_path = "..." + display_path[-42:]
+        
+        folder_label = QLabel(display_path)
+        folder_label.setToolTip(folder_path)
+        folder_label.setStyleSheet(f"""
+            font-family: "Segoe UI", sans-serif;
+            font-size: 13px;
+            font-weight: 500;
+            color: {c['text']};
+            background: transparent;
+        """)
+        info_layout.addWidget(folder_label, 1)
+        
+        # File count badge
+        if subfolder_count > 0:
+            count_text = f"{file_count} files, {subfolder_count} subfolders"
+        else:
+            count_text = f"{file_count} files"
+        
+        count_label = QLabel(count_text)
+        count_label.setStyleSheet(f"""
+            font-family: "Segoe UI", sans-serif;
+            font-size: 11px;
+            color: {c['text_muted']};
+            background-color: rgba(124, 77, 255, 0.10);
+            padding: 3px 8px;
+            border-radius: 10px;
+        """)
+        info_layout.addWidget(count_label)
+        
+        row_layout.addLayout(info_layout)
+        
+        # Radio buttons for options
+        options_layout = QHBoxLayout()
+        options_layout.setSpacing(16)
+        
+        # Create button group for this folder
+        btn_group = QButtonGroup(self)
+        self._radio_groups[folder_path] = btn_group
+        
+        # Default to Skip
+        self.folder_choices[folder_path] = self.CONTINUE_WATCHING
+        
+        radio_style = f"""
+            QRadioButton {{
+                font-family: "Segoe UI", sans-serif;
+                font-size: 11px;
+                color: {c['text']};
+                background: transparent;
+                spacing: 4px;
+            }}
+            QRadioButton::indicator {{
+                width: 14px;
+                height: 14px;
+            }}
+            QRadioButton::indicator:unchecked {{
+                border: 2px solid {c['border']};
+                border-radius: 7px;
+                background: transparent;
+            }}
+            QRadioButton::indicator:checked {{
+                border: 2px solid #7C4DFF;
+                border-radius: 7px;
+                background: #7C4DFF;
+            }}
+        """
+        
+        radio_reorganize = QRadioButton("🔄 Re-organize All")
+        radio_reorganize.setStyleSheet(radio_style)
+        radio_reorganize.setToolTip("Flatten folders, then organize fresh")
+        btn_group.addButton(radio_reorganize, self.REORGANIZE_ALL)
+        options_layout.addWidget(radio_reorganize)
+        
+        radio_as_is = QRadioButton("📂 Organize As-Is")
+        radio_as_is.setStyleSheet(radio_style)
+        radio_as_is.setToolTip("Apply new instructions to current files")
+        btn_group.addButton(radio_as_is, self.ORGANIZE_AS_IS)
+        options_layout.addWidget(radio_as_is)
+        
+        radio_skip = QRadioButton("⏭️ Skip")
+        radio_skip.setStyleSheet(radio_style)
+        radio_skip.setToolTip("Only apply to new files going forward")
+        radio_skip.setChecked(True)  # Default selection
+        btn_group.addButton(radio_skip, self.CONTINUE_WATCHING)
+        options_layout.addWidget(radio_skip)
+        
+        options_layout.addStretch()
+        
+        # Connect button group to update choices
+        btn_group.idClicked.connect(lambda id, fp=folder_path: self._on_choice_changed(fp, id))
+        
+        row_layout.addLayout(options_layout)
+        
+        return row
+    
+    def _on_choice_changed(self, folder_path: str, choice_id: int):
+        """Update folder choice when radio button is clicked."""
+        self.folder_choices[folder_path] = choice_id
+    
+    def _on_apply(self):
+        """Apply button clicked - accept dialog with current choices."""
+        self.accept()
+    
+    def _on_cancel(self):
+        """Cancel - set all to skip and reject."""
+        for folder_path in self.folder_choices:
+            self.folder_choices[folder_path] = self.CONTINUE_WATCHING
+        self.reject()
+    
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+            event.accept()
+    
+    def mouseMoveEvent(self, event):
+        if event.buttons() == Qt.LeftButton and self._drag_pos:
+            self.move(event.globalPosition().toPoint() - self._drag_pos)
+            event.accept()
+
+
+class ApplyInstructionsDialogSingleFolder(QDialog):
+    """
+    Dialog for choosing how to apply instructions to a SINGLE folder.
+    Shown after saving a folder's settings.
+    """
+    
+    # Result constants
+    REORGANIZE_ALL = 1
+    ORGANIZE_AS_IS = 2
+    SKIP = 3
+    
+    def __init__(self, parent=None, folder_path: str = "", file_count: int = 0, 
+                 subfolder_count: int = 0, instruction: str = ""):
+        super().__init__(parent)
+        self.setWindowTitle("Apply Instructions")
+        self.setMinimumWidth(420)
+        self.setModal(True)
+        self.result_choice = self.SKIP
+        self._drag_pos = None
+        
+        self.folder_path = folder_path
+        self.file_count = file_count
+        self.subfolder_count = subfolder_count
+        self.instruction = instruction
+        
+        # Get theme colors
+        from app.ui.theme_manager import get_theme_colors
+        c = get_theme_colors()
+        self._theme_colors = c
+        
+        # Remove default window frame for custom styling
+        self.setWindowFlags(self.windowFlags() | Qt.FramelessWindowHint)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        
+        # Main container
+        self.container = QFrame(self)
+        self.container.setObjectName("applyDialogContainer")
+        self.container.setStyleSheet(f"""
+            QFrame#applyDialogContainer {{
+                background-color: {c['surface']};
+                border-radius: 20px;
+                border: 1px solid {c['border']};
+            }}
+        """)
+        
+        # Add drop shadow
+        from PySide6.QtWidgets import QGraphicsDropShadowEffect
+        from PySide6.QtGui import QColor
+        shadow = QGraphicsDropShadowEffect(self)
+        shadow.setBlurRadius(25)
+        shadow.setXOffset(0)
+        shadow.setYOffset(4)
+        shadow.setColor(QColor(0, 0, 0, 40))
+        self.container.setGraphicsEffect(shadow)
+        
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(20, 20, 20, 20)
+        main_layout.addWidget(self.container)
+        
+        layout = QVBoxLayout(self.container)
+        layout.setContentsMargins(28, 24, 28, 24)
+        layout.setSpacing(16)
+        
+        # Header
+        header_layout = QHBoxLayout()
+        header_layout.setSpacing(12)
+        
+        icon_label = QLabel("📁")
+        icon_label.setStyleSheet("""
+            font-size: 24px;
+            background-color: rgba(124, 77, 255, 0.08);
+            border-radius: 20px;
+            border: 1px solid rgba(124, 77, 255, 0.20);
+        """)
+        icon_label.setFixedSize(44, 44)
+        icon_label.setAlignment(Qt.AlignCenter)
+        header_layout.addWidget(icon_label)
+        
+        title_label = QLabel("Folder Saved!")
+        title_label.setStyleSheet(f"""
+            font-family: "Segoe UI", sans-serif;
+            font-size: 18px;
+            font-weight: 700;
+            color: {c['text']};
+        """)
+        header_layout.addWidget(title_label)
+        header_layout.addStretch()
+        
+        close_btn = QPushButton("X")
+        close_btn.setFixedSize(32, 32)
+        close_btn.setCursor(Qt.PointingHandCursor)
+        close_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #7C4DFF;
+                color: white;
+                border: none;
+                border-radius: 16px;
+                font-size: 18px;
+                font-weight: bold;
+                font-family: Arial, Helvetica, sans-serif;
+                padding: 0px;
+                margin: 0px;
+            }
+            QPushButton:hover {
+                background-color: #5E35B1;
+            }
+        """)
+        close_btn.clicked.connect(self._on_skip)
+        header_layout.addWidget(close_btn)
+        
+        layout.addLayout(header_layout)
+        
+        # Folder info
+        display_path = folder_path
+        if len(display_path) > 50:
+            display_path = "..." + display_path[-47:]
+        
+        folder_info = QLabel(f"📂 {display_path}")
+        folder_info.setToolTip(folder_path)
+        folder_info.setStyleSheet(f"""
+            font-family: "Segoe UI", sans-serif;
+            font-size: 13px;
+            font-weight: 500;
+            color: {c['text']};
+            background-color: {c['card']};
+            padding: 10px 14px;
+            border-radius: 8px;
+        """)
+        layout.addWidget(folder_info)
+        
+        # File count info
+        if subfolder_count > 0:
+            count_text = f"Found {file_count} files in {subfolder_count} subfolders"
+        else:
+            count_text = f"Found {file_count} existing files"
+        
+        subtitle_label = QLabel(count_text)
+        subtitle_label.setStyleSheet(f"""
+            font-family: "Segoe UI", sans-serif;
+            font-size: 13px;
+            color: {c['text_muted']};
+        """)
+        layout.addWidget(subtitle_label)
+        
+        # Question
+        question_label = QLabel("What would you like to do with these files?")
+        question_label.setStyleSheet(f"""
+            font-family: "Segoe UI", sans-serif;
+            font-size: 14px;
+            font-weight: 600;
+            color: {c['text']};
+            margin-top: 8px;
+        """)
+        layout.addWidget(question_label)
+        
+        # Options as styled buttons
+        options_layout = QVBoxLayout()
+        options_layout.setSpacing(10)
+        
+        # Option 1: Re-organize All
+        reorganize_btn = self._create_option_button(
+            "🔄 Re-organize All",
+            "Flatten folders, then organize fresh",
+            primary=True
+        )
+        reorganize_btn.clicked.connect(self._on_reorganize)
+        options_layout.addWidget(reorganize_btn)
+        
+        # Option 2: Organize As-Is
+        organize_btn = self._create_option_button(
+            "📂 Organize As-Is",
+            "Apply instruction to current files"
+        )
+        organize_btn.clicked.connect(self._on_organize)
+        options_layout.addWidget(organize_btn)
+        
+        # Option 3: Skip
+        skip_btn = self._create_option_button(
+            "⏭️ Skip",
+            "Only apply to new files going forward"
+        )
+        skip_btn.clicked.connect(self._on_skip)
+        options_layout.addWidget(skip_btn)
+        
+        layout.addLayout(options_layout)
+    
+    def _create_option_button(self, title: str, subtitle: str, primary: bool = False) -> QPushButton:
+        """Create a styled option button with title and subtitle."""
+        c = self._theme_colors
+        btn = QPushButton()
+        btn.setCursor(Qt.PointingHandCursor)
+        btn.setMinimumHeight(56)
+        
+        # Create layout for button content
+        btn_layout = QVBoxLayout(btn)
+        btn_layout.setContentsMargins(16, 10, 16, 10)
+        btn_layout.setSpacing(2)
+        
+        title_lbl = QLabel(title)
+        title_lbl.setStyleSheet(f"""
+            font-family: "Segoe UI", sans-serif;
+            font-size: 14px;
+            font-weight: 600;
+            color: {"#FFFFFF" if primary else c['text']};
+            background: transparent;
+        """)
+        title_lbl.setAttribute(Qt.WA_TransparentForMouseEvents)
+        btn_layout.addWidget(title_lbl)
+        
+        subtitle_lbl = QLabel(subtitle)
+        subtitle_lbl.setStyleSheet(f"""
+            font-family: "Segoe UI", sans-serif;
+            font-size: 11px;
+            color: {"rgba(255,255,255,0.8)" if primary else c['text_muted']};
+            background: transparent;
+        """)
+        subtitle_lbl.setAttribute(Qt.WA_TransparentForMouseEvents)
+        btn_layout.addWidget(subtitle_lbl)
+        
+        if primary:
+            btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #7C4DFF;
+                    border: none;
+                    border-radius: 12px;
+                    text-align: left;
+                }
+                QPushButton:hover {
+                    background-color: #9575FF;
+                }
+                QPushButton:pressed {
+                    background-color: #6A3DE8;
+                }
+            """)
+        else:
+            btn.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: {c['surface']};
+                    border: 1px solid {c['border']};
+                    border-radius: 12px;
+                    text-align: left;
+                }}
+                QPushButton:hover {{
+                    background-color: rgba(124, 77, 255, 0.10);
+                    border-color: #7C4DFF;
+                }}
+                QPushButton:pressed {{
+                    background-color: {c['card']};
+                }}
+            """)
+        
+        return btn
+    
+    def _on_reorganize(self):
+        self.result_choice = self.REORGANIZE_ALL
+        self.accept()
+    
+    def _on_organize(self):
+        self.result_choice = self.ORGANIZE_AS_IS
+        self.accept()
+    
+    def _on_skip(self):
+        self.result_choice = self.SKIP
+        self.accept()
+    
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+            event.accept()
+    
+    def mouseMoveEvent(self, event):
+        if event.buttons() == Qt.LeftButton and self._drag_pos:
+            self.move(event.globalPosition().toPoint() - self._drag_pos)
+            event.accept()
+
+
 class WatchConfigDialog(QDialog):
     """
     Dialog for configuring Watch & Auto-Organize folders with per-folder instructions.
@@ -3550,10 +4180,11 @@ class WatchConfigDialog(QDialog):
         cancel_btn.clicked.connect(self.reject)
         button_layout.addWidget(cancel_btn)
         
-        self.save_btn = QPushButton("Save Changes")
+        self.save_btn = QPushButton("Done")
         self.save_btn.setMinimumHeight(44)
-        self.save_btn.setMinimumWidth(140)
+        self.save_btn.setMinimumWidth(100)
         self.save_btn.setCursor(Qt.PointingHandCursor)
+        self.save_btn.setToolTip("Close dialog (use Save button on each folder to save)")
         self.save_btn.setStyleSheet("""
             QPushButton {
                 background-color: #7C4DFF;
@@ -3595,10 +4226,16 @@ class WatchConfigDialog(QDialog):
             folder = os.path.normpath(folder)
             
             if folder in self.folder_data:
-                QMessageBox.information(
-                    self, "Already Added",
-                    "This folder is already in the watch list."
+                # Use modern info dialog
+                dialog = ModernInfoDialog(
+                    self,
+                    title="Folder Already Added",
+                    message="This folder is already in your watch list.",
+                    info_text=f"'{os.path.basename(folder)}' is already being monitored for auto-organization.",
+                    icon="📂",
+                    ok_text="Got it"
                 )
+                dialog.exec()
                 return
             
             self._create_folder_widget(folder, '')
@@ -3640,6 +4277,32 @@ class WatchConfigDialog(QDialog):
         path_label.setStyleSheet(f"font-weight: 600; font-size: 13px; color: {c['text']}; border: none; background: transparent;")
         path_label.setWordWrap(True)
         header_row.addWidget(path_label, 1)
+        
+        # Save button for this folder
+        save_btn = QPushButton("Save")
+        save_btn.setMinimumHeight(28)
+        save_btn.setMinimumWidth(60)
+        save_btn.setCursor(Qt.PointingHandCursor)
+        save_btn.setToolTip("Save this folder's settings")
+        save_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #7C4DFF;
+                color: white;
+                border: none;
+                border-radius: 6px;
+                font-weight: 600;
+                font-size: 12px;
+                padding: 4px 10px;
+            }
+            QPushButton:hover {
+                background-color: #9575FF;
+            }
+            QPushButton:pressed {
+                background-color: #6A3DE8;
+            }
+        """)
+        save_btn.clicked.connect(lambda: self._save_single_folder(folder_path))
+        header_row.addWidget(save_btn)
         
         remove_btn = QPushButton("Remove")
         remove_btn.setMinimumHeight(28)
@@ -3719,7 +4382,8 @@ class WatchConfigDialog(QDialog):
         self.folder_widgets[folder_path] = {
             'widget': frame,
             'input': instruction_input,
-            'mic_button': mic_button
+            'mic_button': mic_button,
+            'save_button': save_btn
         }
         
         # Add to layout (before spacer)
@@ -3743,6 +4407,124 @@ class WatchConfigDialog(QDialog):
         """Handle instruction text change."""
         if folder_path in self.folder_data:
             self.folder_data[folder_path] = text
+    
+    def _save_single_folder(self, folder_path: str):
+        """Save a single folder's settings and ask what to do with existing files."""
+        try:
+            folder_path = os.path.normpath(folder_path)
+            instruction = self.folder_data.get(folder_path, '')
+            
+            logger.info(f"Saving single folder: {folder_path}")
+            
+            # Check if folder already exists in settings
+            existing_folders = list(settings.auto_organize_folders)
+            folder_exists = False
+            
+            for i, folder_info in enumerate(existing_folders):
+                if os.path.normpath(folder_info.get('path', '')) == folder_path:
+                    # Update existing
+                    existing_folders[i] = {'path': folder_path, 'instruction': instruction}
+                    folder_exists = True
+                    break
+            
+            if not folder_exists:
+                # Add new
+                existing_folders.append({'path': folder_path, 'instruction': instruction})
+            
+            # Save to settings
+            settings.auto_organize_folders = existing_folders
+            settings._save_config()
+            logger.info(f"Saved folder settings for: {folder_path}")
+            
+            # Count files in this folder
+            file_count = 0
+            subfolder_count = 0
+            try:
+                for item in os.listdir(folder_path):
+                    item_path = os.path.join(folder_path, item)
+                    if os.path.isfile(item_path):
+                        file_count += 1
+                    elif os.path.isdir(item_path) and not item.startswith('.'):
+                        subfolder_count += 1
+                        for sub_item in os.listdir(item_path):
+                            if os.path.isfile(os.path.join(item_path, sub_item)):
+                                file_count += 1
+            except Exception:
+                pass
+            
+            # Show feedback that folder was saved
+            if folder_path in self.folder_widgets:
+                save_btn = self.folder_widgets[folder_path].get('save_button')
+                if save_btn:
+                    # Temporarily show "Saved!" feedback
+                    original_text = save_btn.text()
+                    save_btn.setText("Saved!")
+                    save_btn.setStyleSheet("""
+                        QPushButton {
+                            background-color: #4CAF50;
+                            color: white;
+                            border: none;
+                            border-radius: 6px;
+                            font-weight: 600;
+                            font-size: 12px;
+                            padding: 4px 10px;
+                        }
+                    """)
+                    
+                    # Reset after a short delay
+                    QTimer.singleShot(1500, lambda: self._reset_save_button(folder_path, original_text))
+            
+            # If there are files and watcher is running, show apply dialog
+            if file_count > 0:
+                # Get parent (OrganizePage) to check watcher status
+                parent = self.parent()
+                if parent and hasattr(parent, 'auto_watcher') and parent.auto_watcher and parent.auto_watcher.is_running:
+                    # Show single-folder apply dialog
+                    dialog = ApplyInstructionsDialogSingleFolder(
+                        self, 
+                        folder_path, 
+                        file_count, 
+                        subfolder_count,
+                        instruction
+                    )
+                    dialog.exec()
+                    
+                    if dialog.result_choice == ApplyInstructionsDialogSingleFolder.REORGANIZE_ALL:
+                        # Flatten and reorganize this folder
+                        parent.auto_watcher.organize_single_folder(folder_path, flatten_first=True)
+                    elif dialog.result_choice == ApplyInstructionsDialogSingleFolder.ORGANIZE_AS_IS:
+                        # Organize as-is
+                        parent.auto_watcher.organize_single_folder(folder_path, flatten_first=False)
+                    # else: SKIP - do nothing
+                    
+        except Exception as e:
+            logger.error(f"Error saving single folder: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    def _reset_save_button(self, folder_path: str, original_text: str):
+        """Reset save button to original state."""
+        if folder_path in self.folder_widgets:
+            save_btn = self.folder_widgets[folder_path].get('save_button')
+            if save_btn:
+                save_btn.setText(original_text)
+                save_btn.setStyleSheet("""
+                    QPushButton {
+                        background-color: #7C4DFF;
+                        color: white;
+                        border: none;
+                        border-radius: 6px;
+                        font-weight: 600;
+                        font-size: 12px;
+                        padding: 4px 10px;
+                    }
+                    QPushButton:hover {
+                        background-color: #9575FF;
+                    }
+                    QPushButton:pressed {
+                        background-color: #6A3DE8;
+                    }
+                """)
     
     def _update_no_folders_visibility(self):
         """Show/hide placeholder based on folder count."""
@@ -3915,8 +4697,8 @@ class OrganizePage(QWidget):
         self._apply_theme_styles(theme_manager.current_theme)
         theme_manager.theme_changed.connect(self._apply_theme_styles)
         
-        # Check auto-start after UI is ready
-        QTimer.singleShot(500, self._check_auto_start)
+        # Check auto-start after UI is fully ready (2 second delay to prevent lag)
+        QTimer.singleShot(2000, self._check_auto_start)
     
     def _init_auto_watcher(self):
         """Initialize the auto-organize watcher."""
@@ -5023,37 +5805,8 @@ class OrganizePage(QWidget):
         # Update watcher's instructions
         self.auto_watcher.folder_instructions = folder_instructions
         
-        # Count existing files
-        existing_count = 0
-        subfolder_count = 0
-        for folder in self.watch_folders:
-            try:
-                for item in os.listdir(folder):
-                    item_path = os.path.join(folder, item)
-                    if os.path.isfile(item_path):
-                        existing_count += 1
-                    elif os.path.isdir(item_path) and not item.startswith('.'):
-                        subfolder_count += 1
-                        for sub_item in os.listdir(item_path):
-                            if os.path.isfile(os.path.join(item_path, sub_item)):
-                                existing_count += 1
-            except Exception:
-                pass
-        
-        total_items = existing_count + subfolder_count
-        
-        if total_items > 0:
-            # Ask user what to do with existing files with new instructions
-            dialog = ApplyInstructionsDialog(self, existing_count, subfolder_count)
-            dialog.exec()
-            
-            if dialog.result_choice == ApplyInstructionsDialog.REORGANIZE_ALL:
-                # Flatten and reorganize
-                self.auto_watcher._organize_existing_files_with_options(flatten_first=True)
-            elif dialog.result_choice == ApplyInstructionsDialog.ORGANIZE_AS_IS:
-                # Organize as-is with new instructions
-                self.auto_watcher._organize_existing_files_with_options(flatten_first=False)
-            # else: CONTINUE_WATCHING - just keep watching with new instructions
+        # NOTE: Per-folder organization choices are now handled by the individual "Save" 
+        # buttons next to each folder, so we don't show a dialog here when clicking "Done"
         
         # Instructions updated - just update the summary
         self._update_watch_summary()

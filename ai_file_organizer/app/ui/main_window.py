@@ -1680,9 +1680,72 @@ class MainWindow(QMainWindow):
                 
                 self.status_bar.showMessage("Index cleared successfully", 3000)
                 logger.info("Index cleared by user")
+                
             except Exception as e:
                 logger.error(f"Error clearing index: {e}")
                 ModernInfoDialog.show_warning(self, "Error", f"Failed to clear index: {e}")
+    
+    def _offer_reindex_watched_files(self):
+        """
+        If the auto-watcher is running, offer to re-index existing files in watched folders.
+        Called after clearing the index.
+        """
+        try:
+            # Check if organize_page and watcher exist and are running
+            if not hasattr(self, 'organize_page'):
+                return
+            
+            organize_page = self.organize_page
+            if not organize_page.auto_watcher or not organize_page.auto_watcher.is_running:
+                return
+            
+            # Build per-folder info with file counts
+            folder_info = []
+            total_files = 0
+            
+            for folder in organize_page.watch_folders:
+                folder_file_count = 0
+                folder_subfolder_count = 0
+                try:
+                    for item in os.listdir(folder):
+                        item_path = os.path.join(folder, item)
+                        if os.path.isfile(item_path):
+                            folder_file_count += 1
+                        elif os.path.isdir(item_path) and not item.startswith('.'):
+                            folder_subfolder_count += 1
+                            # Count files in subfolders too
+                            for sub_item in os.listdir(item_path):
+                                if os.path.isfile(os.path.join(item_path, sub_item)):
+                                    folder_file_count += 1
+                except Exception:
+                    pass
+                
+                if folder_file_count > 0 or folder_subfolder_count > 0:
+                    folder_info.append({
+                        'path': folder,
+                        'file_count': folder_file_count,
+                        'subfolder_count': folder_subfolder_count
+                    })
+                    total_files += folder_file_count
+            
+            # If there are files, show the per-folder dialog
+            if total_files > 0 and folder_info:
+                from app.ui.organize_page import ApplyInstructionsDialogPerFolder
+                from PySide6.QtWidgets import QDialog
+                
+                dialog = ApplyInstructionsDialogPerFolder(self, folder_info)
+                result = dialog.exec()
+                
+                if result == QDialog.Accepted:
+                    # Apply per-folder choices
+                    logger.info(f"User chose per-folder options: {dialog.folder_choices}")
+                    organize_page.auto_watcher.organize_folders_with_per_folder_options(dialog.folder_choices)
+                else:
+                    # Skip - just continue watching for new files
+                    logger.info("User cancelled re-indexing dialog")
+                    
+        except Exception as e:
+            logger.error(f"Error offering reindex for watched files: {e}")
     
     def _update_view_files_button_count(self):
         """Update the View Files button with the current file count."""
@@ -6693,6 +6756,7 @@ Move Plan Summary:
                 self._update_view_files_button_count()
                 self.status_bar.showMessage("Index cleared successfully", 3000)
                 logger.info("Index cleared by user")
+                
             except Exception as e:
                 logger.error(f"Error clearing index: {e}")
                 QMessageBox.warning(self, "Error", f"Failed to clear index: {e}")
@@ -7174,8 +7238,8 @@ Move Plan Summary:
                 # Actions (col 15)
                 actions_widget = QWidget()
                 actions_layout = QHBoxLayout(actions_widget)
-                actions_layout.setContentsMargins(2, 0, 2, 0)  # Minimal margins
-                actions_layout.setSpacing(6)
+                actions_layout.setContentsMargins(6, 2, 6, 2)  # Tight vertical margins
+                actions_layout.setSpacing(12)  # More space between buttons
                 actions_layout.setAlignment(Qt.AlignVCenter)
                 
                 btn_style = """
@@ -7185,10 +7249,10 @@ Move Plan Summary:
                         font-size: 11px;
                         font-weight: bold;
                         border: none;
-                        border-radius: 4px;
-                        padding: 2px 6px;
-                        min-height: 24px;
-                        max-height: 24px;
+                        border-radius: 5px;
+                        padding: 2px 10px;
+                        min-height: 22px;
+                        max-height: 22px;
                     }
                     QPushButton:hover {
                         background-color: #9575FF;
@@ -7197,10 +7261,10 @@ Move Plan Summary:
                 
                 btn_copy = QPushButton("Copy")
                 btn_open = QPushButton("Open")
-                btn_copy.setFixedHeight(24)
-                btn_open.setFixedHeight(24)
-                btn_copy.setMinimumWidth(48)
-                btn_open.setMinimumWidth(48)
+                btn_copy.setFixedHeight(22)
+                btn_open.setFixedHeight(22)
+                btn_copy.setMinimumWidth(52)
+                btn_open.setMinimumWidth(52)
                 btn_copy.setStyleSheet(btn_style)
                 btn_open.setStyleSheet(btn_style)
                 btn_copy.setToolTip("Copy file path to clipboard")

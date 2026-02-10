@@ -767,6 +767,52 @@ class FileIndex:
             logger.error(f"Advanced search error: {e}")
             return []
     
+    def get_file_by_name(self, file_name: str) -> Optional[Dict[str, Any]]:
+        """
+        Get file information by filename (not full path).
+        Useful when a file has been moved but we want to find it by name.
+        
+        Args:
+            file_name: The filename (without path)
+            
+        Returns:
+            File dictionary or None if not found
+        """
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                cursor = conn.cursor()
+                cursor.execute("SELECT * FROM files WHERE file_name = ?", (file_name,))
+                row = cursor.fetchone()
+                
+                if row:
+                    return {
+                        'id': row['id'],
+                        'file_path': row['file_path'],
+                        'file_name': row['file_name'],
+                        'file_extension': row['file_extension'],
+                        'file_size': row['file_size'],
+                        'mime_type': row['mime_type'],
+                        'category': row['category'],
+                        'created_date': row['created_date'],
+                        'modified_date': row['modified_date'],
+                        'indexed_date': row['indexed_date'],
+                        'original_date': row['original_date'] if 'original_date' in row.keys() else None,
+                        'has_ocr': bool(row['has_ocr']),
+                        'ocr_text': row['ocr_text'],
+                        'label': row['label'] if 'label' in row.keys() else None,
+                        'tags': _parse_tags_value(row['tags']),
+                        'caption': row['caption'] if 'caption' in row.keys() else None,
+                        'vision_confidence': row['vision_confidence'] if 'vision_confidence' in row.keys() else None,
+                        'content_hash': row['content_hash'] if 'content_hash' in row.keys() else None,
+                        'metadata': json.loads(row['metadata']) if row['metadata'] else {}
+                    }
+                return None
+                
+        except Exception as e:
+            logger.error(f"Error getting file by name {file_name}: {e}")
+            return None
+
     def get_file_by_path(self, file_path: str) -> Optional[Dict[str, Any]]:
         """
         Get file information by path.
@@ -811,6 +857,28 @@ class FileIndex:
         except Exception as e:
             logger.error(f"Error getting file {file_path}: {e}")
             return None
+
+    def get_filenames_with_tags(self) -> set:
+        """
+        Get a set of all filenames that have tags in the database.
+        Used for quick lookup to determine if a file needs indexing.
+        
+        Returns:
+            Set of filenames (without path) that have non-empty tags
+        """
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                # Get filenames where tags is not null and not empty
+                cursor.execute("""
+                    SELECT file_name FROM files 
+                    WHERE tags IS NOT NULL AND tags != '' AND tags != '[]'
+                """)
+                rows = cursor.fetchall()
+                return {row[0] for row in rows}
+        except Exception as e:
+            logger.error(f"Error getting filenames with tags: {e}")
+            return set()
 
     def get_file_count(self) -> int:
         """
