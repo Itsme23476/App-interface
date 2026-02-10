@@ -275,6 +275,17 @@ class SearchService:
             if not file_path.is_file():
                 return {'error': f'Not a file: {file_path}'}
             
+            # Check if this is a media file (counts against index limit)
+            file_is_media = is_media_file(file_path)
+            
+            # Check index limit before processing media files
+            if file_is_media:
+                limit_check = self._check_index_limit(1)
+                if not limit_check.get('allowed'):
+                    reason = limit_check.get('reason', 'Index limit reached')
+                    logger.warning(f"Cannot index media file - limit reached: {reason}")
+                    return {'error': reason, 'limit_reached': True}
+            
             # Create file_data dict that _process_single_file expects
             file_data = {
                 'source_path': str(file_path),
@@ -320,7 +331,12 @@ class SearchService:
                 except Exception as emb_err:
                     logger.warning(f"Embedding error for {file_path}: {emb_err}")
                 
-                return {'success': True, 'path': str(file_path)}
+                # Update index usage for media files (images, videos, audio)
+                if file_is_media:
+                    self._update_index_usage(1)
+                    logger.debug(f"Updated index usage: +1 media file ({file_path.name})")
+                
+                return {'success': True, 'path': str(file_path), 'is_media': file_is_media}
             else:
                 return {'error': 'Failed to add file to index'}
                 

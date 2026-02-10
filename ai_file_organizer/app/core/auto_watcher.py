@@ -129,10 +129,16 @@ class AutoWatcherWorker(QThread):
             search_service = SearchService()
             indexed_count = 0
             
+            limit_reached = False
             for i, file_path in enumerate(files_to_index):
                 if self._should_stop:
                     self.finished_processing.emit(all_processed_files)
                     return
+                
+                # Stop indexing if limit was reached on a previous file
+                if limit_reached:
+                    logger.info(f"[Worker] Skipping remaining {len(files_to_index) - i} files due to index limit")
+                    break
                     
                 try:
                     result = search_service.index_single_file(Path(file_path), force_ai=False)
@@ -142,6 +148,12 @@ class AutoWatcherWorker(QThread):
                         logger.info(f"[Worker] Auto-indexed: {os.path.basename(file_path)}")
                         self.file_indexed.emit(file_path)
                         self.status_changed.emit(f"Indexed {indexed_count}/{len(files_to_index)} files...")
+                    elif result.get('limit_reached'):
+                        # Index limit reached - stop trying to index more media files
+                        limit_reached = True
+                        logger.warning(f"[Worker] Index limit reached: {result.get('error')}")
+                        self.status_changed.emit("Index limit reached - upgrade for more")
+                        self.error_occurred.emit(file_path, result.get('error', 'Index limit reached'))
                     elif result.get('error'):
                         logger.warning(f"[Worker] Failed to index {file_path}: {result.get('error')}")
                     

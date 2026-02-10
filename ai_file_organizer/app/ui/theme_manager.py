@@ -113,7 +113,7 @@ class ThemeManager(QObject):
             self._ui_dir = Path(sys._MEIPASS) / 'app' / 'ui'
         else:
             # Running from source
-        self._ui_dir = Path(__file__).parent
+            self._ui_dir = Path(__file__).parent
     
     @property
     def current_theme(self) -> str:
@@ -357,4 +357,3 @@ def apply_titlebar_theme(widget):
 
 # Global instance
 theme_manager = ThemeManager()
-

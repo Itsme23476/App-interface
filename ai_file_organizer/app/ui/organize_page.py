@@ -6092,6 +6092,10 @@ class OrganizePage(QWidget):
     def _on_watch_file_indexed(self, file_path: str):
         """Handle file indexed signal from watcher."""
         logger.info(f"Watch auto-indexed: {file_path}")
+        # Update usage display in main window
+        main_window = self.window()
+        if main_window and hasattr(main_window, '_update_usage_labels'):
+            main_window._update_usage_labels()
     
     def _on_watch_status(self, status: str):
         """Handle status updates from watcher."""
