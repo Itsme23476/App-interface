@@ -43,7 +43,7 @@ jobs:
           # --hidden-import: Explicitly include modules that might not be detected
           
           $baseArgs = @(
-            "--name", "AIFileOrganizer",
+            "--name", "Lumina",
             "--windowed",
             "--onefile",
             "--collect-all", "PySide6",
@@ -52,6 +52,7 @@ jobs:
             "--collect-data", "spellchecker",
             "--add-data", "app/ui/styles.qss;app/ui",
             "--add-data", "app/ui/styles_light.qss;app/ui",
+            "--add-data", "resources;resources",
             "--hidden-import", "PySide6.QtCore",
             "--hidden-import", "PySide6.QtGui",
             "--hidden-import", "PySide6.QtWidgets",
@@ -67,11 +68,12 @@ jobs:
             "--noconfirm"
           )
           
-          if (Test-Path "assets/icon.ico") {
-            echo "Building with icon..."
-            $baseArgs += @("--icon", "assets/icon.ico", "--add-data", "assets;assets")
+          # Add icon if exists
+          if (Test-Path "resources/iconnn.ico") {
+            echo "Building with icon from resources/iconnn.ico..."
+            $baseArgs += @("--icon", "resources/iconnn.ico")
           } else {
-            echo "Building without icon..."
+            echo "WARNING: Icon not found at resources/iconnn.ico, building without icon..."
           }
           
           # Add the main script
@@ -82,7 +84,7 @@ jobs:
           
           echo "=== Build complete ==="
           echo "Checking output size..."
-          $exePath = "dist\AIFileOrganizer.exe"
+          $exePath = "dist\Lumina.exe"
           if (Test-Path $exePath) {
             $size = (Get-Item $exePath).Length / 1MB
             echo "EXE size: $([math]::Round($size, 2)) MB"
@@ -95,7 +97,7 @@ jobs:
       
       - name: Verify build output
         run: |
-          if (Test-Path "ai_file_organizer/dist/AIFileOrganizer.exe") {
+          if (Test-Path "ai_file_organizer/dist/Lumina.exe") {
             echo "Build successful!"
           } else {
             echo "ERROR: EXE not found!"
@@ -113,27 +115,36 @@ jobs:
           # Remove 'V' or 'v' prefix if present
           $version = $version -replace '^[Vv]', ''
           
+          # Check if icon exists for installer
+          $iconLine = ""
+          if (Test-Path "ai_file_organizer/resources/iconnn.ico") {
+            $iconLine = "SetupIconFile=ai_file_organizer\resources\iconnn.ico"
+          }
+          
           @"
           [Setup]
-          AppName=AI File Organizer
+          AppName=Lumina
           AppVersion=$version
-          DefaultDirName={autopf}\AI File Organizer
-          DefaultGroupName=AI File Organizer
+          AppPublisher=Lumina
+          DefaultDirName={autopf}\Lumina
+          DefaultGroupName=Lumina
           OutputDir=installer
-          OutputBaseFilename=AI-File-Organizer-Setup
+          OutputBaseFilename=Lumina-Setup-v$version
           Compression=lzma
           SolidCompression=yes
           PrivilegesRequired=admin
+          UninstallDisplayIcon={app}\Lumina.exe
+          $iconLine
           
           [Files]
-          Source: "ai_file_organizer\dist\AIFileOrganizer.exe"; DestDir: "{app}"; DestName: "AI File Organizer.exe"; Flags: ignoreversion
+          Source: "ai_file_organizer\dist\Lumina.exe"; DestDir: "{app}"; DestName: "Lumina.exe"; Flags: ignoreversion
           
           [Icons]
-          Name: "{group}\AI File Organizer"; Filename: "{app}\AI File Organizer.exe"
-          Name: "{commondesktop}\AI File Organizer"; Filename: "{app}\AI File Organizer.exe"
+          Name: "{group}\Lumina"; Filename: "{app}\Lumina.exe"
+          Name: "{commondesktop}\Lumina"; Filename: "{app}\Lumina.exe"
           
           [Run]
-          Filename: "{app}\AI File Organizer.exe"; Description: "Launch AI File Organizer"; Flags: nowait postinstall skipifsilent
+          Filename: "{app}\Lumina.exe"; Description: "Launch Lumina"; Flags: nowait postinstall skipifsilent
           "@ | Out-File -FilePath installer.iss -Encoding utf8
         shell: pwsh
       
