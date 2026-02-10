@@ -1643,10 +1643,11 @@ class MainWindow(QMainWindow):
             self.y() + (self.height() - overlay.height()) // 2
         )
         
-        # Apply titlebar theme
+        # Show first to create HWND, then apply titlebar theme
+        overlay.show()
         apply_titlebar_theme(overlay)
         
-        # Show the overlay (exec() handles show internally)
+        # Execute the dialog (blocking)
         overlay.exec()
         
         # After closing, restore widgets to main window (for next time)

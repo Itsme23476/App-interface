@@ -113,7 +113,7 @@ class ThemeManager(QObject):
             self._ui_dir = Path(sys._MEIPASS) / 'app' / 'ui'
         else:
             # Running from source
-            self._ui_dir = Path(__file__).parent
+        self._ui_dir = Path(__file__).parent
     
     @property
     def current_theme(self) -> str:
@@ -205,36 +205,53 @@ class ThemeManager(QObject):
             if not app:
                 return
 
-            # Try attribute 20 first (Win10 2004+ / Win11), fall back to 19
-            for attr in (20, 19):
-                applied = False
-                for widget in app.topLevelWidgets():
-                    try:
-                        hwnd = int(widget.winId())
-                        if not hwnd:
-                            continue
+            # Constants
+            DWMWA_USE_IMMERSIVE_DARK_MODE = 20
+            DWMWA_USE_IMMERSIVE_DARK_MODE_LEGACY = 19
+            SWP_FRAMECHANGED = 0x0020
+            SWP_NOZORDER = 0x0004
+            SWP_NOACTIVATE = 0x0010
+
+            for widget in app.topLevelWidgets():
+                try:
+                    hwnd = int(widget.winId())
+                    if not hwnd:
+                        continue
+                    
+                    hwnd_ptr = ctypes.wintypes.HWND(hwnd)
+                    
+                    # Try attribute 20 first (Win11/Win10 2004+), then 19 (older)
+                    for attr in (DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_USE_IMMERSIVE_DARK_MODE_LEGACY):
                         result = ctypes.windll.dwmapi.DwmSetWindowAttribute(
-                            ctypes.wintypes.HWND(hwnd),
+                            hwnd_ptr,
                             ctypes.wintypes.DWORD(attr),
                             ctypes.byref(ctypes.c_int(dark_value)),
                             ctypes.sizeof(ctypes.c_int),
                         )
                         if result == 0:  # S_OK
-                            applied = True
-                            # Force Windows to redraw the title bar
-                            SWP_FRAMECHANGED = 0x0020
-                            SWP_NOMOVE = 0x0002
-                            SWP_NOSIZE = 0x0001
-                            SWP_NOZORDER = 0x0004
-                            ctypes.windll.user32.SetWindowPos(
-                                ctypes.wintypes.HWND(hwnd),
-                                None, 0, 0, 0, 0,
-                                SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER,
-                            )
-                    except Exception:
-                        continue
-                if applied:
-                    break  # attribute worked, no need to try fallback
+                            break
+                    
+                    # Force title bar redraw - aggressive approach for Win11 24H2
+                    # Get current window rect
+                    rect = ctypes.wintypes.RECT()
+                    ctypes.windll.user32.GetWindowRect(hwnd_ptr, ctypes.byref(rect))
+                    width = rect.right - rect.left
+                    height = rect.bottom - rect.top
+                    
+                    # Briefly resize by 1px then restore (forces frame redraw)
+                    ctypes.windll.user32.SetWindowPos(
+                        hwnd_ptr, None,
+                        rect.left, rect.top, width + 1, height,
+                        SWP_NOZORDER | SWP_NOACTIVATE
+                    )
+                    ctypes.windll.user32.SetWindowPos(
+                        hwnd_ptr, None,
+                        rect.left, rect.top, width, height,
+                        SWP_FRAMECHANGED | SWP_NOZORDER | SWP_NOACTIVATE
+                    )
+                    
+                except Exception:
+                    continue
         except Exception:
             pass  # Silently fail on non-Windows or older versions
     
@@ -299,26 +316,41 @@ def apply_titlebar_theme(widget):
         if not hwnd:
             return
         
-        # Try attribute 20 first (Win10 2004+ / Win11), fall back to 19
+        hwnd_ptr = ctypes.wintypes.HWND(hwnd)
+        
+        # Constants
+        SWP_FRAMECHANGED = 0x0020
+        SWP_NOZORDER = 0x0004
+        SWP_NOACTIVATE = 0x0010
+        
+        # Try attribute 20 first (Win11/Win10 2004+), then 19
         for attr in (20, 19):
             result = ctypes.windll.dwmapi.DwmSetWindowAttribute(
-                ctypes.wintypes.HWND(hwnd),
+                hwnd_ptr,
                 ctypes.wintypes.DWORD(attr),
                 ctypes.byref(ctypes.c_int(dark_value)),
                 ctypes.sizeof(ctypes.c_int),
             )
             if result == 0:  # S_OK
-                # Force Windows to redraw the title bar
-                SWP_FRAMECHANGED = 0x0020
-                SWP_NOMOVE = 0x0002
-                SWP_NOSIZE = 0x0001
-                SWP_NOZORDER = 0x0004
-                ctypes.windll.user32.SetWindowPos(
-                    ctypes.wintypes.HWND(hwnd),
-                    None, 0, 0, 0, 0,
-                    SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER,
-                )
                 break
+        
+        # Force title bar redraw - aggressive approach for Win11 24H2
+        rect = ctypes.wintypes.RECT()
+        ctypes.windll.user32.GetWindowRect(hwnd_ptr, ctypes.byref(rect))
+        width = rect.right - rect.left
+        height = rect.bottom - rect.top
+        
+        # Briefly resize by 1px then restore (forces frame redraw)
+        ctypes.windll.user32.SetWindowPos(
+            hwnd_ptr, None,
+            rect.left, rect.top, width + 1, height,
+            SWP_NOZORDER | SWP_NOACTIVATE
+        )
+        ctypes.windll.user32.SetWindowPos(
+            hwnd_ptr, None,
+            rect.left, rect.top, width, height,
+            SWP_FRAMECHANGED | SWP_NOZORDER | SWP_NOACTIVATE
+        )
     except Exception:
         pass
 
