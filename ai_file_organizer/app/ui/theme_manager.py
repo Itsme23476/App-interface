@@ -151,7 +151,36 @@ class ThemeManager(QObject):
         # Load and apply stylesheet
         if style_path.exists():
             with open(style_path, 'r', encoding='utf-8') as f:
-                app.setStyleSheet(f.read())
+                base_style = f.read()
+        else:
+            base_style = ""
+        
+        # Add explicit tooltip styling to ensure it's applied globally
+        if theme == 'dark':
+            tooltip_style = """
+                QToolTip {
+                    background-color: #1E1E2E;
+                    color: #E8E8F0;
+                    border: 1px solid #7C4DFF;
+                    border-radius: 6px;
+                    padding: 8px 12px;
+                    font-size: 12px;
+                }
+            """
+        else:
+            tooltip_style = """
+                QToolTip {
+                    background-color: #FFFFFF;
+                    color: #1A1A1A;
+                    border: 1px solid #7C4DFF;
+                    border-radius: 6px;
+                    padding: 8px 12px;
+                    font-size: 12px;
+                }
+            """
+        
+        # Combine and apply
+        app.setStyleSheet(base_style + tooltip_style)
         
         # Apply dark/light title bar on Windows
         self._apply_windows_titlebar(theme)

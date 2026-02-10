@@ -468,6 +468,30 @@ class Settings:
                 self._save_config()
                 return
 
+    def update_auto_organize_action(self, folder_path: str, action: int) -> None:
+        """Update the organization action for a folder.
+        
+        Args:
+            folder_path: Path to the folder
+            action: 1=Re-organize All, 2=Organize As-Is, 3=Watch Only
+        """
+        for folder in self.auto_organize_folders:
+            if folder.get('path') == folder_path:
+                folder['action'] = action
+                self._save_config()
+                return
+    
+    def get_auto_organize_action(self, folder_path: str) -> int:
+        """Get the organization action for a folder.
+        
+        Returns:
+            action: 1=Re-organize All, 2=Organize As-Is, 3=Watch Only (default)
+        """
+        for folder in self.auto_organize_folders:
+            if folder.get('path') == folder_path:
+                return folder.get('action', 3)  # Default to Watch Only
+        return 3
+
     def set_auto_organize_auto_start(self, enabled: bool) -> None:
         """Enable or disable auto-start of watcher on app open."""
         self.auto_organize_auto_start = bool(enabled)

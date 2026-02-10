@@ -3732,18 +3732,19 @@ class ApplyInstructionsDialogSingleFolder(QDialog):
     SKIP = 3
     
     def __init__(self, parent=None, folder_path: str = "", file_count: int = 0, 
-                 subfolder_count: int = 0, instruction: str = ""):
+                 subfolder_count: int = 0, instruction: str = "", preselected_action: int = None):
         super().__init__(parent)
-        self.setWindowTitle("Apply Instructions")
+        self.setWindowTitle("Choose Organization Mode")
         self.setMinimumWidth(420)
         self.setModal(True)
-        self.result_choice = self.SKIP
+        self.result_choice = None  # Will be set when user clicks an option
         self._drag_pos = None
         
         self.folder_path = folder_path
         self.file_count = file_count
         self.subfolder_count = subfolder_count
         self.instruction = instruction
+        self.preselected_action = preselected_action or self.SKIP
         
         # Get theme colors
         from app.ui.theme_manager import get_theme_colors
@@ -3798,7 +3799,7 @@ class ApplyInstructionsDialogSingleFolder(QDialog):
         icon_label.setAlignment(Qt.AlignCenter)
         header_layout.addWidget(icon_label)
         
-        title_label = QLabel("Folder Saved!")
+        title_label = QLabel("Organization Options")
         title_label.setStyleSheet(f"""
             font-family: "Segoe UI", sans-serif;
             font-size: 18px;
@@ -3880,33 +3881,38 @@ class ApplyInstructionsDialogSingleFolder(QDialog):
         options_layout.setSpacing(10)
         
         # Option 1: Re-organize All
+        is_selected_1 = (self.preselected_action == self.REORGANIZE_ALL)
         reorganize_btn = self._create_option_button(
             "🔄 Re-organize All",
             "Flatten folders, then organize fresh",
-            primary=True
+            selected=is_selected_1
         )
         reorganize_btn.clicked.connect(self._on_reorganize)
         options_layout.addWidget(reorganize_btn)
         
         # Option 2: Organize As-Is
+        is_selected_2 = (self.preselected_action == self.ORGANIZE_AS_IS)
         organize_btn = self._create_option_button(
             "📂 Organize As-Is",
-            "Apply instruction to current files"
+            "Apply instruction to current files",
+            selected=is_selected_2
         )
         organize_btn.clicked.connect(self._on_organize)
         options_layout.addWidget(organize_btn)
         
-        # Option 3: Skip
+        # Option 3: Skip / Watch Only
+        is_selected_3 = (self.preselected_action == self.SKIP)
         skip_btn = self._create_option_button(
-            "⏭️ Skip",
-            "Only apply to new files going forward"
+            "⏭️ Watch Only",
+            "Only apply to new files going forward",
+            selected=is_selected_3
         )
         skip_btn.clicked.connect(self._on_skip)
         options_layout.addWidget(skip_btn)
         
         layout.addLayout(options_layout)
     
-    def _create_option_button(self, title: str, subtitle: str, primary: bool = False) -> QPushButton:
+    def _create_option_button(self, title: str, subtitle: str, selected: bool = False) -> QPushButton:
         """Create a styled option button with title and subtitle."""
         c = self._theme_colors
         btn = QPushButton()
@@ -3918,12 +3924,15 @@ class ApplyInstructionsDialogSingleFolder(QDialog):
         btn_layout.setContentsMargins(16, 10, 16, 10)
         btn_layout.setSpacing(2)
         
-        title_lbl = QLabel(title)
+        # Add checkmark for selected option
+        display_title = f"✓ {title}" if selected else title
+        
+        title_lbl = QLabel(display_title)
         title_lbl.setStyleSheet(f"""
             font-family: "Segoe UI", sans-serif;
             font-size: 14px;
             font-weight: 600;
-            color: {"#FFFFFF" if primary else c['text']};
+            color: {"#FFFFFF" if selected else c['text']};
             background: transparent;
         """)
         title_lbl.setAttribute(Qt.WA_TransparentForMouseEvents)
@@ -3933,17 +3942,17 @@ class ApplyInstructionsDialogSingleFolder(QDialog):
         subtitle_lbl.setStyleSheet(f"""
             font-family: "Segoe UI", sans-serif;
             font-size: 11px;
-            color: {"rgba(255,255,255,0.8)" if primary else c['text_muted']};
+            color: {"rgba(255,255,255,0.8)" if selected else c['text_muted']};
             background: transparent;
         """)
         subtitle_lbl.setAttribute(Qt.WA_TransparentForMouseEvents)
         btn_layout.addWidget(subtitle_lbl)
         
-        if primary:
+        if selected:
             btn.setStyleSheet("""
                 QPushButton {
                     background-color: #7C4DFF;
-                    border: none;
+                    border: 2px solid #9575FF;
                     border-radius: 12px;
                     text-align: left;
                 }
@@ -4180,11 +4189,11 @@ class WatchConfigDialog(QDialog):
         cancel_btn.clicked.connect(self.reject)
         button_layout.addWidget(cancel_btn)
         
-        self.save_btn = QPushButton("Done")
+        self.save_btn = QPushButton("Save")
         self.save_btn.setMinimumHeight(44)
         self.save_btn.setMinimumWidth(100)
         self.save_btn.setCursor(Qt.PointingHandCursor)
-        self.save_btn.setToolTip("Close dialog (use Save button on each folder to save)")
+        self.save_btn.setToolTip("Save all folder settings and apply selected options")
         self.save_btn.setStyleSheet("""
             QPushButton {
                 background-color: #7C4DFF;
@@ -4278,13 +4287,13 @@ class WatchConfigDialog(QDialog):
         path_label.setWordWrap(True)
         header_row.addWidget(path_label, 1)
         
-        # Save button for this folder
-        save_btn = QPushButton("Save")
-        save_btn.setMinimumHeight(28)
-        save_btn.setMinimumWidth(60)
-        save_btn.setCursor(Qt.PointingHandCursor)
-        save_btn.setToolTip("Save this folder's settings")
-        save_btn.setStyleSheet("""
+        # Options button for this folder (choose organization mode)
+        options_btn = QPushButton("Options")
+        options_btn.setMinimumHeight(28)
+        options_btn.setMinimumWidth(70)
+        options_btn.setCursor(Qt.PointingHandCursor)
+        options_btn.setToolTip("Choose how to organize this folder")
+        options_btn.setStyleSheet("""
             QPushButton {
                 background-color: #7C4DFF;
                 color: white;
@@ -4301,8 +4310,8 @@ class WatchConfigDialog(QDialog):
                 background-color: #6A3DE8;
             }
         """)
-        save_btn.clicked.connect(lambda: self._save_single_folder(folder_path))
-        header_row.addWidget(save_btn)
+        options_btn.clicked.connect(lambda: self._show_folder_options(folder_path))
+        header_row.addWidget(options_btn)
         
         remove_btn = QPushButton("Remove")
         remove_btn.setMinimumHeight(28)
@@ -4378,13 +4387,33 @@ class WatchConfigDialog(QDialog):
         
         frame_layout.addLayout(instruction_layout)
         
+        # Status label to show selected organization mode (hidden by default)
+        status_label = QLabel("")
+        status_label.setStyleSheet(f"""
+            QLabel {{
+                color: #4CAF50;
+                font-size: 11px;
+                font-weight: 600;
+                padding: 4px 8px;
+                background: rgba(76, 175, 80, 0.1);
+                border-radius: 4px;
+                border: none;
+            }}
+        """)
+        frame_layout.addWidget(status_label)
+        
         # Store widgets for later reference
         self.folder_widgets[folder_path] = {
             'widget': frame,
             'input': instruction_input,
             'mic_button': mic_button,
-            'save_button': save_btn
+            'options_button': options_btn,
+            'status_label': status_label
         }
+        
+        # Load and display saved action for this folder
+        saved_action = settings.get_auto_organize_action(folder_path)
+        self._update_folder_status_display(folder_path, saved_action)
         
         # Add to layout (before spacer)
         self.folders_layout.insertWidget(self.folders_layout.count() - 2, frame)
@@ -4407,124 +4436,88 @@ class WatchConfigDialog(QDialog):
         """Handle instruction text change."""
         if folder_path in self.folder_data:
             self.folder_data[folder_path] = text
+            # Save instruction to settings immediately
+            settings.update_auto_organize_instruction(folder_path, text)
     
-    def _save_single_folder(self, folder_path: str):
-        """Save a single folder's settings and ask what to do with existing files."""
+    def _update_folder_status_display(self, folder_path: str, action: int):
+        """Update the status label to show the current organization mode."""
+        if folder_path not in self.folder_widgets:
+            return
+        
+        status_label = self.folder_widgets[folder_path].get('status_label')
+        if not status_label:
+            return
+        
+        # Define action labels and styles
+        action_configs = {
+            1: ("🔄 Re-organize All", "#7C4DFF", "rgba(124, 77, 255, 0.15)"),  # Purple
+            2: ("📂 Organize As-Is", "#2196F3", "rgba(33, 150, 243, 0.15)"),   # Blue
+            3: ("⏭️ Watch Only", "#4CAF50", "rgba(76, 175, 80, 0.15)"),        # Green
+        }
+        
+        config = action_configs.get(action, action_configs[3])
+        label_text, text_color, bg_color = config
+        
+        status_label.setText(label_text)
+        status_label.setStyleSheet(f"""
+            QLabel {{
+                color: {text_color};
+                font-size: 11px;
+                font-weight: 600;
+                padding: 6px 10px;
+                background: {bg_color};
+                border-radius: 6px;
+                border: none;
+            }}
+        """)
+        status_label.setVisible(True)
+    
+    def _show_folder_options(self, folder_path: str):
+        """Show the options dialog for a folder."""
+        folder_path = os.path.normpath(folder_path)
+        instruction = self.folder_data.get(folder_path, '')
+        
+        # Save instruction first
+        settings.update_auto_organize_instruction(folder_path, instruction)
+        
+        # Count files in this folder
+        file_count = 0
+        subfolder_count = 0
         try:
-            folder_path = os.path.normpath(folder_path)
-            instruction = self.folder_data.get(folder_path, '')
+            for item in os.listdir(folder_path):
+                item_path = os.path.join(folder_path, item)
+                if os.path.isfile(item_path):
+                    file_count += 1
+                elif os.path.isdir(item_path) and not item.startswith('.'):
+                    subfolder_count += 1
+                    for sub_item in os.listdir(item_path):
+                        if os.path.isfile(os.path.join(item_path, sub_item)):
+                            file_count += 1
+        except Exception:
+            pass
+        
+        # Get the previously selected action
+        saved_action = settings.get_auto_organize_action(folder_path)
+        
+        # Show single-folder apply dialog with pre-selected option
+        dialog = ApplyInstructionsDialogSingleFolder(
+            self, 
+            folder_path, 
+            file_count, 
+            subfolder_count,
+            instruction,
+            preselected_action=saved_action  # Pass the saved action
+        )
+        dialog.exec()
+        
+        if dialog.result_choice:
+            # Save the selected action (but don't apply yet - wait for Save button)
+            settings.update_auto_organize_action(folder_path, dialog.result_choice)
             
-            logger.info(f"Saving single folder: {folder_path}")
+            # Update status display to show what will be applied
+            self._update_folder_status_display(folder_path, dialog.result_choice)
             
-            # Check if folder already exists in settings
-            existing_folders = list(settings.auto_organize_folders)
-            folder_exists = False
-            
-            for i, folder_info in enumerate(existing_folders):
-                if os.path.normpath(folder_info.get('path', '')) == folder_path:
-                    # Update existing
-                    existing_folders[i] = {'path': folder_path, 'instruction': instruction}
-                    folder_exists = True
-                    break
-            
-            if not folder_exists:
-                # Add new
-                existing_folders.append({'path': folder_path, 'instruction': instruction})
-            
-            # Save to settings
-            settings.auto_organize_folders = existing_folders
-            settings._save_config()
-            logger.info(f"Saved folder settings for: {folder_path}")
-            
-            # Count files in this folder
-            file_count = 0
-            subfolder_count = 0
-            try:
-                for item in os.listdir(folder_path):
-                    item_path = os.path.join(folder_path, item)
-                    if os.path.isfile(item_path):
-                        file_count += 1
-                    elif os.path.isdir(item_path) and not item.startswith('.'):
-                        subfolder_count += 1
-                        for sub_item in os.listdir(item_path):
-                            if os.path.isfile(os.path.join(item_path, sub_item)):
-                                file_count += 1
-            except Exception:
-                pass
-            
-            # Show feedback that folder was saved
-            if folder_path in self.folder_widgets:
-                save_btn = self.folder_widgets[folder_path].get('save_button')
-                if save_btn:
-                    # Temporarily show "Saved!" feedback
-                    original_text = save_btn.text()
-                    save_btn.setText("Saved!")
-                    save_btn.setStyleSheet("""
-                        QPushButton {
-                            background-color: #4CAF50;
-                            color: white;
-                            border: none;
-                            border-radius: 6px;
-                            font-weight: 600;
-                            font-size: 12px;
-                            padding: 4px 10px;
-                        }
-                    """)
-                    
-                    # Reset after a short delay
-                    QTimer.singleShot(1500, lambda: self._reset_save_button(folder_path, original_text))
-            
-            # If there are files and watcher is running, show apply dialog
-            if file_count > 0:
-                # Get parent (OrganizePage) to check watcher status
-                parent = self.parent()
-                if parent and hasattr(parent, 'auto_watcher') and parent.auto_watcher and parent.auto_watcher.is_running:
-                    # Show single-folder apply dialog
-                    dialog = ApplyInstructionsDialogSingleFolder(
-                        self, 
-                        folder_path, 
-                        file_count, 
-                        subfolder_count,
-                        instruction
-                    )
-                    dialog.exec()
-                    
-                    if dialog.result_choice == ApplyInstructionsDialogSingleFolder.REORGANIZE_ALL:
-                        # Flatten and reorganize this folder
-                        parent.auto_watcher.organize_single_folder(folder_path, flatten_first=True)
-                    elif dialog.result_choice == ApplyInstructionsDialogSingleFolder.ORGANIZE_AS_IS:
-                        # Organize as-is
-                        parent.auto_watcher.organize_single_folder(folder_path, flatten_first=False)
-                    # else: SKIP - do nothing
-                    
-        except Exception as e:
-            logger.error(f"Error saving single folder: {e}")
-            import traceback
-            traceback.print_exc()
-    
-    def _reset_save_button(self, folder_path: str, original_text: str):
-        """Reset save button to original state."""
-        if folder_path in self.folder_widgets:
-            save_btn = self.folder_widgets[folder_path].get('save_button')
-            if save_btn:
-                save_btn.setText(original_text)
-                save_btn.setStyleSheet("""
-                    QPushButton {
-                        background-color: #7C4DFF;
-                        color: white;
-                        border: none;
-                        border-radius: 6px;
-                        font-weight: 600;
-                        font-size: 12px;
-                        padding: 4px 10px;
-                    }
-                    QPushButton:hover {
-                        background-color: #9575FF;
-                    }
-                    QPushButton:pressed {
-                        background-color: #6A3DE8;
-                    }
-                """)
+            # Note: Action will be applied when user clicks "Save" button
     
     def _update_no_folders_visibility(self):
         """Show/hide placeholder based on folder count."""
@@ -4532,23 +4525,43 @@ class WatchConfigDialog(QDialog):
         self.no_folders_label.setVisible(not has_folders)
     
     def _save_and_close(self):
-        """Save settings and close dialog."""
+        """Save settings and apply selected actions for each folder."""
         try:
             logger.info(f"WatchConfigDialog._save_and_close called with {len(self.folder_data)} folders")
             
-            # Update settings
+            # Collect folders with their actions
+            folders_to_apply = []
             new_folders = []
+            
             for path, instruction in self.folder_data.items():
                 logger.info(f"  Saving folder: {path}, instruction: {instruction[:50] if instruction else '(empty)'}...")
+                # Get existing action if any
+                existing_action = settings.get_auto_organize_action(path)
                 new_folders.append({
                     'path': path,
-                    'instruction': instruction
+                    'instruction': instruction,
+                    'action': existing_action  # Preserve the action setting
                 })
+                # Track folders that need action applied
+                if existing_action in [1, 2]:  # 1=Re-organize, 2=As-Is
+                    folders_to_apply.append((path, existing_action))
             
+            # Save settings first
             settings.auto_organize_folders = new_folders
             settings._save_config()
-            logger.info("Settings saved, accepting dialog")
+            logger.info("Settings saved")
             
+            # Apply actions if watcher is running
+            parent = self.parent()
+            if parent and hasattr(parent, 'auto_watcher') and parent.auto_watcher and parent.auto_watcher.is_running:
+                for folder_path, action in folders_to_apply:
+                    logger.info(f"Applying action {action} to folder: {folder_path}")
+                    if action == ApplyInstructionsDialogSingleFolder.REORGANIZE_ALL:
+                        parent.auto_watcher.organize_single_folder(folder_path, flatten_first=True)
+                    elif action == ApplyInstructionsDialogSingleFolder.ORGANIZE_AS_IS:
+                        parent.auto_watcher.organize_single_folder(folder_path, flatten_first=False)
+            
+            logger.info("Actions applied, closing dialog")
             self.accept()
         except Exception as e:
             logger.error(f"Error in _save_and_close: {e}")
@@ -5926,8 +5939,12 @@ class OrganizePage(QWidget):
         """Toggle the watch mode on/off."""
         if self.auto_watcher and self.auto_watcher.is_running:
             self._stop_watch_mode()
+            self._was_manually_stopped = True  # Track that user manually stopped
         else:
-            self._start_watch_mode()
+            # If resuming after manual stop, skip the popup (just restart watching)
+            skip_popup = getattr(self, '_was_manually_stopped', False)
+            self._start_watch_mode(skip_existing_popup=skip_popup)
+            self._was_manually_stopped = False  # Reset flag after starting
     
     def _start_watch_mode(self, is_catch_up: bool = False, catch_up_since=None, skip_existing_popup: bool = False):
         """Start watching folders for new files.
