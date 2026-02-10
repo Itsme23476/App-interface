@@ -156,7 +156,8 @@ jobs:
         env:
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
         run: |
-          $version = "${{ github.ref_name }}" -replace '^[Vv]', ''
+          # Remove V/v prefix and any leading dots (handles v1.0.0, V.1.0.0, 1.0.0)
+          $version = "${{ github.ref_name }}" -replace '^[Vv]\.?', '' -replace '^\.', ''
           $releaseName = "${{ github.event.release.name }}"
           if ([string]::IsNullOrEmpty($releaseName)) { $releaseName = "Lumina v$version" }
           $releaseNotes = "${{ github.event.release.body }}" -replace '"', '\"' -replace "`r`n", ' ' -replace "`n", ' '
