@@ -357,17 +357,15 @@ class MainWindow(QMainWindow):
             from app.version import VERSION
             from app.core.update_checker import check_for_updates
             
-            # Run check in background thread to not block UI
-            import threading
+            logger.info("[UPDATE] Starting update check...")
             
-            def check_thread():
-                update_info = check_for_updates(VERSION)
-                if update_info:
-                    # Show notification on main thread
-                    QTimer.singleShot(0, lambda: self._show_update_notification(update_info))
-            
-            thread = threading.Thread(target=check_thread, daemon=True)
-            thread.start()
+            # Check synchronously since it's already delayed by 3 seconds
+            update_info = check_for_updates(VERSION)
+            if update_info:
+                logger.info(f"[UPDATE] Update found, showing notification...")
+                self._show_update_notification(update_info)
+            else:
+                logger.info("[UPDATE] No update available or check failed")
             
         except Exception as e:
             logger.debug(f"Could not check for updates: {e}")
@@ -375,10 +373,12 @@ class MainWindow(QMainWindow):
     def _show_update_notification(self, update_info: dict):
         """Show update notification dialog."""
         try:
+            logger.info(f"[UPDATE] Showing update notification: {update_info}")
             from app.ui.organize_page import UpdateNotificationDialog
-            UpdateNotificationDialog.show_update(self, update_info)
+            dialog = UpdateNotificationDialog.show_update(self, update_info)
+            logger.info(f"[UPDATE] Update dialog created: {dialog}")
         except Exception as e:
-            logger.error(f"Could not show update notification: {e}")
+            logger.error(f"Could not show update notification: {e}", exc_info=True)
         # Still show contextual tips even if they skipped
         QTimer.singleShot(500, self._init_contextual_tips)
     

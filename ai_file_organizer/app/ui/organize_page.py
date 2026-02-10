@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (
     QSplitter, QFrame, QSizePolicy, QScrollArea,
     QDialog, QListWidget, QListWidgetItem, QCheckBox,
     QSpacerItem, QStackedWidget, QButtonGroup, QApplication,
-    QRadioButton
+    QRadioButton, QGraphicsDropShadowEffect
 )
 from PySide6.QtCore import Qt, QThread, Signal, QTimer
 
@@ -1716,13 +1716,32 @@ class UpdateNotificationDialog(QDialog):
     def __init__(self, parent=None, update_info: dict = None):
         super().__init__(parent)
         self.update_info = update_info or {}
+        self._drag_pos = None  # For dragging
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.Dialog)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setModal(False)  # Non-blocking
         self._setup_ui()
     
+    def mousePressEvent(self, event):
+        """Start dragging when mouse is pressed."""
+        if event.button() == Qt.LeftButton:
+            self._drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+            event.accept()
+    
+    def mouseMoveEvent(self, event):
+        """Move dialog while dragging."""
+        if event.buttons() == Qt.LeftButton and self._drag_pos is not None:
+            self.move(event.globalPosition().toPoint() - self._drag_pos)
+            event.accept()
+    
+    def mouseReleaseEvent(self, event):
+        """Stop dragging when mouse is released."""
+        self._drag_pos = None
+        event.accept()
+    
     def _setup_ui(self):
         from app.ui.theme_manager import get_theme_colors
+        from PySide6.QtGui import QColor
         c = get_theme_colors()
         
         layout = QVBoxLayout(self)
@@ -1925,6 +1944,7 @@ class UpdateDownloadDialog(QDialog):
         self.update_info = update_info or {}
         self.download_thread = None
         self.extracted_path = None
+        self._drag_pos = None  # For dragging
         
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.Dialog)
         self.setAttribute(Qt.WA_TranslucentBackground)
@@ -1933,6 +1953,23 @@ class UpdateDownloadDialog(QDialog):
         
         # Start download after dialog is shown
         QTimer.singleShot(500, self._start_download)
+    
+    def mousePressEvent(self, event):
+        """Start dragging when mouse is pressed."""
+        if event.button() == Qt.LeftButton:
+            self._drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+            event.accept()
+    
+    def mouseMoveEvent(self, event):
+        """Move dialog while dragging."""
+        if event.buttons() == Qt.LeftButton and self._drag_pos is not None:
+            self.move(event.globalPosition().toPoint() - self._drag_pos)
+            event.accept()
+    
+    def mouseReleaseEvent(self, event):
+        """Stop dragging when mouse is released."""
+        self._drag_pos = None
+        event.accept()
     
     def _setup_ui(self):
         from app.ui.theme_manager import get_theme_colors
