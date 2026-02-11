@@ -348,10 +348,10 @@ Set fso = CreateObject("Scripting.FileSystemObject")
 ' Wait for the old app to fully close
 WScript.Sleep 3000
 
-' Run the installer with /SILENT and WAIT for it to complete
-' The installer itself will launch the app via [Run] section with skipifnotsilent
+' Run the installer with /SILENT and /TASKS="launchapp" to auto-launch after install
+' The /TASKS flag tells Inno Setup to run the launchapp task which launches the app
 installerPath = "{installer_str}"
-returnCode = WshShell.Run(Chr(34) & installerPath & Chr(34) & " /SILENT", 1, True)
+returnCode = WshShell.Run(Chr(34) & installerPath & Chr(34) & " /SILENT /TASKS=""launchapp""", 1, True)
 
 ' Wait for Windows to finish any cleanup
 WScript.Sleep 2000
