@@ -330,17 +330,36 @@ def run_installer_and_exit(installer_path: Path) -> bool:
         logger.info(f"Launching installer: {installer_path}")
         
         if sys.platform == 'win32':
-            # Create a VBS script that waits for the app to close, then runs installer with elevation
-            # VBS allows UAC prompt to show properly
+            # Create a VBS script that:
+            # 1. Waits for the app to close
+            # 2. Runs installer and WAITS for it to complete
+            # 3. Waits for Windows cleanup/antivirus scans
+            # 4. Launches the new app
             vbs_script = installer_path.parent / "run_update.vbs"
+            
+            # Get the install path (where Lumina.exe will be after install)
+            install_path = r"C:\Program Files\Lumina\Lumina.exe"
+            
             vbs_content = f'''
 Set WshShell = CreateObject("WScript.Shell")
-' Wait for the app to close
-WScript.Sleep 3000
-' Run the installer (will show UAC prompt if needed)
-WshShell.Run """{installer_path}"" /SILENT", 1, False
-' Clean up
 Set fso = CreateObject("Scripting.FileSystemObject")
+
+' Wait for the old app to fully close
+WScript.Sleep 3000
+
+' Run the installer with /SILENT and WAIT for it to complete (True = wait)
+' The 1 means show the window, True means wait for completion
+returnCode = WshShell.Run("""{installer_path}"" /SILENT", 1, True)
+
+' Wait for Windows to finish cleanup and antivirus scans
+WScript.Sleep 5000
+
+' Launch the newly installed app
+If fso.FileExists("{install_path}") Then
+    WshShell.Run """{install_path}""", 1, False
+End If
+
+' Clean up this script
 fso.DeleteFile WScript.ScriptFullName
 '''
             with open(vbs_script, 'w') as f:
