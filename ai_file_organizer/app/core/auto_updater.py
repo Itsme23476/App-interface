@@ -319,18 +319,47 @@ def run_installer_and_exit(installer_path: Path) -> bool:
         logger.info(f"Launching installer: {installer_path}")
         
         if sys.platform == 'win32':
-            # Launch the installer detached from this process
-            # /SILENT = install without prompts (can also use /VERYSILENT)
-            # The user can still see progress
+            # Create a batch script that waits for the app to close, then runs installer
+            # This ensures the app is fully closed before installation starts
+            batch_script = installer_path.parent / "run_update.bat"
+            batch_content = f'''@echo off
+:: Wait for the app to close (give it a few seconds)
+timeout /t 3 /nobreak >nul
+:: Run the installer silently
+"{installer_path}" /SILENT
+:: Clean up this batch file
+del "%~f0"
+'''
+            with open(batch_script, 'w') as f:
+                f.write(batch_content)
+            
+            # Launch the batch script detached
             DETACHED_PROCESS = 0x00000008
             CREATE_NEW_PROCESS_GROUP = 0x00000200
+            CREATE_NO_WINDOW = 0x08000000
             subprocess.Popen(
-                [str(installer_path), '/SILENT'],
-                creationflags=DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP,
+                ['cmd', '/c', str(batch_script)],
+                creationflags=DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL
             )
+            
+            logger.info("Update script launched - app will close now")
+            
+            # Schedule app exit
+            import atexit
+            import os
+            atexit.register(lambda: None)  # Ensure clean exit
+            
+            # Exit the application
+            from PySide6.QtWidgets import QApplication
+            app = QApplication.instance()
+            if app:
+                logger.info("Closing application for update...")
+                app.quit()
+            else:
+                os._exit(0)
         else:
             # Non-Windows: just open the installer
             subprocess.Popen(

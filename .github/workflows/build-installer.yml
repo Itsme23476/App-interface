@@ -135,6 +135,9 @@ jobs:
           SolidCompression=yes
           PrivilegesRequired=admin
           UninstallDisplayIcon={app}\Lumina.exe
+          CloseApplications=force
+          CloseApplicationsFilter=Lumina.exe
+          RestartApplications=yes
           $iconLine
           
           [Files]
