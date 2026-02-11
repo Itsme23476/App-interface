@@ -118,7 +118,8 @@ GITHUB_REPO = "App-interface"
         run: |
           $version = "${{ github.ref_name }}"
           if ([string]::IsNullOrEmpty($version) -or $version -eq "refs/heads/main") { $version = "1.0.0" }
-          $version = $version -replace '^[Vv]', ''
+          # Remove V/v prefix and any leading dots (handles v1.0.0, V.1.0.0, 1.0.0)
+          $version = $version -replace '^[Vv]\.?', '' -replace '^\.', ''
           $iconLine = ""
           if (Test-Path "ai_file_organizer/resources/iconnn.ico") {
             $iconLine = "SetupIconFile=ai_file_organizer\resources\iconnn.ico"
