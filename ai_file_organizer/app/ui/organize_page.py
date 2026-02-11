@@ -1943,7 +1943,7 @@ class UpdateDownloadDialog(QDialog):
         self.download_url = download_url
         self.update_info = update_info or {}
         self.download_thread = None
-        self.extracted_path = None
+        self.installer_path = None  # Path to downloaded installer
         self._drag_pos = None  # For dragging
         
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.Dialog)
@@ -2104,25 +2104,20 @@ class UpdateDownloadDialog(QDialog):
         import threading
         
         def download_thread():
-            from app.core.auto_updater import download_update, extract_update
+            from app.core.auto_updater import download_update
             
-            # Download
-            zip_path = download_update(
+            # Download the installer
+            installer_path = download_update(
                 self.download_url,
                 progress_callback=self._on_progress
             )
             
-            if not zip_path:
-                QTimer.singleShot(0, lambda: self._on_error("Download failed"))
+            if not installer_path:
+                QTimer.singleShot(0, lambda: self._on_error("Download failed - check your internet connection"))
                 return
             
-            # Extract
-            QTimer.singleShot(0, lambda: self._update_status("Extracting..."))
-            self.extracted_path = extract_update(zip_path)
-            
-            if not self.extracted_path:
-                QTimer.singleShot(0, lambda: self._on_error("Extraction failed"))
-                return
+            # Store the installer path for installation
+            self.installer_path = installer_path
             
             # Ready to install
             QTimer.singleShot(0, self._on_ready)
@@ -2165,21 +2160,22 @@ class UpdateDownloadDialog(QDialog):
         self.close()
     
     def _on_install(self):
-        """Apply update and restart app."""
-        if not self.extracted_path:
+        """Apply update by running the installer."""
+        if not self.installer_path:
             return
         
-        self.status_label.setText("Installing update...")
+        self.status_label.setText("Launching installer...")
         self.install_btn.setEnabled(False)
         self.cancel_btn.setEnabled(False)
         
         from app.core.auto_updater import apply_update_and_restart
         
-        if apply_update_and_restart(self.extracted_path):
-            # Close the entire app
-            QApplication.quit()
+        if apply_update_and_restart(self.installer_path):
+            # Close the app - installer will handle the rest
+            self.status_label.setText("Installer started! App will close...")
+            QTimer.singleShot(1000, QApplication.quit)
         else:
-            self._on_error("Installation failed")
+            self._on_error("Failed to launch installer")
             self.cancel_btn.setEnabled(True)
 
 

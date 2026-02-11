@@ -151,7 +151,7 @@ jobs:
             ai_file_organizer/dist/*.exe
           fail_on_unmatched_files: true
       
-      - name: Update Supabase app_version table
+      - name: Upload to Supabase Storage and update app_version
         if: github.event_name == 'release'
         env:
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
@@ -161,25 +161,59 @@ jobs:
           $releaseName = "${{ github.event.release.name }}"
           if ([string]::IsNullOrEmpty($releaseName)) { $releaseName = "Lumina v$version" }
           $releaseNotes = "${{ github.event.release.body }}" -replace '"', '\"' -replace "`r`n", ' ' -replace "`n", ' '
-          $downloadUrl = "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/Lumina-Setup-v$version.exe"
           
-          echo "Updating Supabase with version: $version"
+          $installerFile = "installer/Lumina-Setup-v$version.exe"
+          $storagePath = "releases/Lumina-Setup-v$version.exe"
+          $supabaseUrl = "https://gsvccxhdgcshiwgjvgfi.supabase.co"
+          
+          echo "Version: $version"
+          echo "Installer: $installerFile"
           
           if ([string]::IsNullOrEmpty($env:SUPABASE_SERVICE_KEY)) {
             echo "::warning::SUPABASE_SERVICE_KEY not set. Add it to repository secrets."
             exit 0
           }
           
+          # Upload installer to Supabase Storage
+          if (Test-Path $installerFile) {
+            echo "Uploading installer to Supabase Storage..."
+            $fileBytes = [System.IO.File]::ReadAllBytes($installerFile)
+            $uploadUrl = "$supabaseUrl/storage/v1/object/app-releases/$storagePath"
+            
+            try {
+              Invoke-RestMethod -Uri $uploadUrl -Method Post -Headers @{
+                "apikey" = $env:SUPABASE_SERVICE_KEY
+                "Authorization" = "Bearer $env:SUPABASE_SERVICE_KEY"
+                "Content-Type" = "application/octet-stream"
+                "x-upsert" = "true"
+              } -Body $fileBytes
+              echo "Successfully uploaded to Supabase Storage"
+              
+              # Use Supabase Storage public URL for downloads
+              $downloadUrl = "$supabaseUrl/storage/v1/object/public/app-releases/$storagePath"
+            } catch {
+              echo "::warning::Failed to upload to Supabase Storage: $($_.Exception.Message)"
+              echo "Falling back to GitHub release URL..."
+              $downloadUrl = "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/Lumina-Setup-v$version.exe"
+            }
+          } else {
+            echo "::warning::Installer file not found, using GitHub release URL"
+            $downloadUrl = "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/Lumina-Setup-v$version.exe"
+          }
+          
+          echo "Download URL: $downloadUrl"
+          
+          # Update app_version table
           $body = "{`"version`":`"$version`",`"download_url`":`"$downloadUrl`",`"release_name`":`"$releaseName`",`"release_notes`":`"$releaseNotes`",`"is_required`":false}"
           
           try {
-            Invoke-RestMethod -Uri "https://gsvccxhdgcshiwgjvgfi.supabase.co/rest/v1/app_version" -Method Post -Headers @{
+            Invoke-RestMethod -Uri "$supabaseUrl/rest/v1/app_version" -Method Post -Headers @{
               "apikey" = $env:SUPABASE_SERVICE_KEY
               "Authorization" = "Bearer $env:SUPABASE_SERVICE_KEY"
               "Content-Type" = "application/json"
               "Prefer" = "return=minimal"
             } -Body $body
-            echo "Successfully updated Supabase"
+            echo "Successfully updated Supabase app_version"
           } catch {
             echo "::warning::Failed to update Supabase: $($_.Exception.Message)"
           }
