@@ -322,16 +322,23 @@ def run_installer_and_exit(installer_path: Path) -> bool:
             # Launch the installer detached from this process
             # /SILENT = install without prompts (can also use /VERYSILENT)
             # The user can still see progress
+            DETACHED_PROCESS = 0x00000008
+            CREATE_NEW_PROCESS_GROUP = 0x00000200
             subprocess.Popen(
                 [str(installer_path), '/SILENT'],
-                creationflags=subprocess.CREATE_NEW_CONSOLE | subprocess.DETACHED_PROCESS,
-                close_fds=True
+                creationflags=DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
             )
         else:
             # Non-Windows: just open the installer
             subprocess.Popen(
                 [str(installer_path)],
-                start_new_session=True
+                start_new_session=True,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
             )
         
         logger.info("Installer launched successfully")
