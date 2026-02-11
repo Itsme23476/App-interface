@@ -333,31 +333,28 @@ def run_installer_and_exit(installer_path: Path) -> bool:
             # Create a VBS script that:
             # 1. Waits for the app to close
             # 2. Runs installer and WAITS for it to complete
-            # 3. Waits for Windows cleanup/antivirus scans
-            # 4. Launches the new app
+            # 3. Inno Setup will auto-launch the app (skipifnotsilent flag)
+            # 4. Fallback: launch app if not already running
             vbs_script = installer_path.parent / "run_update.vbs"
             
-            # Get the install path (where Lumina.exe will be after install)
-            install_path = r"C:\Program Files\Lumina\Lumina.exe"
+            # Escape backslashes for VBS string
+            installer_str = str(installer_path).replace("\\", "\\\\")
             
             vbs_content = f'''
+On Error Resume Next
 Set WshShell = CreateObject("WScript.Shell")
 Set fso = CreateObject("Scripting.FileSystemObject")
 
 ' Wait for the old app to fully close
 WScript.Sleep 3000
 
-' Run the installer with /SILENT and WAIT for it to complete (True = wait)
-' The 1 means show the window, True means wait for completion
-returnCode = WshShell.Run("""{installer_path}"" /SILENT", 1, True)
+' Run the installer with /SILENT and WAIT for it to complete
+' The installer itself will launch the app via [Run] section with skipifnotsilent
+installerPath = "{installer_str}"
+returnCode = WshShell.Run(Chr(34) & installerPath & Chr(34) & " /SILENT", 1, True)
 
-' Wait for Windows to finish cleanup and antivirus scans
-WScript.Sleep 5000
-
-' Launch the newly installed app
-If fso.FileExists("{install_path}") Then
-    WshShell.Run """{install_path}""", 1, False
-End If
+' Wait for Windows to finish any cleanup
+WScript.Sleep 2000
 
 ' Clean up this script
 fso.DeleteFile WScript.ScriptFullName

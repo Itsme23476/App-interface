@@ -148,9 +148,10 @@ jobs:
           Name: "{commondesktop}\Lumina"; Filename: "{app}\Lumina.exe"
           
           [Run]
-          ; For manual installs (non-silent), launch the app
-          ; For silent updates, the VBS script handles launching after completion
+          ; For manual installs - shows checkbox on finish page
           Filename: "{app}\Lumina.exe"; Description: "Launch Lumina"; Flags: nowait postinstall runasoriginaluser shellexec skipifsilent
+          ; For silent updates - always launch (no checkbox needed)
+          Filename: "{app}\Lumina.exe"; Flags: nowait runasoriginaluser shellexec skipifnotsilent
           "@ | Out-File -FilePath installer.iss -Encoding utf8
         shell: pwsh
       
