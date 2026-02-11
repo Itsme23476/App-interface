@@ -72,12 +72,20 @@ def download_update(
             }
         )
         
+        # Send initial progress to show we're connecting
+        if progress_callback:
+            progress_callback(0, 1)  # Shows 0% to indicate we started
+        
         with urllib.request.urlopen(request, timeout=120) as response:
             total_size = int(response.headers.get('content-length', 0))
             downloaded = 0
             chunk_size = 65536  # 64KB chunks for faster download
             
             logger.info(f"Download size: {total_size / (1024*1024):.2f} MB")
+            
+            # Send another callback now that we know the total size
+            if progress_callback and total_size > 0:
+                progress_callback(0, total_size)  # Now with real total
             
             with open(installer_path, 'wb') as f:
                 while True:

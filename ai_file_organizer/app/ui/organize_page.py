@@ -2129,7 +2129,10 @@ class UpdateDownloadDialog(QDialog):
         """Update progress bar."""
         if total > 0:
             percent = int((downloaded / total) * 100)
-            QTimer.singleShot(0, lambda: self._update_progress(percent, downloaded, total))
+            QTimer.singleShot(0, lambda p=percent, d=downloaded, t=total: self._update_progress(p, d, t))
+        elif downloaded == 0:
+            # Initial callback - show we're starting
+            QTimer.singleShot(0, lambda: self.status_label.setText("Starting download..."))
     
     def _update_progress(self, percent: int, downloaded: int, total: int):
         """Update UI with progress."""
