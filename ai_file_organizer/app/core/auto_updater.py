@@ -330,27 +330,28 @@ def run_installer_and_exit(installer_path: Path) -> bool:
         logger.info(f"Launching installer: {installer_path}")
         
         if sys.platform == 'win32':
-            # Create a batch script that waits for the app to close, then runs installer
-            # This ensures the app is fully closed before installation starts
-            batch_script = installer_path.parent / "run_update.bat"
-            batch_content = f'''@echo off
-:: Wait for the app to close (give it a few seconds)
-timeout /t 3 /nobreak >nul
-:: Run the installer silently
-"{installer_path}" /SILENT
-:: Clean up this batch file
-del "%~f0"
+            # Create a VBS script that waits for the app to close, then runs installer with elevation
+            # VBS allows UAC prompt to show properly
+            vbs_script = installer_path.parent / "run_update.vbs"
+            vbs_content = f'''
+Set WshShell = CreateObject("WScript.Shell")
+' Wait for the app to close
+WScript.Sleep 3000
+' Run the installer (will show UAC prompt if needed)
+WshShell.Run """{installer_path}"" /SILENT", 1, False
+' Clean up
+Set fso = CreateObject("Scripting.FileSystemObject")
+fso.DeleteFile WScript.ScriptFullName
 '''
-            with open(batch_script, 'w') as f:
-                f.write(batch_content)
+            with open(vbs_script, 'w') as f:
+                f.write(vbs_content)
             
-            # Launch the batch script detached
+            # Launch the VBS script
             DETACHED_PROCESS = 0x00000008
             CREATE_NEW_PROCESS_GROUP = 0x00000200
-            CREATE_NO_WINDOW = 0x08000000
             subprocess.Popen(
-                ['cmd', '/c', str(batch_script)],
-                creationflags=DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW,
+                ['wscript', str(vbs_script)],
+                creationflags=DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL
@@ -358,19 +359,12 @@ del "%~f0"
             
             logger.info("Update script launched - app will close now")
             
-            # Schedule app exit
-            import atexit
-            import os
-            atexit.register(lambda: None)  # Ensure clean exit
-            
             # Exit the application
             from PySide6.QtWidgets import QApplication
             app = QApplication.instance()
             if app:
                 logger.info("Closing application for update...")
                 app.quit()
-            else:
-                os._exit(0)
         else:
             # Non-Windows: just open the installer
             subprocess.Popen(
