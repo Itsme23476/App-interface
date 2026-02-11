@@ -1937,6 +1937,10 @@ class UpdateDownloadDialog(QDialog):
     Dialog showing download progress for auto-updates.
     Downloads, extracts, and applies updates automatically.
     """
+    # Signals for thread-safe UI updates
+    progress_signal = Signal(int, int)  # downloaded, total
+    status_signal = Signal(str)  # status message
+    download_complete_signal = Signal(object)  # installer_path or None
     
     def __init__(self, parent=None, download_url: str = "", update_info: dict = None):
         super().__init__(parent)
@@ -1950,6 +1954,11 @@ class UpdateDownloadDialog(QDialog):
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setModal(True)
         self._setup_ui()
+        
+        # Connect signals to slots (thread-safe UI updates)
+        self.progress_signal.connect(self._handle_progress)
+        self.status_signal.connect(self._handle_status)
+        self.download_complete_signal.connect(self._handle_download_complete)
         
         # Start download after dialog is shown
         QTimer.singleShot(500, self._start_download)
@@ -2107,37 +2116,46 @@ class UpdateDownloadDialog(QDialog):
             from app.core.auto_updater import download_update
             
             # Download the installer with both progress and status callbacks
+            # These callbacks emit signals which are thread-safe
             installer_path = download_update(
                 self.download_url,
-                progress_callback=self._on_progress,
-                status_callback=self._on_status
+                progress_callback=self._emit_progress,
+                status_callback=self._emit_status
             )
             
-            if not installer_path:
-                QTimer.singleShot(0, lambda: self._on_error("Download failed - check your internet connection"))
-                return
-            
-            # Store the installer path for installation
-            self.installer_path = installer_path
-            
-            # Ready to install
-            QTimer.singleShot(0, self._on_ready)
+            # Emit completion signal (thread-safe)
+            self.download_complete_signal.emit(installer_path)
         
         self.download_thread = threading.Thread(target=download_thread, daemon=True)
         self.download_thread.start()
     
-    def _on_status(self, status: str):
-        """Update status label from status callback."""
-        QTimer.singleShot(0, lambda s=status: self.status_label.setText(s))
+    def _emit_status(self, status: str):
+        """Emit status signal from background thread."""
+        self.status_signal.emit(status)
     
-    def _on_progress(self, downloaded: int, total: int):
-        """Update progress bar."""
+    def _emit_progress(self, downloaded: int, total: int):
+        """Emit progress signal from background thread."""
+        self.progress_signal.emit(downloaded, total)
+    
+    def _handle_status(self, status: str):
+        """Handle status update in main thread (connected to signal)."""
+        self.status_label.setText(status)
+    
+    def _handle_progress(self, downloaded: int, total: int):
+        """Handle progress update in main thread (connected to signal)."""
         if total > 0:
             percent = int((downloaded / total) * 100)
-            QTimer.singleShot(0, lambda p=percent, d=downloaded, t=total: self._update_progress(p, d, t))
+            self._update_progress(percent, downloaded, total)
         elif downloaded == 0:
-            # Initial callback - show we're starting
-            QTimer.singleShot(0, lambda: self.status_label.setText("Starting download..."))
+            self.status_label.setText("Starting download...")
+    
+    def _handle_download_complete(self, installer_path):
+        """Handle download completion in main thread (connected to signal)."""
+        if installer_path:
+            self.installer_path = installer_path
+            self._on_ready()
+        else:
+            self._on_error("Download failed - check your internet connection")
     
     def _update_progress(self, percent: int, downloaded: int, total: int):
         """Update UI with progress."""
