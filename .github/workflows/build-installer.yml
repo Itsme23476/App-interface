@@ -147,12 +147,11 @@ jobs:
           Name: "{group}\Lumina"; Filename: "{app}\Lumina.exe"
           Name: "{commondesktop}\Lumina"; Filename: "{app}\Lumina.exe"
           
-          [Tasks]
-          Name: "launchapp"; Description: "Launch Lumina after installation"; Flags: checkedonce
-          
           [Run]
-          ; Launch app when task is selected (works for both manual and silent installs)
-          Filename: "{app}\Lumina.exe"; Description: "Launch Lumina"; Tasks: launchapp; Flags: nowait postinstall runasoriginaluser shellexec
+          ; For manual installs - shows checkbox on FINISH page (checked by default)
+          Filename: "{app}\Lumina.exe"; Description: "Launch Lumina"; Flags: nowait postinstall runasoriginaluser shellexec skipifsilent
+          ; For silent updates - always auto-launch (no checkbox needed)
+          Filename: "{app}\Lumina.exe"; Flags: nowait runasoriginaluser shellexec skipifnotsilent
           "@ | Out-File -FilePath installer.iss -Encoding utf8
         shell: pwsh
       
