@@ -24,31 +24,27 @@ jobs:
       - name: Update version from release tag
         if: github.event_name == 'release'
         run: |
-          # Extract version from release tag (handles v1.0.0, V.1.0.0, 1.0.0)
           $version = "${{ github.ref_name }}" -replace '^[Vv]\.?', '' -replace '^\.', ''
           $buildDate = Get-Date -Format "yyyy-MM-dd"
-          
           echo "Setting app version to: $version"
-          
-          # Update version.py with the release version
-          $versionContent = @"
-"""
-Version information for Lumina - File Search Assistant.
-"""
-
-VERSION = "$version"
-BUILD_DATE = "$buildDate"
-APP_NAME = "Lumina"
-
-# GitHub repository info (for reference)
-GITHUB_OWNER = "Itsme23476"
-GITHUB_REPO = "App-interface"
-
-# Update checking is now done via Supabase (app_version table)
-# This allows updates to work even with private GitHub repos
-"@
-          $versionContent | Out-File -FilePath "ai_file_organizer/app/version.py" -Encoding utf8
-          
+          $q = '"'
+          $content = @(
+            '"""',
+            'Version information for Lumina - File Search Assistant.',
+            '"""',
+            '',
+            "VERSION = $q$version$q",
+            "BUILD_DATE = $q$buildDate$q",
+            "APP_NAME = ${q}Lumina$q",
+            '',
+            '# GitHub repository info (for reference)',
+            "GITHUB_OWNER = ${q}Itsme23476$q",
+            "GITHUB_REPO = ${q}App-interface$q",
+            '',
+            '# Update checking is now done via Supabase (app_version table)',
+            '# This allows updates to work even with private GitHub repos'
+          )
+          $content | Out-File -FilePath "ai_file_organizer/app/version.py" -Encoding utf8
           echo "Updated version.py:"
           Get-Content "ai_file_organizer/app/version.py"
         shell: pwsh
