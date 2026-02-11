@@ -6861,6 +6861,11 @@ class OrganizePage(QWidget):
         
         self.generate_button.setEnabled(True)
         self.status_label.setText("Indexing cancelled.")
+        
+        # Update usage labels in case some files were indexed before cancel
+        main_window = self.window()
+        if main_window and hasattr(main_window, '_update_usage_labels'):
+            main_window._update_usage_labels()
     
     def _on_index_skip_requested(self):
         """Handle user clicking Skip in the progress dialog."""
@@ -6869,6 +6874,11 @@ class OrganizePage(QWidget):
         
         self.generate_button.setEnabled(True)
         self.status_label.setText("Skipped indexing. Using already-indexed files...")
+        
+        # Update usage labels in case some files were indexed before skip
+        main_window = self.window()
+        if main_window and hasattr(main_window, '_update_usage_labels'):
+            main_window._update_usage_labels()
         
         # Continue with plan generation using existing indexed files
         QTimer.singleShot(100, self.generate_plan)
@@ -6881,6 +6891,11 @@ class OrganizePage(QWidget):
         
         self.generate_button.setEnabled(True)
         self.status_label.setText("Indexing cancelled.")
+        
+        # Update usage labels in case some files were indexed before cancellation
+        main_window = self.window()
+        if main_window and hasattr(main_window, '_update_usage_labels'):
+            main_window._update_usage_labels()
     
     def _on_index_before_organize_finished(self, stats: dict):
         """Handle indexing completion, then continue with organization."""
@@ -6891,6 +6906,11 @@ class OrganizePage(QWidget):
         
         indexed_count = stats.get('indexed_files', 0)
         self.generate_button.setEnabled(True)
+        
+        # Update usage labels to reflect the newly indexed files
+        main_window = self.window()
+        if main_window and hasattr(main_window, '_update_usage_labels'):
+            main_window._update_usage_labels()
         
         if indexed_count > 0:
             self.status_label.setText(f"Indexed {indexed_count} files. Generating organization plan...")
@@ -6911,6 +6931,11 @@ class OrganizePage(QWidget):
         self.generate_button.setEnabled(True)
         self.status_label.setText(f"Indexing error: {error}")
         logger.error(f"Index before organize error: {error}")
+        
+        # Update usage labels in case some files were indexed before the error
+        main_window = self.window()
+        if main_window and hasattr(main_window, '_update_usage_labels'):
+            main_window._update_usage_labels()
 
     def _on_plan_received(self, plan: Optional[Dict[str, Any]]):
         """Handle LLM plan response."""
