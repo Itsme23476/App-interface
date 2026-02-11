@@ -2563,6 +2563,13 @@ class MainWindow(QMainWindow):
                 self.avatar_label.setText("?")
         except Exception as e:
             logger.error(f"[ACCOUNT] Error refreshing account info: {e}")
+        
+        # Always update usage labels when account info is refreshed
+        # This ensures the correct user's usage is displayed after login/logout
+        try:
+            self._update_usage_labels()
+        except Exception as e:
+            logger.debug(f"Could not update usage labels: {e}")
     
     def _open_billing_portal(self):
         """Open Stripe billing portal for subscription management."""
@@ -2735,6 +2742,7 @@ class MainWindow(QMainWindow):
             if auth_dialog.exec():
                 # User logged in successfully, refresh account info and show window
                 self._refresh_account_info()
+                self._update_usage_labels()  # Update usage for new user
                 self.show()
                 self.status_bar.showMessage("Welcome back!", 3000)
             else:
