@@ -2106,10 +2106,11 @@ class UpdateDownloadDialog(QDialog):
         def download_thread():
             from app.core.auto_updater import download_update
             
-            # Download the installer
+            # Download the installer with both progress and status callbacks
             installer_path = download_update(
                 self.download_url,
-                progress_callback=self._on_progress
+                progress_callback=self._on_progress,
+                status_callback=self._on_status
             )
             
             if not installer_path:
@@ -2124,6 +2125,10 @@ class UpdateDownloadDialog(QDialog):
         
         self.download_thread = threading.Thread(target=download_thread, daemon=True)
         self.download_thread.start()
+    
+    def _on_status(self, status: str):
+        """Update status label from status callback."""
+        QTimer.singleShot(0, lambda s=status: self.status_label.setText(s))
     
     def _on_progress(self, downloaded: int, total: int):
         """Update progress bar."""

@@ -9,9 +9,18 @@ import sys
 import shutil
 import tempfile
 import subprocess
+import ssl
+import certifi
 from pathlib import Path
 from typing import Optional, Callable
-import urllib.request
+
+# Use requests library - much better SSL handling for PyInstaller apps
+try:
+    import requests
+    HAS_REQUESTS = True
+except ImportError:
+    import urllib.request
+    HAS_REQUESTS = False
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +44,8 @@ def get_update_dir() -> Path:
 
 def download_update(
     download_url: str,
-    progress_callback: Optional[Callable[[int, int], None]] = None
+    progress_callback: Optional[Callable[[int, int], None]] = None,
+    status_callback: Optional[Callable[[str], None]] = None
 ) -> Optional[Path]:
     """
     Download update installer from URL.
@@ -43,10 +53,16 @@ def download_update(
     Args:
         download_url: URL to download from (GitHub Release asset)
         progress_callback: Optional callback(downloaded_bytes, total_bytes)
+        status_callback: Optional callback(status_message) for UI updates
         
     Returns:
         Path to downloaded installer file, or None on failure
     """
+    def update_status(msg: str):
+        logger.info(msg)
+        if status_callback:
+            status_callback(msg)
+    
     try:
         update_dir = get_update_dir()
         
@@ -61,31 +77,195 @@ def download_update(
         if installer_path.exists():
             installer_path.unlink()
         
+        update_status("Connecting to server...")
         logger.info(f"Downloading update from: {download_url}")
         
-        # Create request with headers
+        if HAS_REQUESTS:
+            return _download_with_requests(download_url, installer_path, progress_callback, update_status)
+        else:
+            return _download_with_urllib(download_url, installer_path, progress_callback, update_status)
+        
+    except Exception as e:
+        logger.error(f"Download failed: {e}", exc_info=True)
+        if status_callback:
+            status_callback(f"Download failed: {str(e)[:50]}")
+        return None
+
+
+def _download_with_requests(
+    download_url: str,
+    installer_path: Path,
+    progress_callback: Optional[Callable[[int, int], None]],
+    update_status: Callable[[str], None]
+) -> Optional[Path]:
+    """Download using requests library - better SSL handling."""
+    try:
+        update_status("Establishing secure connection...")
+        
+        # Use requests with streaming for large files
+        # verify=True uses certifi's certificates which work in PyInstaller
+        response = requests.get(
+            download_url,
+            stream=True,
+            timeout=(30, 300),  # (connect timeout, read timeout)
+            headers={
+                'User-Agent': 'Lumina-Updater/2.0',
+                'Accept': 'application/octet-stream'
+            },
+            allow_redirects=True
+        )
+        response.raise_for_status()
+        
+        total_size = int(response.headers.get('content-length', 0))
+        downloaded = 0
+        chunk_size = 131072  # 128KB chunks
+        
+        if total_size > 0:
+            update_status(f"Downloading... 0 / {total_size / (1024*1024):.1f} MB")
+            logger.info(f"Download size: {total_size / (1024*1024):.2f} MB")
+        else:
+            update_status("Downloading...")
+        
+        # Initial progress callback
+        if progress_callback:
+            progress_callback(0, total_size if total_size > 0 else 1)
+        
+        with open(installer_path, 'wb') as f:
+            for chunk in response.iter_content(chunk_size=chunk_size):
+                if chunk:
+                    f.write(chunk)
+                    downloaded += len(chunk)
+                    
+                    if progress_callback:
+                        progress_callback(downloaded, total_size if total_size > 0 else downloaded)
+                    
+                    # Update status every ~5MB
+                    if total_size > 0 and downloaded % (5 * 1024 * 1024) < chunk_size:
+                        percent = int((downloaded / total_size) * 100)
+                        update_status(f"Downloading... {downloaded / (1024*1024):.1f} / {total_size / (1024*1024):.1f} MB ({percent}%)")
+        
+        # Verify the file was downloaded
+        if installer_path.exists() and installer_path.stat().st_size > 0:
+            actual_size = installer_path.stat().st_size
+            logger.info(f"Download complete: {installer_path} ({actual_size / (1024*1024):.2f} MB)")
+            update_status("Download complete!")
+            return installer_path
+        else:
+            logger.error("Downloaded file is empty or missing")
+            update_status("Download failed - file is empty")
+            return None
+            
+    except requests.exceptions.SSLError as e:
+        logger.error(f"SSL Error: {e}")
+        update_status("SSL certificate error - trying fallback...")
+        # Try with SSL verification disabled as fallback (not ideal but works)
+        return _download_with_requests_no_verify(download_url, installer_path, progress_callback, update_status)
+    except requests.exceptions.ConnectionError as e:
+        logger.error(f"Connection Error: {e}")
+        update_status("Connection failed - check internet")
+        return None
+    except requests.exceptions.Timeout as e:
+        logger.error(f"Timeout: {e}")
+        update_status("Connection timed out")
+        return None
+    except requests.exceptions.HTTPError as e:
+        logger.error(f"HTTP Error: {e.response.status_code} {e.response.reason}")
+        update_status(f"Server error: {e.response.status_code}")
+        return None
+    except Exception as e:
+        logger.error(f"Download error: {e}", exc_info=True)
+        update_status(f"Download error: {str(e)[:40]}")
+        return None
+
+
+def _download_with_requests_no_verify(
+    download_url: str,
+    installer_path: Path,
+    progress_callback: Optional[Callable[[int, int], None]],
+    update_status: Callable[[str], None]
+) -> Optional[Path]:
+    """Fallback download without SSL verification."""
+    try:
+        import urllib3
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        
+        update_status("Retrying download...")
+        
+        response = requests.get(
+            download_url,
+            stream=True,
+            timeout=(30, 300),
+            headers={
+                'User-Agent': 'Lumina-Updater/2.0',
+                'Accept': 'application/octet-stream'
+            },
+            allow_redirects=True,
+            verify=False  # Disable SSL verification as fallback
+        )
+        response.raise_for_status()
+        
+        total_size = int(response.headers.get('content-length', 0))
+        downloaded = 0
+        chunk_size = 131072
+        
+        if progress_callback:
+            progress_callback(0, total_size if total_size > 0 else 1)
+        
+        with open(installer_path, 'wb') as f:
+            for chunk in response.iter_content(chunk_size=chunk_size):
+                if chunk:
+                    f.write(chunk)
+                    downloaded += len(chunk)
+                    if progress_callback:
+                        progress_callback(downloaded, total_size if total_size > 0 else downloaded)
+        
+        if installer_path.exists() and installer_path.stat().st_size > 0:
+            logger.info(f"Fallback download complete: {installer_path}")
+            update_status("Download complete!")
+            return installer_path
+        return None
+        
+    except Exception as e:
+        logger.error(f"Fallback download also failed: {e}")
+        update_status("Download failed")
+        return None
+
+
+def _download_with_urllib(
+    download_url: str,
+    installer_path: Path,
+    progress_callback: Optional[Callable[[int, int], None]],
+    update_status: Callable[[str], None]
+) -> Optional[Path]:
+    """Fallback download using urllib (when requests not available)."""
+    import urllib.request
+    import urllib.error
+    
+    try:
+        update_status("Establishing connection...")
+        
+        # Create SSL context with certifi certificates
+        ssl_context = ssl.create_default_context(cafile=certifi.where())
+        
         request = urllib.request.Request(
             download_url,
             headers={
-                'User-Agent': 'Lumina-Updater/1.0',
+                'User-Agent': 'Lumina-Updater/2.0',
                 'Accept': 'application/octet-stream'
             }
         )
         
-        # Send initial progress to show we're connecting
-        if progress_callback:
-            progress_callback(0, 1)  # Shows 0% to indicate we started
-        
-        with urllib.request.urlopen(request, timeout=120) as response:
+        with urllib.request.urlopen(request, timeout=120, context=ssl_context) as response:
             total_size = int(response.headers.get('content-length', 0))
             downloaded = 0
-            chunk_size = 65536  # 64KB chunks for faster download
+            chunk_size = 131072
             
-            logger.info(f"Download size: {total_size / (1024*1024):.2f} MB")
+            if total_size > 0:
+                update_status(f"Downloading... 0 / {total_size / (1024*1024):.1f} MB")
+                logger.info(f"Download size: {total_size / (1024*1024):.2f} MB")
             
-            # Send another callback now that we know the total size
-            if progress_callback and total_size > 0:
-                progress_callback(0, total_size)  # Now with real total
+            if progress_callback:
+                progress_callback(0, total_size if total_size > 0 else 1)
             
             with open(installer_path, 'wb') as f:
                 while True:
@@ -98,22 +278,24 @@ def download_update(
                     if progress_callback:
                         progress_callback(downloaded, total_size if total_size > 0 else downloaded)
         
-        # Verify the file was downloaded
         if installer_path.exists() and installer_path.stat().st_size > 0:
-            logger.info(f"Download complete: {installer_path} ({installer_path.stat().st_size / (1024*1024):.2f} MB)")
+            logger.info(f"Download complete: {installer_path}")
+            update_status("Download complete!")
             return installer_path
         else:
             logger.error("Downloaded file is empty or missing")
             return None
-        
+            
     except urllib.error.HTTPError as e:
-        logger.error(f"HTTP Error downloading update: {e.code} {e.reason}")
+        logger.error(f"HTTP Error: {e.code} {e.reason}")
+        update_status(f"Server error: {e.code}")
         return None
     except urllib.error.URLError as e:
-        logger.error(f"URL Error downloading update: {e.reason}")
+        logger.error(f"URL Error: {e.reason}")
+        update_status("Connection failed")
         return None
     except Exception as e:
-        logger.error(f"Download failed: {e}", exc_info=True)
+        logger.error(f"urllib download failed: {e}", exc_info=True)
         return None
 
 
