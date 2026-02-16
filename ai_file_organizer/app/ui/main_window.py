@@ -3057,13 +3057,17 @@ class MainWindow(QMainWindow):
         if overlay and overlay.has_valid_saved_state():
             logger.info("[QS] Using saved state from quick search overlay")
             success = self._autofill_with_saved_state(path, overlay)
+            # IMPORTANT: Don't fall back - saved state method handles everything
+            # The old code would run fallback even if path was partially filled, causing double fill
             if success:
-                return
+                logger.info("[QS] Saved state autofill succeeded")
             else:
-                logger.warning("[QS] Saved state autofill failed, falling back to discovery")
+                logger.warning("[QS] Saved state autofill failed - NOT running fallback to avoid double fill")
+                self.status_bar.showMessage("QuickSearch: Autofill failed - path copied to clipboard")
+            return  # Stop here, don't run fallback pipelines
         
-        # Fallback to discovery-based autofill
-        logger.info("[QS] Using discovery-based autofill")
+        # Only use discovery-based autofill if we have NO saved state
+        logger.info("[QS] No saved state - using discovery-based autofill")
         ok = self._autofill_uia_pipeline(path)
         if not ok:
             logger.info("[QS] UIA pipeline failed; trying win32 pipeline")
@@ -3494,11 +3498,9 @@ class MainWindow(QMainWindow):
                 keyboard.send('alt+n')
                 time.sleep(0.2)
                 
-                # Select all text in filename field and paste
-                keyboard.send('home')
-                time.sleep(0.03)
-                keyboard.send('shift+end')
-                time.sleep(0.03)
+                # Select ALL text reliably and paste (ctrl+a is more reliable than home+shift+end)
+                keyboard.send('ctrl+a')
+                time.sleep(0.05)
                 keyboard.send('ctrl+v')
                 time.sleep(0.15)
                 
@@ -3540,94 +3542,92 @@ class MainWindow(QMainWindow):
                     except Exception:
                         return None
             
-            # Try multiple insertion methods
-            for attempt in range(3):
-                logger.info(f"[QS] UIA insertion attempt {attempt + 1}")
-                
+            # Try insertion methods - only ONE attempt to avoid double-filling
+            logger.info("[QS] UIA insertion attempt")
+            
+            try:
+                target.set_focus()
+                time.sleep(0.15)
+            except Exception:
+                pass
+            
+            filled = False
+            
+            # Method 1: ValuePattern.SetValue (most reliable)
+            try:
+                target.set_value(path)
+                filled = True
+                logger.info("[QS] UIA: Set via ValuePattern")
+            except Exception:
+                pass
+            
+            # Method 2: type_keys with clear (only if method 1 failed)
+            if not filled:
                 try:
-                    target.set_focus()
-                    time.sleep(0.15)
+                    target.type_keys('^a{BACKSPACE}', set_foreground=True)
+                    time.sleep(0.05)
+                    target.type_keys(path, with_spaces=True, set_foreground=True)
+                    filled = True
+                    logger.info("[QS] UIA: Set via type_keys")
                 except Exception:
                     pass
-                
-                filled = False
-                
-                # Method 1: ValuePattern.SetValue (most reliable)
-                if attempt == 0:
-                    try:
-                        target.set_value(path)
-                        filled = True
-                        logger.info("[QS] UIA: Set via ValuePattern")
-                    except Exception:
-                        pass
-                
-                # Method 2: type_keys with clear
-                if not filled:
-                    try:
-                        target.type_keys('^a{BACKSPACE}', set_foreground=True)
-                        time.sleep(0.05)
-                        target.type_keys(path, with_spaces=True, set_foreground=True)
-                        filled = True
-                        logger.info("[QS] UIA: Set via type_keys")
-                    except Exception:
-                        pass
-                
-                # Method 3: Clipboard paste fallback
-                if not filled:
-                    try:
-                        cb = QApplication.clipboard()
-                        cb.setText(path)
-                        
-                        import keyboard
-                        keyboard.send('ctrl+a')
-                        time.sleep(0.05)
-                        keyboard.send('ctrl+v')
-                        filled = True
-                        logger.info("[QS] UIA: Set via clipboard paste")
-                    except Exception:
-                        pass
-                
-                # Verify the text was inserted
-                time.sleep(0.15)
-                current_text = _get_text_safe(target)
-                if current_text and current_text.strip() == path.strip():
-                    logger.info("[QS] UIA: Path insertion verified")
+            
+            # Method 3: Clipboard paste fallback (only if methods 1 & 2 failed)
+            if not filled:
+                try:
+                    cb = QApplication.clipboard()
+                    cb.setText(path)
                     
-                    # Auto-confirm if enabled
-                    if settings.quick_search_auto_confirm:
-                        time.sleep(0.2)
-                        confirmed = False
-                        
-                        # Try to find and click Open/Save button
-                        try:
-                            for name in CONFIRM_NAMES:
-                                try:
-                                    btn = win.child_window(title=name, control_type='Button')
-                                    if btn.exists():
-                                        btn.invoke()
-                                        confirmed = True
-                                        logger.info(f"[QS] UIA: Confirmed via {name} button")
-                                        break
-                                except Exception:
-                                    continue
-                        except Exception:
-                            pass
-                        
-                        # Fallback: Send Enter
-                        if not confirmed:
+                    import keyboard
+                    keyboard.send('ctrl+a')
+                    time.sleep(0.05)
+                    keyboard.send('ctrl+v')
+                    filled = True
+                    logger.info("[QS] UIA: Set via clipboard paste")
+                except Exception:
+                    pass
+            
+            # Verify the text was inserted (run after all methods)
+            time.sleep(0.15)
+            current_text = _get_text_safe(target)
+            if current_text and current_text.strip() == path.strip():
+                logger.info("[QS] UIA: Path insertion verified")
+                
+                # Auto-confirm if enabled
+                if settings.quick_search_auto_confirm:
+                    time.sleep(0.2)
+                    confirmed = False
+                    
+                    # Try to find and click Open/Save button
+                    try:
+                        for name in CONFIRM_NAMES:
                             try:
-                                target.type_keys('{ENTER}', set_foreground=True)
-                                logger.info("[QS] UIA: Confirmed via Enter")
+                                btn = win.child_window(title=name, control_type='Button')
+                                if btn.exists():
+                                    btn.invoke()
+                                    confirmed = True
+                                    logger.info(f"[QS] UIA: Confirmed via {name} button")
+                                    break
                             except Exception:
-                                try:
-                                    win.type_keys('{ENTER}')
-                                except Exception:
-                                    pass
+                                continue
+                    except Exception:
+                        pass
                     
-                    self.status_bar.showMessage("QuickSearch: path filled via UIA" + (" and confirmed" if settings.quick_search_auto_confirm else ""))
-                    return True
-                else:
-                    logger.warning(f"[QS] UIA: Text verification failed. Expected: '{path}', Got: '{current_text}'")
+                    # Fallback: Send Enter
+                    if not confirmed:
+                        try:
+                            target.type_keys('{ENTER}', set_foreground=True)
+                            logger.info("[QS] UIA: Confirmed via Enter")
+                        except Exception:
+                            try:
+                                win.type_keys('{ENTER}')
+                            except Exception:
+                                pass
+                
+                self.status_bar.showMessage("QuickSearch: path filled via UIA" + (" and confirmed" if settings.quick_search_auto_confirm else ""))
+                return True
+            else:
+                logger.warning(f"[QS] UIA: Text verification failed. Expected: '{path}', Got: '{current_text}'")
             
             return False
             
@@ -3640,89 +3640,87 @@ class MainWindow(QMainWindow):
         try:
             import time
             
-            # Try multiple insertion methods
-            for attempt in range(3):
-                logger.info(f"[QS] Win32 insertion attempt {attempt + 1}")
-                
+            # Single attempt to avoid double-filling
+            logger.info("[QS] Win32 insertion attempt")
+            
+            try:
+                target.set_focus()
+                time.sleep(0.15)
+            except Exception:
+                pass
+            
+            filled = False
+            
+            # Method 1: type_keys with clear
+            try:
+                target.type_keys('^a{BACKSPACE}')
+                time.sleep(0.05)
+                target.type_keys(path, with_spaces=True)
+                filled = True
+                logger.info("[QS] Win32: Set via type_keys")
+            except Exception:
+                pass
+            
+            # Method 2: Clipboard paste fallback (only if method 1 failed)
+            if not filled:
                 try:
-                    target.set_focus()
-                    time.sleep(0.15)
+                    cb = QApplication.clipboard()
+                    cb.setText(path)
+                    
+                    import keyboard
+                    keyboard.send('ctrl+a')
+                    time.sleep(0.05)
+                    keyboard.send('ctrl+v')
+                    filled = True
+                    logger.info("[QS] Win32: Set via clipboard paste")
                 except Exception:
                     pass
-                
-                filled = False
-                
-                # Method 1: type_keys with clear
-                if attempt <= 1:
-                    try:
-                        target.type_keys('^a{BACKSPACE}')
-                        time.sleep(0.05)
-                        target.type_keys(path, with_spaces=True)
-                        filled = True
-                        logger.info("[QS] Win32: Set via type_keys")
-                    except Exception:
-                        pass
-                
-                # Method 2: Clipboard paste fallback
-                if not filled:
-                    try:
-                        cb = QApplication.clipboard()
-                        cb.setText(path)
+            
+            # Verify the text was inserted
+            time.sleep(0.15)
+            try:
+                current_text = target.window_text()
+                if current_text and current_text.strip() == path.strip():
+                    logger.info("[QS] Win32: Path insertion verified")
+                    
+                    # Auto-confirm if enabled
+                    if settings.quick_search_auto_confirm:
+                        time.sleep(0.2)
+                        confirmed = False
                         
-                        import keyboard
-                        keyboard.send('ctrl+a')
-                        time.sleep(0.05)
-                        keyboard.send('ctrl+v')
-                        filled = True
-                        logger.info("[QS] Win32: Set via clipboard paste")
-                    except Exception:
-                        pass
-                
-                # Verify the text was inserted
-                time.sleep(0.15)
-                try:
-                    current_text = target.window_text()
-                    if current_text and current_text.strip() == path.strip():
-                        logger.info("[QS] Win32: Path insertion verified")
-                        
-                        # Auto-confirm if enabled
-                        if settings.quick_search_auto_confirm:
-                            time.sleep(0.2)
-                            confirmed = False
-                            
-                            # Try to find and click Open/Save button
-                            try:
-                                from app.core.vision import CONFIRM_NAMES
-                                for name in CONFIRM_NAMES:
-                                    try:
-                                        btn = win.child_window(title=name, class_name='Button')
-                                        if btn.exists():
-                                            btn.click()
-                                            confirmed = True
-                                            logger.info(f"[QS] Win32: Confirmed via {name} button")
-                                            break
-                                    except Exception:
-                                        continue
-                            except Exception:
-                                pass
-                            
-                            # Fallback: Send Enter
-                            if not confirmed:
+                        # Try to find and click Open/Save button
+                        try:
+                            from app.core.vision import CONFIRM_NAMES
+                            for name in CONFIRM_NAMES:
                                 try:
-                                    target.type_keys('{ENTER}')
-                                    logger.info("[QS] Win32: Confirmed via Enter")
+                                    btn = win.child_window(title=name, class_name='Button')
+                                    if btn.exists():
+                                        btn.click()
+                                        confirmed = True
+                                        logger.info(f"[QS] Win32: Confirmed via {name} button")
+                                        break
                                 except Exception:
-                                    try:
-                                        win.type_keys('{ENTER}')
-                                    except Exception:
-                                        pass
+                                    continue
+                        except Exception:
+                            pass
                         
-                        self.status_bar.showMessage("QuickSearch: path filled via Win32" + (" and confirmed" if settings.quick_search_auto_confirm else ""))
-                        return True
-                    else:
-                        logger.warning(f"[QS] Win32: Text verification failed. Expected: '{path}', Got: '{current_text}'")
-                except Exception as e:
-                    logger.warning(f"[QS] Win32: Could not verify text insertion: {e}")
+                        # Fallback: Send Enter
+                        if not confirmed:
+                            try:
+                                target.type_keys('{ENTER}')
+                                logger.info("[QS] Win32: Confirmed via Enter")
+                            except Exception:
+                                try:
+                                    win.type_keys('{ENTER}')
+                                except Exception:
+                                    pass
+                    
+                    self.status_bar.showMessage("QuickSearch: path filled via Win32" + (" and confirmed" if settings.quick_search_auto_confirm else ""))
+                    return True
+                else:
+                    logger.warning(f"[QS] Win32: Text verification failed. Expected: '{path}', Got: '{current_text}'")
+            except Exception as e:
+                logger.warning(f"[QS] Win32: Could not verify text insertion: {e}")
             
             return False
             
@@ -4257,6 +4255,8 @@ class MainWindow(QMainWindow):
         dialog = QDialog(self)
         dialog.setWindowTitle(f"📄 {column_name}")
         dialog.setMinimumSize(600, 400)
+        dialog.setModal(True)  # Ensure dialog blocks parent and stays on top
+        dialog.setWindowFlags(dialog.windowFlags() | Qt.WindowStaysOnTopHint)
         
         # Style based on current theme
         is_dark = settings.theme == 'dark'
@@ -4299,9 +4299,10 @@ class MainWindow(QMainWindow):
                 }
             """
         else:
+            # Light mode styling
             dialog_style = """
                 QDialog {
-                    background-color: #0A0A12;
+                    background-color: #FFFFFF;
                 }
                 QLabel {
                     color: #7C4DFF;
@@ -4311,8 +4312,8 @@ class MainWindow(QMainWindow):
                     background-color: transparent;
                 }
                 QTextEdit {
-                    background-color: #0F0F1A;
-                    color: #E8E8F0;
+                    background-color: #F5F5F8;
+                    color: #1A1A2E;
                     border: 1px solid rgba(124, 77, 255, 0.30);
                     border-radius: 8px;
                     font-size: 14px;
@@ -4368,6 +4369,11 @@ class MainWindow(QMainWindow):
         from app.ui.theme_manager import apply_titlebar_theme
         dialog.show()
         apply_titlebar_theme(dialog)
+        
+        # Ensure dialog is focused and on top
+        dialog.raise_()
+        dialog.activateWindow()
+        text_edit.setFocus()
         
         result = dialog.exec()
         
