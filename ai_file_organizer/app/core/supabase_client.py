@@ -589,13 +589,26 @@ def get_latest_app_version() -> Optional[Dict[str, Any]]:
     """
     Fetch the latest app version from Supabase (public access, no auth required).
     
+    Filters by platform to ensure Windows users get Windows installers and
+    Mac users get Mac installers.
+    
     Returns:
         Dict with version info: {version, download_url, release_notes, release_name, is_required}
         or None if failed
     """
+    import sys
+    
     if not SUPABASE_AVAILABLE:
         logger.warning("Supabase not available for version check")
         return None
+    
+    # Determine current platform
+    if sys.platform == 'win32':
+        current_platform = 'windows'
+    elif sys.platform == 'darwin':
+        current_platform = 'mac'
+    else:
+        current_platform = 'linux'
     
     try:
         # Create anonymous client (no auth needed due to RLS policy)
@@ -604,12 +617,19 @@ def get_latest_app_version() -> Optional[Dict[str, Any]]:
             headers={"apikey": SUPABASE_ANON_KEY}
         )
         
-        # Query latest version (order by published_at desc, limit 1)
-        response = client.from_("app_version").select("*").order("published_at", desc=True).limit(1).execute()
+        # Query latest version for this platform (order by published_at desc, limit 1)
+        response = (
+            client.from_("app_version")
+            .select("*")
+            .eq("platform", current_platform)
+            .order("published_at", desc=True)
+            .limit(1)
+            .execute()
+        )
         
         if response.data and len(response.data) > 0:
             version_data = response.data[0]
-            logger.info(f"Fetched app version from Supabase: {version_data.get('version')}")
+            logger.info(f"Fetched app version from Supabase: {version_data.get('version')} (platform: {current_platform})")
             return {
                 'version': version_data.get('version'),
                 'download_url': version_data.get('download_url'),
@@ -619,7 +639,7 @@ def get_latest_app_version() -> Optional[Dict[str, Any]]:
                 'is_required': version_data.get('is_required', False)
             }
         else:
-            logger.info("No app version found in Supabase")
+            logger.info(f"No app version found in Supabase for platform: {current_platform}")
             return None
             
     except Exception as e:
