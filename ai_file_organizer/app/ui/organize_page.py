@@ -4801,7 +4801,7 @@ class OrganizePage(QWidget):
         layout.setSpacing(20)
         
         # Header
-        header = QLabel("Lumina")
+        header = QLabel("Filect")
         header.setObjectName("heroHeading")
         layout.addWidget(header)
         

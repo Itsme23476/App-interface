@@ -1,5 +1,5 @@
 """
-Auto-updater for the Lumina app.
+Auto-updater for the Filect app.
 Downloads installer from releases and runs it to apply updates.
 """
 
@@ -137,7 +137,7 @@ def download_update(
         # Determine filename from URL
         filename = download_url.split('/')[-1]
         if not filename.endswith('.exe'):
-            filename = "Lumina-Setup.exe"
+            filename = "Filect-Setup.exe"
         
         installer_path = update_dir / filename
         
@@ -209,7 +209,7 @@ def _download_with_requests(
             stream=True,
             timeout=(30, 300),  # (connect timeout, read timeout)
             headers={
-                'User-Agent': 'Lumina-Updater/2.0',
+                'User-Agent': 'Filect-Updater/2.0',
                 'Accept': 'application/octet-stream, application/x-msdownload, */*'
             },
             allow_redirects=True
@@ -304,7 +304,7 @@ def _download_with_requests_no_verify(
             stream=True,
             timeout=(30, 300),
             headers={
-                'User-Agent': 'Lumina-Updater/2.0',
+                'User-Agent': 'Filect-Updater/2.0',
                 'Accept': 'application/octet-stream, application/x-msdownload, */*'
             },
             allow_redirects=True,
@@ -365,7 +365,7 @@ def _download_with_urllib(
         request = urllib.request.Request(
             download_url,
             headers={
-                'User-Agent': 'Lumina-Updater/2.0',
+                'User-Agent': 'Filect-Updater/2.0',
                 'Accept': 'application/octet-stream'
             }
         )

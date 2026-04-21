@@ -1,5 +1,5 @@
 """
-Contextual Tips System for Lumina
+Contextual Tips System for Filect
 Provides pulsing dot indicators and spotlight popups for feature discovery
 """
 

@@ -1,10 +1,10 @@
 """
-Version information for Lumina - File Search Assistant.
+Version information for Filect - File Search Assistant.
 """
 
 VERSION = "1.9.0"
 BUILD_DATE = "2026-02-11"
-APP_NAME = "Lumina"
+APP_NAME = "Filect"
 
 # GitHub repository info (for reference)
 GITHUB_OWNER = "Itsme23476"

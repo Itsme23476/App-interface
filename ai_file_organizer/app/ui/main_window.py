@@ -434,7 +434,7 @@ class MainWindow(QMainWindow):
     
     def setup_ui(self):
         """Setup the user interface with modern sidebar navigation."""
-        self.setWindowTitle("Lumina - File Search Assistant")
+        self.setWindowTitle("Filect - File Search Assistant")
         self.setMinimumSize(1200, 800)
         
         # Central widget
@@ -493,7 +493,7 @@ class MainWindow(QMainWindow):
         logo_icon.setObjectName("logoIcon")
         logo_layout.addWidget(logo_icon)
         
-        logo_text = QLabel("Lumina")
+        logo_text = QLabel("Filect")
         logo_text.setObjectName("logoText")
         logo_layout.addWidget(logo_text)
         logo_layout.addStretch()

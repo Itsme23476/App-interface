@@ -30,12 +30,12 @@ jobs:
           $q = '"'
           $content = @(
             '"""',
-            'Version information for Lumina - File Search Assistant.',
+            'Version information for Filect - File Search Assistant.',
             '"""',
             '',
             "VERSION = $q$version$q",
             "BUILD_DATE = $q$buildDate$q",
-            "APP_NAME = ${q}Lumina$q",
+            "APP_NAME = ${q}Filect$q",
             '',
             '# GitHub repository info (for reference)',
             "GITHUB_OWNER = ${q}Itsme23476$q",
@@ -62,7 +62,7 @@ jobs:
         run: |
           cd ai_file_organizer
           $baseArgs = @(
-            "--name", "Lumina",
+            "--name", "Filect",
             "--windowed",
             "--onefile",
             "--collect-all", "PySide6",
@@ -94,7 +94,7 @@ jobs:
           }
           $baseArgs += "main.py"
           pyinstaller @baseArgs
-          $exePath = "dist\Lumina.exe"
+          $exePath = "dist\Filect.exe"
           if (Test-Path $exePath) {
             $size = (Get-Item $exePath).Length / 1MB
             echo "EXE size: $([math]::Round($size, 2)) MB"
@@ -104,7 +104,7 @@ jobs:
       
       - name: Verify build output
         run: |
-          if (Test-Path "ai_file_organizer/dist/Lumina.exe") {
+          if (Test-Path "ai_file_organizer/dist/Filect.exe") {
             echo "Build successful!"
           } else {
             echo "ERROR: EXE not found!"
@@ -124,34 +124,34 @@ jobs:
           }
           @"
           [Setup]
-          AppName=Lumina
+          AppName=Filect
           AppVersion=$version
-          AppPublisher=Lumina
-          DefaultDirName={autopf}\Lumina
-          DefaultGroupName=Lumina
+          AppPublisher=Filect
+          DefaultDirName={autopf}\Filect
+          DefaultGroupName=Filect
           OutputDir=installer
-          OutputBaseFilename=Lumina-Setup-v$version
+          OutputBaseFilename=Filect-Setup-v$version
           Compression=lzma
           SolidCompression=yes
           PrivilegesRequired=admin
-          UninstallDisplayIcon={app}\Lumina.exe
+          UninstallDisplayIcon={app}\Filect.exe
           CloseApplications=force
-          CloseApplicationsFilter=Lumina.exe
+          CloseApplicationsFilter=Filect.exe
           RestartApplications=yes
           $iconLine
           
           [Files]
-          Source: "ai_file_organizer\dist\Lumina.exe"; DestDir: "{app}"; DestName: "Lumina.exe"; Flags: ignoreversion
+          Source: "ai_file_organizer\dist\Filect.exe"; DestDir: "{app}"; DestName: "Filect.exe"; Flags: ignoreversion
           
           [Icons]
-          Name: "{group}\Lumina"; Filename: "{app}\Lumina.exe"
-          Name: "{commondesktop}\Lumina"; Filename: "{app}\Lumina.exe"
+          Name: "{group}\Filect"; Filename: "{app}\Filect.exe"
+          Name: "{commondesktop}\Filect"; Filename: "{app}\Filect.exe"
           
           [Run]
           ; For manual installs - shows checkbox on FINISH page (checked by default)
-          Filename: "{app}\Lumina.exe"; Description: "Launch Lumina"; Flags: nowait postinstall runasoriginaluser shellexec skipifsilent
+          Filename: "{app}\Filect.exe"; Description: "Launch Filect"; Flags: nowait postinstall runasoriginaluser shellexec skipifsilent
           ; For silent updates - always auto-launch (no checkbox needed)
-          Filename: "{app}\Lumina.exe"; Flags: nowait runasoriginaluser shellexec skipifnotsilent
+          Filename: "{app}\Filect.exe"; Flags: nowait runasoriginaluser shellexec skipifnotsilent
           "@ | Out-File -FilePath installer.iss -Encoding utf8
         shell: pwsh
       
@@ -196,11 +196,11 @@ jobs:
           # Remove V/v prefix and any leading dots (handles v1.0.0, V.1.0.0, 1.0.0)
           $version = "${{ github.ref_name }}" -replace '^[Vv]\.?', '' -replace '^\.', ''
           $releaseName = "${{ github.event.release.name }}"
-          if ([string]::IsNullOrEmpty($releaseName)) { $releaseName = "Lumina v$version" }
+          if ([string]::IsNullOrEmpty($releaseName)) { $releaseName = "Filect v$version" }
           $releaseNotes = "${{ github.event.release.body }}" -replace '"', '\"' -replace "`r`n", ' ' -replace "`n", ' '
           
           # GitHub release URL (works when repo is public)
-          $downloadUrl = "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/Lumina-Setup-v$version.exe"
+          $downloadUrl = "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/Filect-Setup-v$version.exe"
           
           echo "Version: $version"
           echo "Download URL: $downloadUrl"

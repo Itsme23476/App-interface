@@ -1,5 +1,5 @@
 """
-Update checker for Lumina - File Search Assistant.
+Update checker for Filect - File Search Assistant.
 Uses Supabase to check for new versions (works with private GitHub repos).
 """
 

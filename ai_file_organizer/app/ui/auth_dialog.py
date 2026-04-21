@@ -564,7 +564,7 @@ class AuthDialog(QDialog):
     
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Lumina")
+        self.setWindowTitle("Filect")
         self.setFixedSize(460, 680)
         self.setWindowFlags(Qt.Dialog | Qt.WindowCloseButtonHint)
         self.setModal(True)

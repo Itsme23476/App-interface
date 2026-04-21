@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Lumina - File Search Assistant v1.0
+Filect - File Search Assistant v1.0
 A privacy-first desktop application for intelligent file search and quick path autofill.
 Instantly find and autofill file paths in any application using global hotkeys.
 """
@@ -66,9 +66,9 @@ def main():
     
     # Create Qt application
     app = QApplication(sys.argv)
-    app.setApplicationName("Lumina")
+    app.setApplicationName("Filect")
     app.setApplicationVersion("1.0.0")
-    app.setOrganizationName("Lumina")
+    app.setOrganizationName("Filect")
     
     # Set application icon (shows in taskbar and window title bar)
     # Try ICO first (for Windows), then PNG as fallback
