@@ -14,7 +14,8 @@ from PySide6.QtWidgets import (
     QHeaderView, QGroupBox, QTextEdit, QSplitter, QTabWidget,
     QLineEdit, QCompleter, QListWidget, QListWidgetItem, QComboBox,
     QApplication, QCheckBox, QProgressDialog, QInputDialog, QFrame,
-    QSizePolicy, QStackedWidget, QButtonGroup, QScrollArea, QDialog
+    QSizePolicy, QStackedWidget, QButtonGroup, QScrollArea, QDialog,
+    QKeySequenceEdit
 )
 from PySide6.QtCore import Qt, QThread, Signal, QTimer, QUrl
 from PySide6.QtGui import QFont, QIcon, QDesktopServices, QShortcut, QKeySequence
@@ -43,6 +44,50 @@ from app.ui.contextual_tips import ContextualTipsManager
 
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Quick Search shortcut normalisation
+# ---------------------------------------------------------------------------
+# The user-facing setting accepts a key combination via QKeySequenceEdit and
+# stores it as a portable string like ``Ctrl+Alt+H``. Older versions of this
+# app used a plain QLineEdit, which let users type ANY text (e.g. ``h`` or
+# ``abc``) and saved it verbatim — global-hotkey registration then failed
+# silently and the shortcut was dead until the user hand-edited settings.json.
+#
+# ``_normalize_shortcut`` rescues those users on every launch: any invalid
+# stored string falls back to the default ``Ctrl+Alt+H``. New saves go through
+# the same validation so we can't write garbage going forward.
+
+QS_DEFAULT_SHORTCUT = "Ctrl+Alt+H"
+
+
+def _normalize_shortcut(value) -> str:
+    """Return a clean ``Ctrl+Alt+H``-style string for the global hotkey.
+
+    Rules:
+    - Empty/None → default.
+    - Non-parseable → default.
+    - Parseable but no modifier (e.g. just ``H``) → default. A bare key
+      as a global hotkey would fire on every keypress during normal typing.
+    - Valid → portable representation (e.g. ``Ctrl+Alt+H``) — case-
+      consistent so QKeySequence/QHotkey/WinAPI all parse it identically.
+    """
+    try:
+        from PySide6.QtGui import QKeySequence
+        if not value:
+            return QS_DEFAULT_SHORTCUT
+        seq = QKeySequence(str(value))
+        if seq.isEmpty() or seq.count() == 0:
+            return QS_DEFAULT_SHORTCUT
+        portable = seq.toString(QKeySequence.PortableText)
+        if not portable or "+" not in portable:
+            # Bare key with no modifier — almost certainly a mistake.
+            return QS_DEFAULT_SHORTCUT
+        return portable
+    except Exception:
+        return QS_DEFAULT_SHORTCUT
+
 
 # QuickSearch heuristics: localized button/label names
 CONFIRM_NAMES = [
@@ -2445,18 +2490,27 @@ class MainWindow(QMainWindow):
         shortcut_label = QLabel("Shortcut:")
         shortcut_label.setStyleSheet(settings_label_style)
         qs_row2.addWidget(shortcut_label)
-        self.qs_shortcut_input = QLineEdit(settings.quick_search_shortcut)
+        # QKeySequenceEdit (NOT QLineEdit) — actually captures modifier keys
+        # like Ctrl/Alt/Shift. A QLineEdit would only see text characters and
+        # silently drop modifiers, which is exactly the bug that left users
+        # with garbage stored shortcuts and broken global hotkeys.
+        self.qs_shortcut_input = QKeySequenceEdit(self)
         self.qs_shortcut_input.setMinimumHeight(36)
         self.qs_shortcut_input.setMaximumWidth(180)
+        self.qs_shortcut_input.setMaximumSequenceLength(1)  # single chord only
+        from PySide6.QtGui import QKeySequence as _QKS
+        self.qs_shortcut_input.setKeySequence(
+            _QKS(_normalize_shortcut(settings.quick_search_shortcut))
+        )
         self.qs_shortcut_input.setStyleSheet("""
-            QLineEdit {
+            QKeySequenceEdit, QKeySequenceEdit QLineEdit {
                 background-color: #0F0F1A;
                 border: 1px solid #1C1C28;
                 border-radius: 8px;
                 padding: 6px 12px;
                 color: #E8E8F0;
             }
-            QLineEdit:focus {
+            QKeySequenceEdit:focus, QKeySequenceEdit QLineEdit:focus {
                 border-color: #7C4DFF;
                 background-color: #12121E;
             }
@@ -2481,6 +2535,16 @@ class MainWindow(QMainWindow):
         qs_row2.addWidget(self.qs_shortcut_save)
         qs_row2.addStretch()
         qs_layout.addLayout(qs_row2)
+
+        # Inline hint so users know HOW to use the box (it doesn't accept
+        # typed text — they have to click and press the actual key combo).
+        qs_hint = QLabel(
+            "Click the box and press your shortcut (must include Ctrl, Alt, or Shift)."
+        )
+        qs_hint.setStyleSheet(
+            "color: #8B8B96; font-size: 11px; padding-left: 70px;"
+        )
+        qs_layout.addWidget(qs_hint)
 
         layout.addWidget(qs_card)
         
@@ -3465,12 +3529,27 @@ class MainWindow(QMainWindow):
                 self._rel_click_point = None
             self.quick_overlay.show_centered_bottom()
 
-        # Register global hotkey via QHotkey → keyboard → WinAPI
+        # Register global hotkey via QHotkey → keyboard → WinAPI.
+        # _normalize_shortcut rescues users whose stored value is invalid —
+        # e.g. anyone who was bitten by the pre-v12.2.15 QLineEdit widget
+        # that let them type non-parseable text. Without this, ``or`` only
+        # fires the fallback for empty strings, and garbage like ``abc``
+        # would crash all three registration paths.
+        _stored = (settings.quick_search_shortcut or "").strip()
+        ks = _normalize_shortcut(_stored)
+        # Only warn when the rescue is real (the stored value couldn't be
+        # parsed) — case-only normalisation like 'ctrl+alt+h' → 'Ctrl+Alt+H'
+        # is silent.
+        if _stored and _stored.lower() != ks.lower():
+            logger.warning(
+                f"[QS] Stored shortcut {_stored!r} could not be parsed — "
+                f"using {ks!r} instead. Re-record in Settings → Quick Search."
+            )
+
         self._qhotkey = None
         self._win_hotkey = None
         try:
             from qhotkey import QHotkey  # type: ignore
-            ks = settings.quick_search_shortcut or 'ctrl+alt+h'
             self._qhotkey = QHotkey(QKeySequence(ks), True, self)
             self._qhotkey.activated.connect(show_quick_overlay)
             logger.info(f"Registered global hotkey (QHotkey): {ks}")
@@ -3479,8 +3558,7 @@ class MainWindow(QMainWindow):
             # Skip keyboard library and go directly to WinAPI (more reliable)
             logger.warning("Skipping keyboard library, using WinAPI directly")
             # Use raw WinAPI RegisterHotKey for maximum reliability
-            hk = register_global_hotkey(self,
-                                        settings.quick_search_shortcut or 'ctrl+alt+h',
+            hk = register_global_hotkey(self, ks,
                                         lambda: QTimer.singleShot(0, show_quick_overlay))
             if hk:
                 self._win_hotkey = hk
@@ -3490,15 +3568,13 @@ class MainWindow(QMainWindow):
                 # Final fallback: try keyboard library
                 try:
                     import keyboard  # type: ignore
-                    hotkey = settings.quick_search_shortcut or 'ctrl+alt+h'
-                    keyboard.add_hotkey(hotkey, lambda: QTimer.singleShot(0, show_quick_overlay))
-                    logger.info(f"Registered global hotkey (keyboard fallback): {hotkey}")
+                    keyboard.add_hotkey(ks, lambda: QTimer.singleShot(0, show_quick_overlay))
+                    logger.info(f"Registered global hotkey (keyboard fallback): {ks}")
                 except Exception as e2:
                     logger.warning(f"Keyboard hook also failed: {e2}")
         # App-focus fallback using QShortcut so it works when the app is focused
         try:
-            ks = settings.quick_search_shortcut.replace('ctrl', 'Ctrl').replace('alt', 'Alt').replace('shift', 'Shift')
-            self._focus_quick_shortcut = QShortcut(QKeySequence(ks or 'Ctrl+Alt+Space'), self)
+            self._focus_quick_shortcut = QShortcut(QKeySequence(ks), self)
             self._focus_quick_shortcut.setContext(Qt.ApplicationShortcut)
             self._focus_quick_shortcut.activated.connect(show_quick_overlay)
         except Exception:
@@ -4625,14 +4701,35 @@ class MainWindow(QMainWindow):
         self.status_bar.showMessage("Quick Search auto-confirm " + ("enabled" if checked else "disabled"))
 
     def on_qs_save_shortcut(self):
-        sc = (self.qs_shortcut_input.text() or '').strip()
-        if not sc:
+        # Read the captured key sequence from QKeySequenceEdit. If the user
+        # cleared the box (Escape clears it) we get an empty sequence.
+        from PySide6.QtGui import QKeySequence
+        seq = self.qs_shortcut_input.keySequence()
+        sc = seq.toString(QKeySequence.PortableText) if not seq.isEmpty() else ""
+
+        # Reject empty + bare-key combos (no modifier). A single-key global
+        # hotkey would fire on every keypress during normal typing.
+        if not sc or "+" not in sc:
             from app.ui.organize_page import ModernInfoDialog
-            ModernInfoDialog.show_warning(self, "Shortcut", "Please enter a shortcut (e.g., ctrl+alt+h)")
+            ModernInfoDialog.show_warning(
+                self,
+                "Shortcut",
+                "Click the box and press a key combination that includes "
+                "Ctrl, Alt, or Shift — for example Ctrl+Alt+H.",
+            )
+            # Restore whatever was previously saved so the box isn't left blank.
+            self.qs_shortcut_input.setKeySequence(
+                QKeySequence(_normalize_shortcut(settings.quick_search_shortcut))
+            )
             return
+
+        # Normalise + persist — defensively re-runs _normalize_shortcut so any
+        # future bug here can't write garbage to disk.
+        sc = _normalize_shortcut(sc)
         settings.set_quick_search_shortcut(sc)
-        self.status_bar.showMessage(f"Quick Search shortcut saved: {sc}")
-        # Hotkey will take effect on next app start; to apply now, restart the app
+        self.status_bar.showMessage(
+            f"Quick Search shortcut saved: {sc} (restart the app to apply)"
+        )
 
     def on_debug_cell_changed(self, item: QTableWidgetItem) -> None:
         # DIAGNOSTIC: Log every call to this handler
