@@ -5226,11 +5226,11 @@ class OrganizePage(QWidget):
         dest_info = QVBoxLayout()
         dest_info.setSpacing(4)
         
-        dest_title = QLabel("Destination Folder")
+        dest_title = QLabel("Folder to Organize")
         dest_title.setStyleSheet("font-size: 16px; font-weight: 600; color: #7C4DFF; background: transparent;")
         dest_info.addWidget(dest_title)
-        
-        self.dest_label = QLabel("Select where organized files will be moved...")
+
+        self.dest_label = QLabel("Pick a folder — its files get sorted into subfolders within it (in place)")
         self.dest_label.setStyleSheet("color: #7A7A90; font-size: 13px; background: transparent;")
         self.dest_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         dest_info.addWidget(self.dest_label)
@@ -6509,7 +6509,7 @@ class OrganizePage(QWidget):
     def select_destination(self):
         """Open folder picker for destination."""
         folder = QFileDialog.getExistingDirectory(
-            self, "Choose Destination Folder", str(Path.home())
+            self, "Choose Folder to Organize", str(Path.home())
         )
         if folder:
             self.destination_path = Path(folder)

@@ -594,15 +594,30 @@ QMainWindow, QDialog {
     font-size: 13px;
 }
 
+#watchFolderRow {
+    background-color: #16161F;
+    border: 1px solid #1C1C28;
+    border-radius: 10px;
+}
+
+#watchFolderRow:hover {
+    border-color: #252535;
+}
+
 #watchRemoveFolderBtn {
-    background-color: transparent;
-    color: #7A7A90;
-    border: none;
-    font-size: 12px;
+    background-color: rgba(255, 107, 107, 0.12);
+    color: #FF6B6B;
+    border: 1px solid rgba(255, 107, 107, 0.30);
+    border-radius: 8px;
+    font-size: 13px;
+    font-weight: 600;
+    padding: 4px 14px;
 }
 
 #watchRemoveFolderBtn:hover {
-    color: #FF6B6B;
+    background-color: #FF6B6B;
+    color: #FFFFFF;
+    border-color: #FF6B6B;
 }
 
 #watchPopupStatus {

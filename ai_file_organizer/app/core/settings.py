@@ -39,8 +39,11 @@ class Settings:
         self.auto_index_downloads: bool = False
         # Watch for new downloads - common folders (Downloads, Desktop, Documents, etc.)
         self.watch_common_folders: bool = False
-        # Watch for new downloads - custom folders list
+        # Watch for new downloads - custom folders list (paths normalised via str(Path()))
         self.watch_custom_folders: List[str] = []
+        # Per-folder custom AI instructions for watched custom folders.
+        # Keyed by the SAME normalised path string used in watch_custom_folders.
+        self.watch_folder_instructions: Dict[str, str] = {}
         # OCR during indexing (slow - disable for faster indexing)
         self.enable_ocr_indexing: bool = False
         # Search enhancements
@@ -289,8 +292,14 @@ class Settings:
         self.auto_index_downloads = bool(data.get('auto_index_downloads', False))
         # Watch for new downloads - common folders
         self.watch_common_folders = bool(data.get('watch_common_folders', False))
-        # Watch for new downloads - custom folders
-        self.watch_custom_folders = list(data.get('watch_custom_folders', []))
+        # Watch for new downloads - custom folders. Normalise every stored
+        # path through str(Path()) so old forward-slash entries (from
+        # QFileDialog) migrate to the OS-native form the watcher uses,
+        # keeping settings / watcher / instructions all keyed identically.
+        self.watch_custom_folders = [str(Path(p)) for p in data.get('watch_custom_folders', [])]
+        # Per-folder instructions, re-keyed to normalised paths on load.
+        _raw_instr = dict(data.get('watch_folder_instructions', {}))
+        self.watch_folder_instructions = {str(Path(k)): v for k, v in _raw_instr.items()}
         # OCR during indexing (disabled by default for speed)
         self.enable_ocr_indexing = bool(data.get('enable_ocr_indexing', False))
         # Search enhancements
@@ -351,6 +360,7 @@ class Settings:
             'auto_index_downloads': self.auto_index_downloads,
             'watch_common_folders': self.watch_common_folders,
             'watch_custom_folders': self.watch_custom_folders,
+            'watch_folder_instructions': self.watch_folder_instructions,
             'enable_ocr_indexing': self.enable_ocr_indexing,
             'enable_spell_check': self.enable_spell_check,
             'auth_access_token': self.auth_access_token,
@@ -412,17 +422,49 @@ class Settings:
         self.watch_common_folders = bool(enabled)
         self._save_config()
     
-    def add_watch_custom_folder(self, folder_path: str) -> None:
-        """Add a custom folder to watch for new downloads."""
-        if folder_path and folder_path not in self.watch_custom_folders:
-            self.watch_custom_folders.append(folder_path)
-            self._save_config()
-    
+    def add_watch_custom_folder(self, folder_path: str, instruction: str = None) -> None:
+        """Add a custom folder to watch, with optional per-folder AI
+        instruction. Paths are normalised so settings / watcher /
+        instructions stay keyed identically (see watch_custom_folders)."""
+        if not folder_path:
+            return
+        norm = str(Path(folder_path))
+        if norm not in self.watch_custom_folders:
+            self.watch_custom_folders.append(norm)
+        if instruction:
+            self.watch_folder_instructions[norm] = instruction
+        self._save_config()
+
     def remove_watch_custom_folder(self, folder_path: str) -> None:
-        """Remove a custom folder from the watch list."""
+        """Remove a custom folder (and its instruction) from the watch list."""
+        norm = str(Path(folder_path))
+        removed = False
+        if norm in self.watch_custom_folders:
+            self.watch_custom_folders.remove(norm)
+            removed = True
+        if norm in self.watch_folder_instructions:
+            del self.watch_folder_instructions[norm]
+            removed = True
+        # Also try the raw (un-normalised) form in case an old forward-slash
+        # entry slipped through before migration.
         if folder_path in self.watch_custom_folders:
             self.watch_custom_folders.remove(folder_path)
+            removed = True
+        if removed:
             self._save_config()
+
+    def set_watch_folder_instruction(self, folder_path: str, instruction: str) -> None:
+        """Set (or clear, if empty) the AI instruction for a watched folder."""
+        norm = str(Path(folder_path))
+        if instruction:
+            self.watch_folder_instructions[norm] = instruction
+        else:
+            self.watch_folder_instructions.pop(norm, None)
+        self._save_config()
+
+    def get_watch_folder_instruction(self, folder_path: str) -> str:
+        """Return the AI instruction for a watched folder, or '' if none."""
+        return self.watch_folder_instructions.get(str(Path(folder_path)), '')
 
     def set_auth_tokens(self, access_token: str, refresh_token: str, email: str = '') -> None:
         """Store authentication tokens securely."""

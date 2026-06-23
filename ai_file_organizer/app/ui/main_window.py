@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
     QLineEdit, QCompleter, QListWidget, QListWidgetItem, QComboBox,
     QApplication, QCheckBox, QProgressDialog, QInputDialog, QFrame,
     QSizePolicy, QStackedWidget, QButtonGroup, QScrollArea, QDialog,
-    QKeySequenceEdit
+    QKeySequenceEdit, QPlainTextEdit
 )
 from PySide6.QtCore import Qt, QThread, Signal, QTimer, QUrl
 from PySide6.QtGui import QFont, QIcon, QDesktopServices, QShortcut, QKeySequence
@@ -230,9 +230,10 @@ class AutoIndexWorker(QThread):
         self._queue = []
         self._running = False
     
-    def add_file(self, file_path: Path):
-        """Add a file to the indexing queue."""
-        self._queue.append(file_path)
+    def add_file(self, file_path: Path, instructions: str = None):
+        """Add a file to the indexing queue, with optional per-folder AI
+        instructions that get passed through to the vision analysis."""
+        self._queue.append((file_path, instructions))
         if not self._running:
             self.start()
     
@@ -246,10 +247,16 @@ class AutoIndexWorker(QThread):
         from app.core.settings import settings
         
         self._running = True
-        
+
         while self._queue:
-            file_path = self._queue.pop(0)
-            
+            item = self._queue.pop(0)
+            # Items are (file_path, instructions) tuples; tolerate bare
+            # paths for backward compatibility.
+            if isinstance(item, tuple):
+                file_path, file_instructions = item
+            else:
+                file_path, file_instructions = item, None
+
             try:
                 # Check if file already exists in index with tags
                 existing = file_index.get_file_by_path(str(file_path))
@@ -284,8 +291,10 @@ class AutoIndexWorker(QThread):
                 if ext in {'.png', '.jpg', '.jpeg', '.bmp', '.tiff', '.tif', '.gif', '.webp', '.avif', '.heic', '.heif', '.ico', '.raw', '.cr2', '.nef', '.arw', '.pdf'}:
                     self.status_update.emit(f"Analyzing: {file_path.name}")
                     
-                    # analyze_image handles provider selection internally
-                    vision = analyze_image(file_path)
+                    # analyze_image handles provider selection internally.
+                    # Pass the watched folder's per-folder instruction (if any)
+                    # so tags/labels reflect what the user asked for.
+                    vision = analyze_image(file_path, user_instructions=file_instructions)
                     if vision:
                         metadata.update(vision)
                         metadata['ai_source'] = settings.ai_provider
@@ -2211,12 +2220,16 @@ class MainWindow(QMainWindow):
             logger.error(f"Error offering reindex for watched files: {e}")
     
     def _update_view_files_button_count(self):
-        """Update the View Files button with the current file count."""
+        """Update the View Files button with the current file count.
+
+        Was importing a non-existent ``app.core.indexer`` module — pre-fix
+        this raised ``ModuleNotFoundError`` on every clear / refresh,
+        leaving the button stuck on '(0)' even when files were indexed.
+        Reads from the real file_index global instead.
+        """
         try:
-            from app.core.indexer import FileIndexer
-            indexer = FileIndexer()
-            files = indexer.get_all_indexed_files()
-            count = len(files)
+            from app.core.database import file_index
+            count = file_index.get_file_count()
             self.view_files_btn.setText(f"View Indexed Files ({count})")
         except Exception as e:
             logger.error(f"Error updating file count: {e}")
@@ -5793,6 +5806,135 @@ Move Plan Summary:
         """Open the Watch for New Downloads popup dialog."""
         self._show_watch_popup()
     
+    def _prompt_folder_instructions(self, parent_dialog, folder_name: str, current_text: str = ""):
+        """Modern, theme-aware editor for a watched folder's AI instructions.
+
+        Replaces the dated default QInputDialog. Returns (text, ok) where
+        ok is False if the user cancelled.
+        """
+        from PySide6.QtWidgets import QDialog, QFrame
+        from app.ui.theme_manager import get_theme_colors, apply_titlebar_theme
+        c = get_theme_colors()
+
+        dlg = QDialog(parent_dialog)
+        dlg.setWindowFlags(Qt.Dialog | Qt.FramelessWindowHint)
+        dlg.setAttribute(Qt.WA_TranslucentBackground)
+        dlg.setFixedSize(480, 440)
+
+        card = QFrame(dlg)
+        card.setGeometry(0, 0, 480, 440)
+        card.setStyleSheet(f"""
+            QFrame {{
+                background-color: {c['surface']};
+                border: 1px solid {c['border']};
+                border-radius: 18px;
+            }}
+        """)
+
+        lay = QVBoxLayout(card)
+        lay.setContentsMargins(28, 24, 28, 24)
+        lay.setSpacing(14)
+
+        # Header
+        head = QHBoxLayout()
+        title = QLabel("✨  Folder AI Instructions")
+        title.setStyleSheet(
+            f"font-size: 18px; font-weight: 700; color: {c['text']}; background: transparent;"
+        )
+        head.addWidget(title)
+        head.addStretch()
+        close_btn = QPushButton("✕")
+        close_btn.setFixedSize(30, 30)
+        close_btn.setCursor(Qt.PointingHandCursor)
+        close_btn.setStyleSheet(f"""
+            QPushButton {{ background: transparent; color: {c['text_muted']};
+                           border: none; font-size: 16px; border-radius: 15px; }}
+            QPushButton:hover {{ background: {c['hover']}; color: {c['text']}; }}
+        """)
+        close_btn.clicked.connect(dlg.reject)
+        head.addWidget(close_btn)
+        lay.addLayout(head)
+
+        # Subtitle
+        sub = QLabel(
+            f"Guide the AI when new files land in <b>{folder_name}</b>. "
+            "These tags/labels apply only to this folder. Leave blank for none."
+        )
+        sub.setWordWrap(True)
+        sub.setStyleSheet(
+            f"font-size: 13px; color: {c['text_muted']}; background: transparent;"
+        )
+        lay.addWidget(sub)
+
+        # Text input
+        editor = QPlainTextEdit()
+        editor.setPlainText(current_text or "")
+        editor.setPlaceholderText(
+            "e.g. 'Tag these as product screenshots and note any visible "
+            "brand names or prices.'"
+        )
+        editor.setStyleSheet(f"""
+            QPlainTextEdit {{
+                background-color: {c['input_bg']};
+                border: 1px solid {c['border']};
+                border-radius: 12px;
+                padding: 12px;
+                color: {c['text']};
+                font-size: 14px;
+            }}
+            QPlainTextEdit:focus {{ border: 2px solid #7C4DFF; }}
+        """)
+        lay.addWidget(editor, 1)
+
+        # Buttons
+        btns = QHBoxLayout()
+        btns.addStretch()
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.setMinimumHeight(40)
+        cancel_btn.setCursor(Qt.PointingHandCursor)
+        cancel_btn.setStyleSheet(f"""
+            QPushButton {{ background: transparent; color: {c['text_muted']};
+                           border: 1px solid {c['border']}; border-radius: 10px;
+                           font-size: 14px; font-weight: 600; padding: 8px 22px; }}
+            QPushButton:hover {{ border-color: #7C4DFF; color: #7C4DFF; }}
+        """)
+        cancel_btn.clicked.connect(dlg.reject)
+        btns.addWidget(cancel_btn)
+
+        save_btn = QPushButton("Save")
+        save_btn.setMinimumHeight(40)
+        save_btn.setCursor(Qt.PointingHandCursor)
+        save_btn.setStyleSheet("""
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #7C4DFF, stop:1 #9575FF);
+                color: white; border: none; border-radius: 10px;
+                font-size: 14px; font-weight: 700; padding: 8px 28px;
+            }
+            QPushButton:hover { background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #9575FF, stop:1 #B39DFF); }
+        """)
+        save_btn.clicked.connect(dlg.accept)
+        btns.addWidget(save_btn)
+        lay.addLayout(btns)
+
+        # Draggable
+        dlg._drag = None
+        def _press(e):
+            if e.button() == Qt.LeftButton:
+                dlg._drag = e.globalPosition().toPoint() - dlg.frameGeometry().topLeft()
+        def _move(e):
+            if dlg._drag and e.buttons() == Qt.LeftButton:
+                dlg.move(e.globalPosition().toPoint() - dlg._drag)
+        card.mousePressEvent = _press
+        card.mouseMoveEvent = _move
+
+        dlg.move(
+            parent_dialog.x() + (parent_dialog.width() - dlg.width()) // 2,
+            parent_dialog.y() + (parent_dialog.height() - dlg.height()) // 2,
+        )
+        editor.setFocus()
+        ok = dlg.exec() == QDialog.Accepted
+        return (editor.toPlainText().strip(), ok)
+
     def _show_watch_popup(self):
         """Show the Watch for New Downloads popup dialog."""
         from PySide6.QtWidgets import QDialog, QFrame, QScrollArea
@@ -5800,14 +5942,16 @@ Move Plan Summary:
         dialog = QDialog(self)
         dialog.setWindowTitle("Watch for New Downloads")
         dialog.setObjectName("watchPopupDialog")
-        dialog.setFixedSize(480, 520)
+        # Widened from 480x520 so the toggle pill and per-row edit/remove
+        # buttons no longer clip against the right edge.
+        dialog.setFixedSize(540, 600)
         dialog.setWindowFlags(Qt.Dialog | Qt.FramelessWindowHint)
         dialog.setAttribute(Qt.WA_TranslucentBackground)
-        
+
         # Main container
         container = QFrame(dialog)
         container.setObjectName("warningDialogContainer")
-        container.setGeometry(0, 0, 480, 520)
+        container.setGeometry(0, 0, 540, 600)
         
         layout = QVBoxLayout(container)
         layout.setContentsMargins(28, 24, 28, 24)
@@ -5850,11 +5994,12 @@ Move Plan Summary:
         common_toggle.setObjectName("watchTogglePill")
         common_toggle.setCheckable(True)
         common_toggle.setChecked(settings.watch_common_folders)
-        common_toggle.setFixedSize(60, 28)
+        # Slightly larger + min (not fixed) so the ON/OFF text never clips.
+        common_toggle.setMinimumSize(64, 30)
         common_toggle.setCursor(Qt.PointingHandCursor)
         if settings.watch_common_folders:
             common_toggle.setText("ON")
-        common_header.addWidget(common_toggle)
+        common_header.addWidget(common_toggle, 0, Qt.AlignVCenter)
         common_layout.addLayout(common_header)
         
         common_desc = QLabel("Downloads, Desktop, Documents, Pictures, Videos, Music")
@@ -5887,8 +6032,8 @@ Move Plan Summary:
         # Custom folders list
         folders_list_widget = QWidget()
         folders_list_layout = QVBoxLayout(folders_list_widget)
-        folders_list_layout.setContentsMargins(0, 4, 0, 0)
-        folders_list_layout.setSpacing(4)
+        folders_list_layout.setContentsMargins(0, 6, 0, 0)
+        folders_list_layout.setSpacing(6)
         
         def refresh_folder_list():
             # Clear existing
@@ -5896,52 +6041,81 @@ Move Plan Summary:
                 item = folders_list_layout.takeAt(0)
                 if item.widget():
                     item.widget().deleteLater()
-            
+
             if not settings.watch_custom_folders:
                 empty_label = QLabel("No custom folders added")
                 empty_label.setObjectName("watchEmptyLabel")
                 folders_list_layout.addWidget(empty_label)
-            else:
-                for folder_path in settings.watch_custom_folders:
-                    folder_row = QWidget()
-                    row_layout = QHBoxLayout(folder_row)
-                    row_layout.setContentsMargins(0, 2, 0, 2)
-                    row_layout.setSpacing(8)
-                    
-                    # Folder icon and name
-                    folder_name = Path(folder_path).name
-                    folder_label = QLabel(f"📁 {folder_name}")
-                    folder_label.setObjectName("watchFolderItem")
-                    folder_label.setToolTip(folder_path)
-                    row_layout.addWidget(folder_label, 1)
-                    
-                    # Remove button
-                    remove_btn = QPushButton("✕")
-                    remove_btn.setObjectName("watchRemoveFolderBtn")
-                    remove_btn.setFixedSize(22, 22)
-                    remove_btn.setCursor(Qt.PointingHandCursor)
-                    remove_btn.setToolTip("Remove")
-                    remove_btn.clicked.connect(lambda checked, fp=folder_path: remove_folder(fp))
-                    row_layout.addWidget(remove_btn)
-                    
-                    folders_list_layout.addWidget(folder_row)
-        
+                return
+
+            for folder_path in settings.watch_custom_folders:
+                folder_row = QFrame()
+                folder_row.setObjectName("watchFolderRow")
+                row_layout = QHBoxLayout(folder_row)
+                row_layout.setContentsMargins(12, 8, 10, 8)
+                row_layout.setSpacing(8)
+
+                # Folder name (clickable to edit AI instructions). A ✏️
+                # marker + purple tint signals when instructions are set.
+                folder_name = Path(folder_path).name
+                has_instr = bool(settings.get_watch_folder_instruction(folder_path))
+                marker = "  ✏️" if has_instr else ""
+                folder_label = QLabel(f"📁  {folder_name}{marker}")
+                folder_label.setObjectName("watchFolderItem")
+                folder_label.setCursor(Qt.PointingHandCursor)
+                tip = "Click to add or edit AI instructions for this folder"
+                if has_instr:
+                    tip += f"\n\nCurrent: {settings.get_watch_folder_instruction(folder_path)}"
+                folder_label.setToolTip(tip)
+                if has_instr:
+                    folder_label.setStyleSheet("color: #7C4DFF; font-weight: 600;")
+                folder_label.mousePressEvent = (
+                    lambda ev, fp=folder_path: edit_instruction(fp)
+                )
+                row_layout.addWidget(folder_label, 1)
+
+                # Single, clearly-labelled Remove button.
+                remove_btn = QPushButton("Remove")
+                remove_btn.setObjectName("watchRemoveFolderBtn")
+                remove_btn.setMinimumSize(76, 30)
+                remove_btn.setCursor(Qt.PointingHandCursor)
+                remove_btn.setToolTip("Stop watching and remove this folder")
+                remove_btn.clicked.connect(lambda checked, fp=folder_path: remove_folder(fp))
+                row_layout.addWidget(remove_btn, 0, Qt.AlignVCenter)
+
+                folders_list_layout.addWidget(folder_row)
+
         def remove_folder(folder_path):
             settings.remove_watch_custom_folder(folder_path)
             refresh_folder_list()
             self._restart_folder_watching()
             self._update_watch_status()
-        
+            update_status()
+
+        def edit_instruction(folder_path):
+            current = settings.get_watch_folder_instruction(folder_path)
+            text, ok = self._prompt_folder_instructions(
+                dialog, Path(folder_path).name, current
+            )
+            if ok:
+                settings.set_watch_folder_instruction(folder_path, text)
+                refresh_folder_list()
+
         def add_folder():
             folder = QFileDialog.getExistingDirectory(dialog, "Select Folder to Watch", str(Path.home()))
-            if folder:
-                settings.add_watch_custom_folder(folder)
-                refresh_folder_list()
-                self._restart_folder_watching()
-                self._update_watch_status()
-        
+            if not folder:
+                return
+            # Optional per-folder AI instructions captured at add time via
+            # the modern instructions editor.
+            text, ok = self._prompt_folder_instructions(dialog, Path(folder).name, "")
+            instruction = text if ok else ""
+            settings.add_watch_custom_folder(folder, instruction=instruction or None)
+            refresh_folder_list()
+            self._restart_folder_watching()
+            self._update_watch_status()
+            update_status()
+
         add_folder_btn.clicked.connect(add_folder)
-        refresh_folder_list()
         
         custom_layout.addWidget(folders_list_widget)
         layout.addWidget(custom_section)
@@ -5967,8 +6141,12 @@ Move Plan Summary:
                 status_label.setStyleSheet("color: #7A7A90; font-size: 13px;")
         
         update_status()
+        # Populate the folder rows now that all the nested handlers
+        # (refresh_folder_list, edit_instruction, remove_folder,
+        # update_status) are defined.
+        refresh_folder_list()
         layout.addWidget(status_label)
-        
+
         # Done button
         done_btn = QPushButton("Done")
         done_btn.setObjectName("warningDialogConfirmBtn")
@@ -6104,7 +6282,7 @@ Move Plan Summary:
         watching = []
         if settings.watch_common_folders:
             watching.append("common folders")
-        if settings.watch_custom_folders and self.watch_custom_toggle.isChecked():
+        if settings.watch_custom_folders:
             watching.append(f"{len(settings.watch_custom_folders)} custom folder(s)")
         
         if watching:
@@ -6154,28 +6332,58 @@ Move Plan Summary:
                 if p.exists():
                     folders_to_watch.append(str(p))
         
-        # Custom folders
-        if self.watch_custom_toggle.isChecked():
+        # Custom folders — watched whenever the user has any configured.
+        # (Previously gated behind self.watch_custom_toggle.isChecked(),
+        # a hidden button that was never checked, so custom folders were
+        # saved to settings but NEVER actually watched. The presence of
+        # folders in settings.watch_custom_folders IS the enable signal.)
+        if settings.watch_custom_folders:
             for folder in settings.watch_custom_folders:
                 if Path(folder).exists():
                     folders_to_watch.append(folder)
         
-        # Add to watcher
+        # Add to watcher. CRITICAL: normalise every path through
+        # str(Path(...)) before using it as a dict key. QFileDialog returns
+        # forward-slash paths on Windows ('C:/Users/.../Downloads'), but the
+        # lookup in _check_folder_for_new_files does str(Path(path)) which
+        # yields backslashes ('C:\\Users\\...\\Downloads'). If we stored the
+        # forward-slash form as the key, the lookup would NEVER match and
+        # new files were silently never detected — this was the actual root
+        # cause of 'watch folders doesn't index'.
         for folder in folders_to_watch:
-            if folder not in self._folder_watcher.directories():
-                self._folder_watcher.addPath(folder)
-                # Track current files
-                try:
-                    self._watched_folders[folder] = set(Path(folder).iterdir())
-                except Exception:
-                    self._watched_folders[folder] = set()
-        
-        logger.info(f"Started watching {len(folders_to_watch)} folders")
+            norm_folder = str(Path(folder))
+            if norm_folder not in self._folder_watcher.directories():
+                self._folder_watcher.addPath(norm_folder)
+            # Track current files keyed by the NORMALISED path
+            try:
+                self._watched_folders[norm_folder] = set(Path(norm_folder).iterdir())
+            except Exception:
+                self._watched_folders[norm_folder] = set()
+
+        # Polling fallback — QFileSystemWatcher misses events on Windows,
+        # so re-scan every 3s as a safety net. This is what actually makes
+        # download-watching reliable.
+        if not hasattr(self, '_watch_poll_timer'):
+            from PySide6.QtCore import QTimer as _QTimer
+            self._watch_poll_timer = _QTimer(self)
+            self._watch_poll_timer.timeout.connect(self._poll_watched_folders)
+        if folders_to_watch and not self._watch_poll_timer.isActive():
+            self._watch_poll_timer.start(3000)
+
+        logger.info(
+            f"[WATCH] Started watching {len(folders_to_watch)} folder(s): "
+            f"{[Path(f).name for f in folders_to_watch]} "
+            f"(common={settings.watch_common_folders}, "
+            f"custom={len(settings.watch_custom_folders)}, poll=3s)"
+        )
     
     def _restart_folder_watching(self):
         """Restart folder watching with updated settings."""
         self._stop_folder_watching()
-        if settings.watch_common_folders or (self.watch_custom_toggle.isChecked() and settings.watch_custom_folders):
+        # Start if EITHER common folders are on OR any custom folders are
+        # configured. The custom-folder list itself is the enable signal —
+        # no separate toggle needed.
+        if settings.watch_common_folders or settings.watch_custom_folders:
             self._start_folder_watching()
     
     def _stop_folder_watching(self):
@@ -6184,9 +6392,11 @@ Move Plan Summary:
             dirs = self._folder_watcher.directories()
             if dirs:
                 self._folder_watcher.removePaths(dirs)
+        if hasattr(self, '_watch_poll_timer') and self._watch_poll_timer.isActive():
+            self._watch_poll_timer.stop()
         if hasattr(self, '_watched_folders'):
             self._watched_folders = {}
-        logger.info("Stopped watching folders")
+        logger.info("[WATCH] Stopped watching folders")
     
     def _start_downloads_watcher(self):
         """Start watching common folders for new files."""
@@ -6250,47 +6460,87 @@ Move Plan Summary:
             logger.info("Stopped watching folders")
     
     def _on_watched_folder_changed(self, path: str):
-        """Handle changes in any watched folder."""
-        from pathlib import Path
-        
+        """Handle the QFileSystemWatcher directoryChanged signal."""
+        self._check_folder_for_new_files(path)
+
+    def _poll_watched_folders(self):
+        """Polling fallback for new files.
+
+        QFileSystemWatcher.directoryChanged is unreliable on Windows — it
+        routinely misses events, especially for browser downloads that
+        first create a .crdownload temp file then rename it (the rename
+        sometimes doesn't surface as a directory change). This timer
+        re-scans every watched folder on a fixed interval so new files
+        are picked up even when the OS signal never fires.
+        """
         if not hasattr(self, '_watched_folders'):
             return
-        
+        # Heartbeat: log a summary once a minute (every 20th 3s poll) so we
+        # can confirm the poll is alive and seeing the right folders without
+        # spamming the log every 3 seconds.
+        self._watch_poll_count = getattr(self, '_watch_poll_count', 0) + 1
+        if self._watch_poll_count == 1 or self._watch_poll_count % 20 == 0:
+            summary = {
+                Path(k).name: len(v) for k, v in self._watched_folders.items()
+            }
+            logger.info(f"[WATCH] Poll #{self._watch_poll_count} scanning: {summary}")
+        # Iterate a copy of the keys — _check_folder_for_new_files mutates
+        # the dict's values but not its keys, so this is just defensive.
+        for folder_str in list(self._watched_folders.keys()):
+            self._check_folder_for_new_files(folder_str)
+
+    def _check_folder_for_new_files(self, path: str):
+        """Diff a watched folder against its known file set and queue any
+        new files for indexing. Shared by the QFileSystemWatcher signal
+        and the polling fallback so both paths behave identically."""
+        from pathlib import Path
+
+        if not hasattr(self, '_watched_folders'):
+            return
+
         folder_path = Path(path)
         if str(folder_path) not in self._watched_folders:
             return
-        
+
         try:
             current_files = set(folder_path.iterdir())
         except Exception:
             return
-        
+
         known_files = self._watched_folders.get(str(folder_path), set())
-        
+
         # Find new files (only files added AFTER we started watching)
         new_files = current_files - known_files
-        
+
         # Update known files
         self._watched_folders[str(folder_path)] = current_files
-        
+
         for new_file in new_files:
             if new_file.is_file():
-                # Skip temporary/partial download files
+                # Skip temporary/partial download files. These get renamed
+                # to the final name once the download completes, at which
+                # point the final name shows up as a NEW file on the next
+                # scan and gets indexed normally.
                 skip_extensions = {'.tmp', '.crdownload', '.part', '.partial', '.download'}
                 if new_file.suffix.lower() in skip_extensions:
-                    logger.debug(f"Skipping temporary file: {new_file.name}")
+                    logger.debug(f"[WATCH] Skipping temporary file: {new_file.name}")
                     continue
-                
+
                 # Skip hidden files
                 if new_file.name.startswith('.'):
                     continue
-                
-                logger.info(f"New file detected in {folder_path.name}: {new_file.name}")
+
+                logger.info(f"[WATCH] New file detected in {folder_path.name}: {new_file.name}")
                 self.watch_status_label.setText(f"📥 Indexing: {new_file.name}")
-                
+
+                # Look up this folder's per-folder AI instruction (if any).
+                folder_instruction = settings.get_watch_folder_instruction(str(folder_path)) or None
+
                 # Add to background worker queue (non-blocking)
                 if hasattr(self, '_auto_index_worker'):
-                    self._auto_index_worker.add_file(new_file)
+                    self._auto_index_worker.add_file(new_file, instructions=folder_instruction)
+                else:
+                    logger.warning("[WATCH] No _auto_index_worker — cannot index new file")
     
     def _on_file_indexed(self, filename: str, status: str):
         """Handle file indexed signal from background worker."""
@@ -7303,13 +7553,17 @@ Move Plan Summary:
     
     def _on_drop_zone_clicked(self, event):
         """Handle click on drop zone to open folder dialog."""
+        logger.info("[INDEX] Drop-zone clicked — opening folder picker")
         folder = QFileDialog.getExistingDirectory(
             self,
             "Select Folder to Index",
             str(Path.home())
         )
         if folder:
+            logger.info(f"[INDEX] Folder picker returned: {folder}")
             self._handle_dropped_paths([folder])
+        else:
+            logger.info("[INDEX] Folder picker cancelled (no folder selected)")
     
     def _clear_all_indexed_paths(self):
         """Clear all indexed files from the database."""
@@ -7348,16 +7602,22 @@ Move Plan Summary:
     
     def _handle_dropped_paths(self, paths: list):
         """Handle dropped file/folder paths and start indexing."""
+        logger.info(f"[INDEX] _handle_dropped_paths ENTRY — {len(paths)} path(s): {paths}")
         # Collect all files to index
         files_to_index = []
         folders_to_index = []
-        
+
         for path_str in paths:
             path = Path(path_str)
             if path.is_dir():
                 folders_to_index.append(path)
             elif path.is_file():
                 files_to_index.append(path)
+
+        logger.info(
+            f"[INDEX] Partitioned: {len(folders_to_index)} folder(s), "
+            f"{len(files_to_index)} file(s). Showing confirmation modal."
+        )
         
         # Show confirmation
         msg_parts = []
@@ -7367,7 +7627,7 @@ Move Plan Summary:
             msg_parts.append(f"{len(files_to_index)} file{'s' if len(files_to_index) > 1 else ''}")
         
         msg = f"Index {' and '.join(msg_parts)}?"
-        
+
         # Modern styled confirmation dialog
         from PySide6.QtWidgets import QDialog, QFrame, QGraphicsDropShadowEffect
         from app.ui.theme_manager import get_theme_colors
@@ -7504,25 +7764,38 @@ Move Plan Summary:
         
         dialog_layout.addLayout(btn_row)
         
-        # Apply dark/light title bar
+        # Apply dark/light title bar via QTimer so it fires after the dialog
+        # is visible (needs a valid HWND). We do NOT call show() before
+        # exec() — exec() shows it modally itself.
         from app.ui.theme_manager import apply_titlebar_theme
-        confirm_dialog.show()
-        apply_titlebar_theme(confirm_dialog)
-        
-        if confirm_dialog.exec() != QDialog.Accepted:
+        from PySide6.QtCore import QTimer as _QTimer
+        _QTimer.singleShot(0, lambda: apply_titlebar_theme(confirm_dialog))
+
+        dialog_result = confirm_dialog.exec()
+        logger.info(f"[INDEX] Confirmation modal closed with result={dialog_result}")
+        if dialog_result != QDialog.Accepted:
+            logger.info(f"[INDEX] Confirmation modal CANCELLED (result={dialog_result})")
             return
+        logger.info("[INDEX] Confirmation modal ACCEPTED — starting indexing flow")
 
         user_instructions = instructions_input.toPlainText().strip() or None
 
         # Index folders
         if folders_to_index:
             if self.is_indexing:
+                logger.info(
+                    f"[INDEX] is_indexing=True — queueing {len(folders_to_index)} folder(s)"
+                )
                 # Add all to queue (instructions apply to current batch only)
                 for folder in folders_to_index:
                     self._add_to_index_queue(folder)
             else:
                 # Start first, queue the rest
                 first = folders_to_index[0]
+                logger.info(
+                    f"[INDEX] is_indexing=False — starting with {first} "
+                    f"(queueing {len(folders_to_index) - 1} more)"
+                )
                 for folder in folders_to_index[1:]:
                     self._add_to_index_queue(folder)
                 self.index_path = first
@@ -7532,6 +7805,7 @@ Move Plan Summary:
 
         # Index individual files
         if files_to_index and not folders_to_index:
+            logger.info(f"[INDEX] Only files (no folders) — calling _index_individual_files")
             self._index_individual_files(files_to_index, user_instructions=user_instructions)
     
     def _index_individual_files(self, files: list, user_instructions: str = None):
