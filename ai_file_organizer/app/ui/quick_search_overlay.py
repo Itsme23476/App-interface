@@ -44,9 +44,11 @@ class SearchWorker(QThread):
                 date_start, date_end = date_range
                 extensions = parsed.get('extensions')
                 
-                # Log parsing results for debugging
-                logger.debug(f"[QS_SEARCH] Original: '{self._query}' -> Clean: '{clean_query}', "
-                            f"type={type_filter}, date={date_start} to {date_end}")
+                # Log parsing results so we can confirm the right filters were
+                # applied (type/date) while the box still shows the full spoken text.
+                logger.info(f"[QS_SEARCH] query='{self._query}' -> clean='{clean_query}', "
+                            f"type_filter={type_filter}, date={date_start}..{date_end}, "
+                            f"extensions={extensions}")
                 
                 results = search_service.search_files(
                     clean_query, 
@@ -93,6 +95,13 @@ class QuickSearchOverlay(QDialog):
         # Flag to control re-activation after opening files
         # Set to False when user clicks outside popup to prevent timers from stealing focus back
         self._allow_reactivation = True
+
+        # Voice search state (mirrors Mac): run_voice_query() shows the spoken
+        # sentence but searches the distilled keywords (one-shot), and sets the
+        # primary action to "open" so picking a result opens the file instead
+        # of auto-filling a file dialog.
+        self._voice_query = None          # one-shot distilled query to search
+        self._primary_mode = "fill"       # 'fill' (autofill dialog) | 'open'
 
         # Main layout for the dialog (transparent)
         main_layout = QVBoxLayout(self)
@@ -175,8 +184,8 @@ class QuickSearchOverlay(QDialog):
         self._debounce.timeout.connect(self._run_search)
         self.input.textChanged.connect(self._debounce.start)
 
-        self.input.returnPressed.connect(self._accept_selection)
-        self.results.itemDoubleClicked.connect(self._accept_selection)
+        self.input.returnPressed.connect(self._primary_action)
+        self.results.itemDoubleClicked.connect(self._primary_action)
         self.results.itemSelectionChanged.connect(self._on_selection_changed)
         self.results.cellClicked.connect(self._on_cell_clicked)
 
@@ -190,7 +199,7 @@ class QuickSearchOverlay(QDialog):
         self.btn_fill.setDefault(True)
         self.btn_fill.setEnabled(False)
         self.btn_fill.setToolTip("Fill path into file dialog (Enter)")
-        self.btn_fill.clicked.connect(self._accept_selection)
+        self.btn_fill.clicked.connect(self._primary_action)
         btn_row.addWidget(self.btn_fill)
 
         self.btn_copy_path = QPushButton("Copy Path")
@@ -523,12 +532,49 @@ class QuickSearchOverlay(QDialog):
             settings._save_config()
         except Exception:
             pass
+        # Reset voice-search state so the next NORMAL summon is fill-mode again
+        # (run_voice_query re-sets 'open' right before showing for voice).
+        self._primary_mode = "fill"
+        self._voice_query = None
         super().hideEvent(e)
+
+    def run_voice_query(self, display_text: str, search_text: str):
+        """Voice-search entry point (mirrors Mac). Shows the SPOKEN sentence in
+        the box but searches the DISTILLED keywords, and makes picking a result
+        OPEN the file. One-shot: later typing uses the box text normally."""
+        try:
+            self.input.blockSignals(True)
+            self.input.setText(display_text or search_text or "")
+            self.input.blockSignals(False)
+            self._voice_query = (search_text or "").strip() or None
+            self._primary_mode = "open"
+            self.show_centered_bottom()
+            self.raise_()
+            self.activateWindow()
+            self.input.setFocus()
+            logger.info(f"[QS] run_voice_query: display={display_text[:50]!r} "
+                        f"search={search_text!r} visible={self.isVisible()} "
+                        f"geom={self.geometry().x()},{self.geometry().y()} "
+                        f"{self.geometry().width()}x{self.geometry().height()}")
+            self._run_search()
+        except Exception as e:
+            logger.error(f"[QS] run_voice_query failed: {e}")
+
+    def _primary_action(self):
+        """Enter / Fill button / double-click: fill a dialog (normal) or open
+        the file (voice search)."""
+        if self._primary_mode == "open":
+            self._open_selection()
+        else:
+            self._accept_selection()
 
     def _run_search(self):
         """Start a background search. If a search is already running, queue the new query."""
-        q = self.input.text().strip()
-        
+        # Voice search: use the distilled keywords for THIS run (one-shot),
+        # even though the box shows the spoken sentence.
+        q = (self._voice_query or self.input.text()).strip()
+        self._voice_query = None
+
         if not q:
             # Empty query - clear results immediately
             self._rows = []
@@ -542,11 +588,14 @@ class QuickSearchOverlay(QDialog):
             return
         
         # Start the search in background
+        logger.info(f"[QS] running search for: {q!r} (mode={self._primary_mode})")
         self._search_worker.set_query(q, limit=20)
         self._search_worker.start()
     
     def _on_search_results(self, rows):
         """Handle search results from the background worker."""
+        logger.info(f"[QS] search returned {len(rows)} result(s)"
+                    + (f" — top: {rows[0].get('file_name', '?')!r}" if rows else ""))
         self._rows = rows
         self.results.setRowCount(len(rows))
         for i, r in enumerate(rows):

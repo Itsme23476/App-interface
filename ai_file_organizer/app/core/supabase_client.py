@@ -295,6 +295,33 @@ class SupabaseAuth:
                 'refresh_token': self._session.get('refresh_token', '')
             }
         return None
+
+    def get_access_token(self) -> Optional[str]:
+        """Return the current, LIVE access token for authenticated API calls.
+
+        Prefers the gotrue client's current session (which auto-refreshes the
+        token near expiry) over the cached ``_access_token``, which can go
+        stale after a background token rotation and cause 401s. Used by the
+        voice transcription path (streaming + batch) which authenticates
+        every recording. Falls back to the cached token, then None.
+        """
+        if not self.is_authenticated:
+            return None
+        # Try the live session from gotrue (auto-refreshed).
+        try:
+            if self._auth_client is not None and hasattr(self._auth_client, "get_session"):
+                sess = self._auth_client.get_session()
+                tok = None
+                if sess is not None:
+                    tok = getattr(sess, "access_token", None)
+                    if tok is None and isinstance(sess, dict):
+                        tok = sess.get("access_token")
+                if tok:
+                    self._access_token = tok
+                    return tok
+        except Exception as e:
+            logger.debug(f"get_access_token: live session fetch failed: {e}")
+        return self._access_token
     
     def check_subscription(self) -> Dict[str, Any]:
         """

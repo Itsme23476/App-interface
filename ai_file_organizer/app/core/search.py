@@ -15,7 +15,6 @@ from .vision import analyze_image, analyze_text, gpt_vision_fallback, describe_i
 from .settings import settings
 from .text_extract import extract_file_text, get_supported_text_formats
 import os
-from .embeddings import embed_text
 import hashlib
 from datetime import datetime
 
@@ -469,27 +468,7 @@ class SearchService:
                             indexed_count += 1
                             if result.get('has_ocr', False):
                                 ocr_count += 1
-                            
-                            # Create embedding (quick operation)
-                            try:
-                                rec = self.index.get_file_by_path(str(file_path))
-                                if rec:
-                                    text_parts = [rec.get('file_name') or '']
-                                    if rec.get('label'):
-                                        text_parts.append(rec['label'])
-                                    if rec.get('tags'):
-                                        text_parts.append(' '.join(rec['tags']))
-                                    if rec.get('caption'):
-                                        text_parts.append(rec['caption'])
-                                    if rec.get('ocr_text'):
-                                        text_parts.append(rec['ocr_text'])
-                                    text_blob = ' '.join([t for t in text_parts if t])[:5000]
-                                    vec = embed_text(text_blob)
-                                    if vec:
-                                        self.index.upsert_embedding(rec['id'], 'ollama:nomic-embed-text', vec)
-                            except Exception:
-                                pass
-                        
+
                         completed += 1
                         
                         # Progress callback
@@ -583,42 +562,16 @@ class SearchService:
                 fetch_limit = limit * 3 if (type_filter or date_start or extensions) else limit
             results = self.index.search_files_advanced(fts_terms, filters, fetch_limit)
 
-            # Semantic search (local) or GPT rerank - skip for date-only searches
+            # Optional AI rerank (OpenAI via the shared proxy) — skip for
+            # date-only searches. The old local Ollama-embeddings rerank was
+            # removed (the app never used Ollama; it only added a per-search
+            # timeout). Without the OpenAI reranker, results use the FTS
+            # candidate order, which is plenty given the type/date filtering.
             sem_results: List[Dict[str, Any]] = []
             if not is_date_only:
                 try:
                     if settings.use_openai_search_rerank and settings.openai_api_key:
                         sem_results = self._gpt_rerank_results(query, results[: min(20, len(results))])
-                    else:
-                        # Build a semantic query that includes name/label/tags/caption terms
-                        qtext = query
-                        if filters.get('label'):
-                            qtext += f" {filters['label']}"
-                        if filters.get('tags'):
-                            qtext += " " + " ".join(filters['tags'])
-                        qvec = embed_text(qtext)
-                        if qvec:
-                            # simple in-Python cosine over all embeddings
-                            import math
-                            embs = self.index.get_all_embeddings()
-                            scored: List[tuple[float, int]] = []
-                            qnorm = math.sqrt(sum(x*x for x in qvec)) or 1.0
-                            for e in embs:
-                                vec = e.get('vector') or []
-                                if not vec or len(vec) != len(qvec):
-                                    continue
-                                dot = sum(a*b for a,b in zip(qvec, vec))
-                                vnorm = math.sqrt(sum(x*x for x in vec)) or 1.0
-                                cos = dot/(qnorm*vnorm)
-                                scored.append((cos, e['file_id']))
-                            scored.sort(reverse=True)
-                            top_ids = [fid for _, fid in scored[:limit]]
-                            sem_results = self.index.get_files_by_ids(top_ids)
-                            # attach semantic score as rank
-                            for (cos, fid) in scored[:limit]:
-                                for r in sem_results:
-                                    if r['id'] == fid:
-                                        r['rank'] = cos*10
                 except Exception:
                     pass
 

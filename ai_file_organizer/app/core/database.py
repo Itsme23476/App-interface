@@ -952,45 +952,6 @@ class FileIndex:
             return 0
 
     # ---------- Embeddings helpers ----------
-    def upsert_embedding(self, file_id: int, model: str, vector: List[float]) -> None:
-        try:
-            with sqlite3.connect(self.db_path) as conn:
-                cursor = conn.cursor()
-                cursor.execute(
-                    """
-                    INSERT INTO embeddings(file_id, model, dim, vector, updated_at)
-                    VALUES(?, ?, ?, ?, ?)
-                    ON CONFLICT(file_id) DO UPDATE SET
-                        model=excluded.model,
-                        dim=excluded.dim,
-                        vector=excluded.vector,
-                        updated_at=excluded.updated_at
-                    """,
-                    (file_id, model, len(vector), json.dumps(vector), datetime.now().isoformat()),
-                )
-                conn.commit()
-        except Exception as e:
-            logger.error(f"Error upserting embedding for {file_id}: {e}")
-
-    def get_all_embeddings(self) -> List[Dict[str, Any]]:
-        try:
-            with sqlite3.connect(self.db_path) as conn:
-                conn.row_factory = sqlite3.Row
-                cursor = conn.cursor()
-                cursor.execute("SELECT * FROM embeddings")
-                rows = cursor.fetchall()
-                return [
-                    {
-                        'file_id': r['file_id'],
-                        'model': r['model'],
-                        'dim': r['dim'],
-                        'vector': json.loads(r['vector']) if r['vector'] else [],
-                    }
-                    for r in rows
-                ]
-        except Exception as e:
-            logger.error(f"Error reading embeddings: {e}")
-            return []
 
     def get_files_by_ids(self, ids: List[int]) -> List[Dict[str, Any]]:
         if not ids:

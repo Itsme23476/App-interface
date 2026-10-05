@@ -842,7 +842,8 @@ class MainWindow(QMainWindow):
         self.setup_search_page()      # Index 0
         self.setup_organize_page()    # Index 1
         self.setup_index_page()       # Index 2
-        self.setup_settings_page()    # Index 3
+        self.setup_voice_page()       # Index 3 (Voice sits above Settings)
+        self.setup_settings_page()    # Index 4
         
         # Set default page to Search
         self.page_stack.setCurrentIndex(0)
@@ -895,7 +896,8 @@ class MainWindow(QMainWindow):
             ("🔍", "Search", 0),
             ("🗂️", "Organize", 1),
             ("📁", "Index Files", 2),
-            ("⚙️", "Settings", 3),
+            ("🎤", "Voice", 3),
+            ("⚙️", "Settings", 4),
         ]
         
         for icon, text, idx in nav_items:
@@ -964,7 +966,7 @@ class MainWindow(QMainWindow):
         
         # Make account section clickable to go to Settings
         account_container.setCursor(Qt.PointingHandCursor)
-        account_container.mousePressEvent = lambda e: self._on_nav_clicked(3)  # Settings is index 3
+        account_container.mousePressEvent = lambda e: self._on_nav_clicked(4)  # Settings is index 4
         
         sidebar_layout.addWidget(account_container)
     
@@ -2915,7 +2917,169 @@ class MainWindow(QMainWindow):
         
         # Apply correct theme styles on startup
         self._apply_settings_theme_styles(theme_manager.current_theme)
-    
+
+    def setup_voice_page(self):
+        """Voice dictation page: push-to-talk button + live transcript.
+
+        The button is the reliable trigger everywhere (incl. Parallels VMs
+        where the global hotkey can't capture keys). The global hotkey
+        (default Right Ctrl) also runs for real-Windows users.
+        """
+        page = QWidget()
+        page.setObjectName("voicePage")
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(40, 32, 40, 32)
+        layout.setSpacing(16)
+
+        heading = QLabel("Voice Dictation")
+        heading.setStyleSheet("font-size: 28px; font-weight: 700; color: #7C4DFF; background: transparent;")
+        layout.addWidget(heading)
+
+        subtitle = QLabel("Hold the button and speak. Release, and your words are transcribed. "
+                          "On a regular Windows PC you can also hold the Right Ctrl key anywhere.")
+        subtitle.setWordWrap(True)
+        subtitle.setStyleSheet("font-size: 14px; color: #8B8B96; background: transparent;")
+        layout.addWidget(subtitle)
+
+        # Mode selector (Dictate / Search / Organize) — picks what Hold-to-
+        # Dictate does. On a real Windows PC these also map to Right Ctrl,
+        # Right Ctrl+Shift, Right Ctrl+Alt.
+        self._voice_mode = "dictate"
+        self.voice_mode_btns = {}
+        mode_row = QHBoxLayout()
+        mode_row.setSpacing(8)
+        self._voice_mode_group = QButtonGroup(self)
+        self._voice_mode_group.setExclusive(True)
+        _mode_pill = """
+            QPushButton { background:#16161F; color:#B0B0C0; border:1px solid #2A2A3A;
+                          border-radius:10px; font-size:14px; font-weight:600; padding:8px 14px; }
+            QPushButton:hover { border-color:#7C4DFF; }
+            QPushButton:checked { background:#7C4DFF; color:white; border-color:#7C4DFF; }
+        """
+        for key, label in [("dictate", "💬 Dictate"), ("search", "🔍 Search"),
+                           ("organize", "🗂️ Organize")]:
+            b = QPushButton(label)
+            b.setCheckable(True)
+            b.setCursor(Qt.PointingHandCursor)
+            b.setMinimumHeight(40)
+            b.setStyleSheet(_mode_pill)
+            b.clicked.connect(lambda checked, k=key: self._set_voice_mode(k))
+            mode_row.addWidget(b)
+            self.voice_mode_btns[key] = b
+            self._voice_mode_group.addButton(b)
+        self.voice_mode_btns["dictate"].setChecked(True)
+        mode_row.addStretch()
+        layout.addLayout(mode_row)
+
+        layout.addSpacing(8)
+
+        # Voice-reactive waveform (hidden until recording). Lives in a fixed-
+        # height slot above the button so the layout doesn't jump.
+        from app.ui.icons import AnimatedWaveform
+        wave_slot = QWidget()
+        wave_slot.setFixedHeight(76)
+        wave_row = QHBoxLayout(wave_slot)
+        wave_row.setContentsMargins(0, 0, 0, 0)
+        wave_row.addStretch()
+        self.voice_waveform = AnimatedWaveform(color="#7C4DFF", bars=9, width=260, height=64)
+        self.voice_waveform.setVisible(False)
+        wave_row.addWidget(self.voice_waveform)
+        wave_row.addStretch()
+        layout.addWidget(wave_slot)
+
+        # Push-to-talk button
+        self.voice_ptt_btn = QPushButton("🎤  Hold to Dictate")
+        self.voice_ptt_btn.setMinimumHeight(72)
+        self.voice_ptt_btn.setCursor(Qt.PointingHandCursor)
+        self.voice_ptt_btn.setStyleSheet("""
+            QPushButton { background: qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #7C4DFF, stop:1 #9575FF);
+                          color:white; border:none; border-radius:16px; font-size:20px; font-weight:700; }
+            QPushButton:pressed { background:#5B1FC9; }
+        """)
+        layout.addWidget(self.voice_ptt_btn)
+
+        self.voice_status = QLabel("Ready.")
+        self.voice_status.setAlignment(Qt.AlignCenter)
+        self.voice_status.setStyleSheet("font-size: 14px; color: #8B8B96; background: transparent;")
+        layout.addWidget(self.voice_status)
+
+        layout.addSpacing(8)
+
+        result_label = QLabel("Transcript")
+        result_label.setStyleSheet("font-size: 13px; font-weight: 600; color: #B0B0C0; background: transparent;")
+        layout.addWidget(result_label)
+
+        self.voice_result = QTextEdit()
+        self.voice_result.setReadOnly(True)
+        self.voice_result.setPlaceholderText("Your transcribed words will appear here…")
+        self.voice_result.setStyleSheet("""
+            QTextEdit { background:#16161F; color:#E8E8F0; border:1px solid #2A2A3A;
+                        border-radius:12px; padding:12px; font-size:15px; }
+        """)
+        layout.addWidget(self.voice_result, 1)
+
+        self.page_stack.addWidget(page)
+
+        # Build the controller + wire the button (defer heavy import to here).
+        try:
+            from app.ui.dictation import DictationController
+            self.dictation_controller = DictationController(main_window=self)
+            self.dictation_controller.transcript_ready.connect(self._on_voice_transcript)
+            self.dictation_controller.level.connect(self.voice_waveform.set_level)
+            self.dictation_controller.state_changed.connect(self._on_voice_state)
+            self.voice_ptt_btn.pressed.connect(self._on_voice_ptt_pressed)
+            self.voice_ptt_btn.released.connect(self._on_voice_ptt_released)
+            # Start the global hotkey too (works on real Windows; harmless here).
+            self.dictation_controller.start()
+            logger.info("[VOICE] page ready, controller started")
+        except Exception as e:
+            logger.error(f"[VOICE] controller init failed: {e}")
+            self.voice_status.setText(f"Voice unavailable: {e}")
+
+    def _set_voice_mode(self, mode: str):
+        self._voice_mode = mode
+        hints = {
+            "dictate": "Hold to dictate — your words paste into the focused app.",
+            "search": "Hold to search — speak what you're looking for.",
+            "organize": "Hold to organize — speak how you want files organized.",
+        }
+        self.voice_status.setText(hints.get(mode, "Ready."))
+
+    def _on_voice_ptt_pressed(self):
+        logger.info(f"[VOICE] PTT pressed (mode={self._voice_mode})")
+        self.voice_status.setText("🔴 Listening… (release to stop)")
+        try:
+            self.dictation_controller.begin_dictation(self._voice_mode)
+        except Exception as e:
+            logger.error(f"[VOICE] begin failed: {e}")
+
+    def _on_voice_ptt_released(self):
+        logger.info("[VOICE] PTT released")
+        self.voice_status.setText("⏳ Transcribing…")
+        try:
+            self.dictation_controller.end_dictation()
+        except Exception as e:
+            logger.error(f"[VOICE] end failed: {e}")
+
+    def _on_voice_transcript(self, text: str, mode: str):
+        logger.info(f"[VOICE] transcript (mode={mode}): {text!r}")
+        self.voice_status.setText("Ready.")
+        if text:
+            cur = self.voice_result.toPlainText()
+            self.voice_result.setPlainText((cur + "\n" + text).strip() if cur else text)
+        else:
+            self.voice_status.setText("No speech detected — try again, louder.")
+
+    def _on_voice_state(self, state: str):
+        """Show the reactive waveform while listening, hide + swap the button
+        back when idle."""
+        if state == "listening":
+            self.voice_waveform.setVisible(True)
+            self.voice_ptt_btn.setText("🔴  Listening… (release to stop)")
+        else:
+            self.voice_waveform.setVisible(False)
+            self.voice_ptt_btn.setText("🎤  Hold to Dictate")
+
     def _update_theme_button(self):
         """Update the theme toggle button text and state."""
         current = theme_manager.current_theme
@@ -3063,7 +3227,7 @@ class MainWindow(QMainWindow):
         # ---- Labels inside cards ----
         # Update labels that use muted/hint colors
         # Find labels by checking their current style properties
-        settings_page_idx = 3  # settings is the 4th page in page_stack
+        settings_page_idx = 4  # settings is the 5th page in page_stack (Voice moved above it)
         if self.page_stack.count() > settings_page_idx:
             settings_page = self.page_stack.widget(settings_page_idx)
             if settings_page:
