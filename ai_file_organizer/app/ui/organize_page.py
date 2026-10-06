@@ -4944,15 +4944,153 @@ class WatchConfigDialog(QDialog):
 
 
 
+class _VoiceApplyWorker(QThread):
+    """Apply a move plan off the UI thread (for voice organize)."""
+    done = Signal(object)   # (success, errors, log_file, renamed_count)
+    failed = Signal(str)
+
+    def __init__(self, move_plan: list):
+        super().__init__()
+        self.move_plan = move_plan
+
+    def run(self):
+        try:
+            from app.core.apply import apply_moves
+            self.done.emit(apply_moves(self.move_plan))
+        except Exception as e:
+            self.failed.emit(str(e))
+
+
+class _VoiceIndexWorker(QThread):
+    """Index a folder's UNINDEXED media files off the UI thread. Already-indexed
+    files are skipped (fast). Emits (new_indexed, not_indexed_remaining).
+
+    Walks the folder RECURSIVELY (subfolders at any depth), to match the manual
+    Organize tab, which scans via scan_directory/rglob. "Organize this folder"
+    means everything inside it, including whatever is already in subfolders —
+    the gather step (_load_files_from_db) is prefix-recursive too, so this keeps
+    the two halves consistent. Hidden files / dotfolders are skipped.
+
+    Indexing runs the AI vision calls in PARALLEL (ThreadPoolExecutor, like the
+    manual tab) and writes to the DB SERIALLY as each completes — serial AI was
+    ~6-8s/file, so 20 files took >2 minutes of apparent 'lag'. DB writes stay
+    serial to avoid SQLite lock contention. Emits progress(done, total) so the
+    overlay can show a live counter instead of a frozen 'Indexing…' message.
+
+    The number of files indexed is bounded ONLY by the user's subscription index
+    quota (_check_index_limit) — the same ceiling the manual tab enforces. There
+    is no arbitrary per-run cap; if the quota blocks some files, quota_exceeded
+    is emitted and `remaining` reports how many were left unindexed."""
+    done = Signal(int, int)
+    progress = Signal(int, int)      # (completed, total) during the AI pass
+    quota_exceeded = Signal(dict)    # {limit, remaining, plan, reason} when the quota blocks files
+
+    def __init__(self, folder: str):
+        super().__init__()
+        self.folder = folder
+
+    def run(self):
+        from pathlib import Path
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        new, remaining = 0, 0
+        try:
+            from app.core.search import (search_service, is_media_file,
+                                         MAX_CONCURRENT_AI_REQUESTS)
+            from app.core.database import file_index
+            root = Path(self.folder)
+
+            # 1) Collect ALL UNINDEXED media (recursive). Stable order.
+            todo = []
+            for p in sorted(root.rglob('*'), key=lambda x: str(x).lower()):
+                if not p.is_file() or not is_media_file(p):
+                    continue
+                try:
+                    rel_parts = p.relative_to(root).parts
+                except ValueError:
+                    rel_parts = (p.name,)
+                if any(part.startswith('.') for part in rel_parts):
+                    continue  # skip hidden files and dotfolders
+                if file_index.get_file_by_path(str(p)):
+                    continue  # already indexed — no AI cost
+                todo.append(p)
+
+            # 2) Enforce the subscription index quota (same ceiling the manual
+            # tab applies via _check_index_limit). If over, index only what's
+            # left in the plan and tell the user the rest was blocked.
+            if todo:
+                try:
+                    limit = search_service._check_index_limit(len(todo))
+                except Exception:
+                    limit = {"allowed": True}
+                if not limit.get("allowed", True):
+                    allowed_n = max(0, int(limit.get("remaining", 0) or 0))
+                    remaining += len(todo) - allowed_n
+                    todo = todo[:allowed_n]
+                    logger.warning(f"[VOICE ORGANIZE] index quota hit: "
+                                   f"plan={limit.get('plan')} remaining={allowed_n} "
+                                   f"blocked={remaining}")
+                    self.quota_exceeded.emit(limit)
+
+            total = len(todo)
+            if total == 0:
+                self.done.emit(0, remaining)
+                return
+            self.progress.emit(0, total)
+
+            # 2) AI-analyse in parallel; add_file serially as results land.
+            completed = 0
+            with ThreadPoolExecutor(max_workers=min(MAX_CONCURRENT_AI_REQUESTS, total)) as ex:
+                futs = {
+                    ex.submit(search_service._process_single_file,
+                              {"source_path": str(p), "name": p.name}, root, False, None): p
+                    for p in todo
+                }
+                for fut in as_completed(futs):
+                    p = futs[fut]
+                    try:
+                        result = fut.result(timeout=120)
+                        if result.get("_error"):
+                            logger.warning(f"[VOICE ORGANIZE] index failed for {p.name}: {result['_error']}")
+                        else:
+                            for k in ("_file_path", "_error", "_cancelled", "_skipped"):
+                                result.pop(k, None)
+                            if file_index.add_file(result):
+                                new += 1
+                    except Exception as e:
+                        logger.warning(f"[VOICE ORGANIZE] index failed for {p.name}: {e}")
+                    completed += 1
+                    self.progress.emit(completed, total)
+                    logger.info(f"[VOICE ORGANIZE] indexed {completed}/{total} ({p.name})")
+
+            # Count the newly indexed media toward index usage (once).
+            if new > 0:
+                try:
+                    search_service._update_index_usage(new)
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.error(f"[VOICE ORGANIZE] index worker error: {e}")
+        self.done.emit(new, remaining)
+
+
 class OrganizePage(QWidget):
     """
     AI Organization page widget.
-    
+
     Implements the safe organization flow:
     - AI decides what should happen (proposes plan)
     - App decides what actually happens (validates + executes)
     """
-    
+
+    # Voice-organize signals (consumed by VoiceOrganizeController, off-thread).
+    # These wrap the SAME planning/apply engine the manual flow uses, but emit
+    # results instead of showing dialogs, so the floating overlay can drive it.
+    voice_plan_ready = Signal(dict)    # {summary, folders, target_folder, file_count, folder_count}
+    voice_plan_error = Signal(str)
+    voice_apply_done = Signal(str)     # revert hint
+    voice_apply_error = Signal(str)
+    voice_status = Signal(str)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.current_plan = None
@@ -6634,22 +6772,23 @@ class OrganizePage(QWidget):
         self.files_by_id = {}
         excluded_count = 0
         outside_folder_count = 0
-        
+        missing_count = 0
+
         # Get destination path for filtering (normalized, case-insensitive on Windows)
         dest_path_str = None
         if self.destination_path:
             dest_path_str = os.path.normpath(str(self.destination_path)).lower()
-        
+
         try:
             with sqlite3.connect(file_index.db_path) as conn:
                 conn.row_factory = sqlite3.Row
                 cursor = conn.cursor()
                 cursor.execute("SELECT * FROM files")
                 rows = cursor.fetchall()
-            
+
             for row in rows:
                 file_path = row["file_path"]
-                
+
                 # CRITICAL: Only include files within the destination folder
                 # This prevents files from other indexed locations being moved
                 if dest_path_str:
@@ -6657,7 +6796,14 @@ class OrganizePage(QWidget):
                     if not normalized_file_path.startswith(dest_path_str + os.sep) and normalized_file_path != dest_path_str:
                         outside_folder_count += 1
                         continue  # Skip files outside destination folder
-                
+
+                # Skip STALE rows whose file no longer exists on disk (e.g. it was
+                # moved/deleted and the row wasn't updated). Counting these as real
+                # files is what produced "invented"/inflated file counts.
+                if not os.path.exists(file_path):
+                    missing_count += 1
+                    continue
+
                 # Skip files matching exclusion patterns
                 if settings.should_exclude(file_path):
                     excluded_count += 1
@@ -6678,6 +6824,8 @@ class OrganizePage(QWidget):
             
             if outside_folder_count > 0:
                 logger.info(f"Filtered out {outside_folder_count} files outside destination folder")
+            if missing_count > 0:
+                logger.info(f"Skipped {missing_count} stale rows (file no longer on disk)")
             if excluded_count > 0:
                 logger.info(f"Excluded {excluded_count} files based on exclusion patterns")
                 
@@ -7076,7 +7224,337 @@ class OrganizePage(QWidget):
         self.plan_worker.finished.connect(self._on_plan_received)
         self.plan_worker.error.connect(self._on_plan_error)
         self.plan_worker.start()
-    
+
+    # ================= VOICE ORGANIZE (headless engine) =================
+    # These mirror generate_plan / refine / apply but emit signals instead of
+    # showing dialogs, so the floating overlay drives them. They reuse the SAME
+    # PlanWorker / RefineWorker / apply_moves as the manual flow.
+
+    _VOICE_MAX_FILES = 300   # guardrail — bigger folders need a subfolder
+
+    def _voice_prepare_files(self):
+        """Load + validate indexed files in destination_path and attach
+        subfolder context. Returns (files, error_or_None)."""
+        files = self._load_files_from_db()
+        if not files:
+            return [], None  # caller decides whether to auto-index
+        if len(files) > self._VOICE_MAX_FILES:
+            return [], (f"That folder has {len(files)} files — too many to organize by "
+                        f"voice at once. Try a specific subfolder.")
+        self.files_by_id = {f["id"]: f for f in files}
+        for f in files:
+            try:
+                rel = Path(f["file_path"]).parent.relative_to(self.destination_path)
+                f["subfolder"] = str(rel) if str(rel) != "." else "."
+            except (ValueError, TypeError):
+                f["subfolder"] = "."
+        return files, None
+
+    def voice_generate(self, folder: str, instruction: str, _after_index: bool = False):
+        """Build an organize plan for `folder` from the spoken `instruction`,
+        off-thread. Emits voice_plan_ready or voice_plan_error.
+
+        First pass indexes the folder's UNINDEXED media files (bounded only by
+        the subscription index quota) so the plan sees ALL the files, not just
+        the ones already in the DB — that was the 'only recognised 1 file' bug.
+        Already-indexed files cost nothing (skipped)."""
+        try:
+            self.destination_path = Path(folder)
+            if not self.destination_path.exists():
+                self.voice_plan_error.emit("That folder no longer exists.")
+                return
+            self.original_instruction = instruction
+            if not _after_index:
+                self._voice_quota_note = ""
+                # Fresh generate (not a refine): no previous plan to carry from.
+                self._voice_prev_plan = None
+                self._voice_catchall_src = instruction
+
+            if not _after_index:
+                # Index unindexed media BEFORE planning, then retry.
+                self.voice_status.emit("Indexing new files…")
+                self._voice_index_worker = _VoiceIndexWorker(folder)
+                self._voice_index_worker.progress.connect(
+                    lambda d, t: self.voice_status.emit(
+                        "Analyzing your files…" if d == 0 else f"Analyzing files… {d}/{t}"))
+                self._voice_index_worker.quota_exceeded.connect(self._voice_on_quota)
+                self._voice_index_worker.done.connect(
+                    lambda n, rem: self._voice_after_index(folder, instruction, n, rem))
+                self._voice_index_worker.start()
+                return
+
+            files, err = self._voice_prepare_files()
+            if err:
+                self.voice_plan_error.emit(err)
+                return
+            if not files:
+                self.voice_plan_error.emit("No files found in that folder to organize.")
+                return
+            # If the user named NO target folders (e.g. "organize this however you
+            # want"), don't let the AI echo the folder's own name back as the only
+            # category — route to AUTO-ORGANIZE so it sorts BY CONTENT into real
+            # categories. A spoken request always contains the folder name, so we
+            # detect intent from whether any "X -> folder Y" mapping was given.
+            from app.core.ai_organizer import _extract_category_to_folder_map
+            has_scheme = bool(_extract_category_to_folder_map(instruction or ""))
+            self._voice_auto = not has_scheme
+            plan_instruction = instruction if has_scheme else "[AUTO-ORGANIZE]"
+            logger.info(f"[VOICE ORGANIZE] planning {len(files)} files in {folder} "
+                        f"(auto_organize={self._voice_auto})")
+            self.voice_status.emit(f"Planning {len(files)} files…")
+            self._voice_plan_worker = PlanWorker(plan_instruction, files)
+            self._voice_plan_worker.finished.connect(self._voice_on_plan)
+            self._voice_plan_worker.error.connect(self.voice_plan_error)
+            self._voice_plan_worker.start()
+        except Exception as e:
+            logger.error(f"[VOICE ORGANIZE] voice_generate failed: {e}")
+            self.voice_plan_error.emit(str(e))
+
+    def _voice_on_quota(self, limit: dict):
+        """The subscription index quota blocked some files (parity with the
+        manual tab's limit check). Stash a note to surface after planning."""
+        plan = limit.get("plan", "your")
+        lim = limit.get("limit")
+        self._voice_quota_note = (
+            f"Reached your {plan} plan's index limit"
+            + (f" of {lim}" if lim else "")
+            + " — some files couldn't be indexed. Upgrade to organize them too.")
+        logger.warning(f"[VOICE ORGANIZE] {self._voice_quota_note}")
+
+    def _voice_after_index(self, folder: str, instruction: str, new_indexed: int, remaining: int):
+        logger.info(f"[VOICE ORGANIZE] indexed {new_indexed} new file(s); "
+                    f"{remaining} not indexed (quota)")
+        if remaining > 0:
+            note = getattr(self, "_voice_quota_note", "") or \
+                f"{remaining} file(s) couldn't be indexed."
+            self.voice_status.emit(note)
+        self.voice_generate(folder, instruction, _after_index=True)
+
+    def voice_refine(self, feedback: str):
+        """Refine the current plan from spoken feedback, off-thread."""
+        try:
+            if not self.current_plan or not getattr(self, "original_instruction", None):
+                self.voice_plan_error.emit("No plan to refine yet.")
+                return
+            files, err = self._voice_prepare_files()
+            if err:
+                self.voice_plan_error.emit(err)
+                return
+            # The previous plan is kept so reconcile_plan can fill any gaps the
+            # refine leaves (new command still wins on conflict). Catch-all is
+            # parsed from the original instruction + this feedback.
+            self._voice_prev_plan = self.current_plan
+            self._voice_catchall_src = f"{self.original_instruction} {feedback}"
+            self.voice_status.emit("Refining the plan…")
+            self._voice_refine_worker = RefineWorker(
+                self.original_instruction, self.current_plan, feedback, files)
+            self._voice_refine_worker.finished.connect(self._voice_on_plan)
+            self._voice_refine_worker.error.connect(self.voice_plan_error)
+            self._voice_refine_worker.start()
+        except Exception as e:
+            logger.error(f"[VOICE ORGANIZE] voice_refine failed: {e}")
+            self.voice_plan_error.emit(str(e))
+
+    # Words that mark a folder as the "catch-all" for leftovers.
+    _VOICE_CATCHALL_HINTS = ("everything", "else", "other", "misc", "rest",
+                             "remaining", "general", "uncategor", "various", "assorted")
+
+    def _voice_backfill_unplaced(self, plan):
+        """Deterministic safety net: the AI sometimes omits a few file_ids from
+        the plan, leaving those files un-organized ('left outside'). If there's
+        a catch-all folder (e.g. 'everything else'), add the omitted files to it
+        so EVERY file the user asked to organize actually gets placed."""
+        try:
+            folders = plan.get("folders", {})
+            placed = set()
+            for fids in folders.values():
+                for fid in fids:
+                    try:
+                        placed.add(int(fid))
+                    except (TypeError, ValueError):
+                        pass
+            unplaced = [fid for fid in self.files_by_id if fid not in placed]
+            if not unplaced:
+                return
+            # Find the catch-all folder by name.
+            catch = None
+            for name in folders:
+                if any(h in str(name).lower() for h in self._VOICE_CATCHALL_HINTS):
+                    catch = name
+                    break
+            if catch is None:
+                logger.warning(f"[VOICE ORGANIZE] {len(unplaced)} file(s) unplaced by AI and "
+                               f"no catch-all folder — leaving them where they are")
+                return
+            folders[catch] = list(folders.get(catch, [])) + unplaced
+            logger.info(f"[VOICE ORGANIZE] backfilled {len(unplaced)} AI-omitted file(s) "
+                        f"into catch-all folder {catch!r}")
+        except Exception as e:
+            logger.warning(f"[VOICE ORGANIZE] backfill unplaced failed: {e}")
+
+    def _voice_on_plan(self, plan):
+        """Validate a plan (no dialogs) and emit voice_plan_ready."""
+        try:
+            if not plan or not plan.get("folders"):
+                self.voice_plan_error.emit("The AI couldn't build a plan — try rephrasing.")
+                return
+            # Enforce the invariants in code (never trust the AI):
+            #  #1 every file in exactly one folder (no drops / no duplicates),
+            #  #2 on a refine, THIS plan wins, previous plan only fills gaps,
+            #  #3 leftovers go to the user's 'everything else' folder (parsed
+            #     from the instruction, named anything).
+            from app.core.ai_organizer import reconcile_plan, catchall_folder_from_instruction
+            catchall_src = getattr(self, "_voice_catchall_src", "") or getattr(self, "original_instruction", "") or ""
+            catchall = catchall_folder_from_instruction(catchall_src)
+            prev = getattr(self, "_voice_prev_plan", None)
+            plan = reconcile_plan(plan, self.files_by_id, prev, catchall)
+            self._voice_prev_plan = None  # consumed
+
+            self.current_plan = plan
+            self.current_moves = plan_to_moves(plan, self.files_by_id, self.destination_path)
+
+            # Which files actually MOVE vs are already in place.
+            moving_ids = {m["file_id"] for m in self.current_moves}
+
+            # Build {folder_name: [(filename, is_moving), ...]} — ALL files, so
+            # the preview shows the full end-state; already-in-place ones marked.
+            folders = {}
+            total_files = 0
+            for name, fids in plan.get("folders", {}).items():
+                entries = []
+                for fid in fids:
+                    rec = self.files_by_id.get(fid)
+                    if rec:
+                        entries.append((rec.get("file_name", str(fid)), fid in moving_ids))
+                        total_files += 1
+                if entries:
+                    folders[name] = entries
+
+            move_count = len(self.current_moves)
+            folder_count = len(folders)
+            already = (move_count == 0)
+            if already:
+                # NOT an error / dead-end. The files are already arranged this
+                # way — show the current layout and let the user refine to a new
+                # arrangement (that's why they invoked organize).
+                summary = "Already arranged this way"
+                logger.info("[VOICE ORGANIZE] plan ready: 0 moving (already arranged)")
+            else:
+                summary = (f"{total_files} file{'s' if total_files != 1 else ''} "
+                           f"in {folder_count} folder{'s' if folder_count != 1 else ''}")
+                logger.info(f"[VOICE ORGANIZE] plan ready: {total_files} files, "
+                            f"{move_count} moving, into {folder_count} folders")
+            self.voice_plan_ready.emit({
+                "summary": summary,
+                "folders": folders,
+                "target_folder": str(self.destination_path),
+                "already_organized": already,
+                "file_count": total_files,
+                "move_count": move_count,
+                "folder_count": folder_count,
+            })
+        except Exception as e:
+            logger.error(f"[VOICE ORGANIZE] _voice_on_plan failed: {e}")
+            self.voice_plan_error.emit(str(e))
+
+    def voice_apply(self):
+        """Apply the current plan off-thread. Emits voice_apply_done/error."""
+        try:
+            if not self.current_moves:
+                self.voice_apply_error.emit("No moves to apply.")
+                return
+            move_plan = [{
+                "source_path": m["source_path"],
+                "destination_path": m["destination_path"],
+                "file_name": m["file_name"],
+                "size": m.get("size", 0),
+                "category": m["destination_folder"],
+            } for m in self.current_moves]
+            logger.info(f"[VOICE ORGANIZE] applying {len(move_plan)} moves")
+            self.voice_status.emit("Organizing…")
+            self._voice_apply_worker = _VoiceApplyWorker(move_plan)
+            self._voice_apply_worker.done.connect(self._voice_on_apply_done)
+            self._voice_apply_worker.failed.connect(self.voice_apply_error)
+            self._voice_apply_worker.start()
+        except Exception as e:
+            logger.error(f"[VOICE ORGANIZE] voice_apply failed: {e}")
+            self.voice_apply_error.emit(str(e))
+
+    def _voice_on_apply_done(self, result):
+        try:
+            success, errors, log_file, renamed_count = result
+            n = len(self.current_moves)
+
+            # Keep the index consistent with the moves: update each moved file's
+            # DB path (exactly what the manual apply does). WITHOUT this, the DB
+            # still points at the old locations, so the next organize (a) can't
+            # find the moved files -> REINDEXES them, and (b) leaves stale rows
+            # at the old paths -> inflated/"invented" file counts. plan_to_moves
+            # already resolved collision-free destination_paths, so this is the
+            # file's real final location.
+            updated = 0
+            for m in self.current_moves:
+                dest = m["destination_path"]
+                if success or Path(dest).exists():
+                    try:
+                        if file_index.update_file_path(m["file_id"], dest):
+                            updated += 1
+                    except Exception:
+                        pass
+            logger.info(f"[VOICE ORGANIZE] updated {updated}/{n} DB paths after move")
+
+            # Save undo info (parity with the manual flow's last_organization).
+            self.last_organization = [{
+                "source": m["source_path"],
+                "destination": m["destination_path"],
+                "file_id": m["file_id"],
+            } for m in self.current_moves]
+
+            if success:
+                # Clean up folders left empty by the move (parity with the manual
+                # apply). This matters especially for recursive voice-organize:
+                # pulling files out of subfolders leaves those subfolders empty.
+                removed = 0
+                try:
+                    source_folders = {Path(m["source_path"]).parent for m in self.current_moves}
+                    empty = list({*self._collect_empty_folders(source_folders),
+                                  *self._scan_all_empty_folders()})
+                    empty.sort(key=lambda p: len(Path(p).parts), reverse=True)
+                    if empty:
+                        removed = self._delete_folders(empty)
+                        # Second pass: parents that became empty after their children.
+                        parents = {str(Path(p).parent) for p in empty if len(Path(p).parent.parts) > 2}
+                        parents -= set(empty)
+                        if parents:
+                            removed += self._delete_folders(list(parents))
+                except Exception as e:
+                    logger.warning(f"[VOICE ORGANIZE] empty-folder cleanup failed: {e}")
+
+                # Refresh the manual page's view + history if present.
+                try:
+                    self._refresh_history()
+                except Exception:
+                    pass
+
+                renamed_note = f", {renamed_count} renamed to avoid duplicates" if renamed_count else ""
+                cleanup_note = f", removed {removed} empty folder{'s' if removed != 1 else ''}" if removed else ""
+                self.voice_apply_done.emit(
+                    f"Moved {n} file{'s' if n != 1 else ''}{renamed_note}{cleanup_note}. "
+                    f"Undo from Organization History.")
+
+                # Reset plan state now that it's applied (parity with clear_plan).
+                self.current_plan = None
+                self.current_moves = []
+            else:
+                try:
+                    self._refresh_history()
+                except Exception:
+                    pass
+                msg = errors[0] if errors else "Some files could not be moved."
+                self.voice_apply_error.emit(msg)
+        except Exception as e:
+            self.voice_apply_error.emit(str(e))
+
     def _index_folder_before_organize(self, folder_path: Path):
         """Index a folder before organizing, then continue with organization."""
         # Count files to index

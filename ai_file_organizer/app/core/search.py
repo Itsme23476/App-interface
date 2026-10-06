@@ -26,8 +26,8 @@ MAX_CONCURRENT_AI_REQUESTS = 50  # Tier 2: 5,000 RPM allows 50-80 safely
 # Media file extensions that count against the index limit
 MEDIA_EXTENSIONS = {
     # Images
-    '.jpg', '.jpeg', '.png', '.gif', '.svg', '.webp', '.bmp', '.tiff', '.tif',
-    '.heic', '.heif', '.raw', '.cr2', '.nef', '.arw',
+    '.jpg', '.jpeg', '.png', '.gif', '.svg', '.webp', '.avif', '.ico', '.bmp',
+    '.tiff', '.tif', '.heic', '.heif', '.raw', '.cr2', '.nef', '.arw',
     # Videos
     '.mp4', '.mov', '.avi', '.mkv', '.wmv', '.flv', '.webm', '.m4v',
     # Audio
@@ -312,25 +312,6 @@ class SearchService:
             
             # Add to index
             if self.index.add_file(result):
-                # Create embedding
-                try:
-                    rec = self.index.get_file_by_path(str(file_path))
-                    if rec:
-                        text_parts = [rec.get('file_name') or '']
-                        if rec.get('label'):
-                            text_parts.append(rec['label'])
-                        if rec.get('tags'):
-                            text_parts.append(' '.join(rec['tags']))
-                        if rec.get('caption'):
-                            text_parts.append(rec['caption'])
-                        if rec.get('ocr_text'):
-                            text_parts.append(rec['ocr_text'])
-                        text_blob = ' '.join([t for t in text_parts if t])[:5000]
-                        if text_blob and rec.get('id'):
-                            self.index.store_embedding(rec['id'], text_blob)
-                except Exception as emb_err:
-                    logger.warning(f"Embedding error for {file_path}: {emb_err}")
-                
                 # Update index usage for media files (images, videos, audio)
                 if file_is_media:
                     self._update_index_usage(1)

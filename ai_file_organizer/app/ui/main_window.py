@@ -2987,15 +2987,23 @@ class MainWindow(QMainWindow):
         wave_row.addStretch()
         layout.addWidget(wave_slot)
 
-        # Push-to-talk button
-        self.voice_ptt_btn = QPushButton("🎤  Hold to Dictate")
-        self.voice_ptt_btn.setMinimumHeight(72)
-        self.voice_ptt_btn.setCursor(Qt.PointingHandCursor)
-        self.voice_ptt_btn.setStyleSheet("""
+        # Record button — TAP to start, TAP again to stop & send (so you don't
+        # have to hold the mouse down while speaking a long instruction).
+        self._recording = False
+        self._voice_idle_style = """
             QPushButton { background: qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #7C4DFF, stop:1 #9575FF);
                           color:white; border:none; border-radius:16px; font-size:20px; font-weight:700; }
-            QPushButton:pressed { background:#5B1FC9; }
-        """)
+            QPushButton:hover { background: qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #8B5EFF, stop:1 #A385FF); }
+        """
+        self._voice_rec_style = """
+            QPushButton { background:#E0464B; color:white; border:none; border-radius:16px;
+                          font-size:20px; font-weight:700; }
+            QPushButton:hover { background:#EF5257; }
+        """
+        self.voice_ptt_btn = QPushButton("🎤  Tap to Dictate")
+        self.voice_ptt_btn.setMinimumHeight(72)
+        self.voice_ptt_btn.setCursor(Qt.PointingHandCursor)
+        self.voice_ptt_btn.setStyleSheet(self._voice_idle_style)
         layout.addWidget(self.voice_ptt_btn)
 
         self.voice_status = QLabel("Ready.")
@@ -3027,8 +3035,16 @@ class MainWindow(QMainWindow):
             self.dictation_controller.transcript_ready.connect(self._on_voice_transcript)
             self.dictation_controller.level.connect(self.voice_waveform.set_level)
             self.dictation_controller.state_changed.connect(self._on_voice_state)
-            self.voice_ptt_btn.pressed.connect(self._on_voice_ptt_pressed)
-            self.voice_ptt_btn.released.connect(self._on_voice_ptt_released)
+            # Voice Organize controller — drives the floating plan overlay.
+            try:
+                from app.ui.voice_organize_controller import VoiceOrganizeController
+                if hasattr(self, "organize_page"):
+                    self.voice_organize = VoiceOrganizeController(self.organize_page, main_window=self)
+                    self.dictation_controller.organize_controller = self.voice_organize
+                    logger.info("[VOICE] organize controller wired")
+            except Exception as e:
+                logger.error(f"[VOICE] organize controller init failed: {e}")
+            self.voice_ptt_btn.clicked.connect(self._on_voice_toggle)
             # Start the global hotkey too (works on real Windows; harmless here).
             self.dictation_controller.start()
             logger.info("[VOICE] page ready, controller started")
@@ -3036,30 +3052,45 @@ class MainWindow(QMainWindow):
             logger.error(f"[VOICE] controller init failed: {e}")
             self.voice_status.setText(f"Voice unavailable: {e}")
 
+    def _voice_idle_btn_text(self):
+        return {"dictate": "🎤  Tap to Dictate", "search": "🎤  Tap to Search",
+                "organize": "🎤  Tap to Organize"}.get(self._voice_mode, "🎤  Tap to Dictate")
+
     def _set_voice_mode(self, mode: str):
         self._voice_mode = mode
         hints = {
-            "dictate": "Hold to dictate — your words paste into the focused app.",
-            "search": "Hold to search — speak what you're looking for.",
-            "organize": "Hold to organize — speak how you want files organized.",
+            "dictate": "Tap to dictate — your words paste into the focused app.",
+            "search": "Tap to search — speak what you're looking for.",
+            "organize": "Tap to organize — speak how you want files organized.",
         }
         self.voice_status.setText(hints.get(mode, "Ready."))
+        if not getattr(self, "_recording", False):
+            self.voice_ptt_btn.setText(self._voice_idle_btn_text())
 
-    def _on_voice_ptt_pressed(self):
-        logger.info(f"[VOICE] PTT pressed (mode={self._voice_mode})")
-        self.voice_status.setText("🔴 Listening… (release to stop)")
-        try:
-            self.dictation_controller.begin_dictation(self._voice_mode)
-        except Exception as e:
-            logger.error(f"[VOICE] begin failed: {e}")
-
-    def _on_voice_ptt_released(self):
-        logger.info("[VOICE] PTT released")
-        self.voice_status.setText("⏳ Transcribing…")
-        try:
-            self.dictation_controller.end_dictation()
-        except Exception as e:
-            logger.error(f"[VOICE] end failed: {e}")
+    def _on_voice_toggle(self):
+        """Tap to start; tap again to stop & send (replaces hold-to-talk so
+        there's an explicit button to click to end recording)."""
+        if not self._recording:
+            self._recording = True
+            logger.info(f"[VOICE] record START (mode={self._voice_mode})")
+            self.voice_status.setText("🔴 Listening… (tap Stop to send)")
+            try:
+                self.dictation_controller.begin_dictation(self._voice_mode)
+            except Exception as e:
+                logger.error(f"[VOICE] begin failed: {e}")
+                self._recording = False
+        else:
+            self._recording = False
+            logger.info("[VOICE] record STOP (sending)")
+            self.voice_status.setText("⏳ Transcribing…")
+            # Reset the button immediately — recording is over; _on_voice_state
+            # ('idle') will also run when the transcript lands.
+            self.voice_ptt_btn.setText(self._voice_idle_btn_text())
+            self.voice_ptt_btn.setStyleSheet(self._voice_idle_style)
+            try:
+                self.dictation_controller.end_dictation()
+            except Exception as e:
+                logger.error(f"[VOICE] end failed: {e}")
 
     def _on_voice_transcript(self, text: str, mode: str):
         logger.info(f"[VOICE] transcript (mode={mode}): {text!r}")
@@ -3071,14 +3102,18 @@ class MainWindow(QMainWindow):
             self.voice_status.setText("No speech detected — try again, louder.")
 
     def _on_voice_state(self, state: str):
-        """Show the reactive waveform while listening, hide + swap the button
-        back when idle."""
+        """Show the reactive waveform + the red Stop button while listening;
+        restore the idle record button when done."""
         if state == "listening":
             self.voice_waveform.setVisible(True)
-            self.voice_ptt_btn.setText("🔴  Listening… (release to stop)")
+            self.voice_ptt_btn.setText("⏹  Stop & Send")
+            self.voice_ptt_btn.setStyleSheet(self._voice_rec_style)
         else:
+            # Transcript arrived / error — recording is over.
+            self._recording = False
             self.voice_waveform.setVisible(False)
-            self.voice_ptt_btn.setText("🎤  Hold to Dictate")
+            self.voice_ptt_btn.setText(self._voice_idle_btn_text())
+            self.voice_ptt_btn.setStyleSheet(self._voice_idle_style)
 
     def _update_theme_button(self):
         """Update the theme toggle button text and state."""

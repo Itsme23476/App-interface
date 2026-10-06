@@ -1,71 +1,84 @@
 """
-Dictation overlay — the small floating "pill" shown while dictating.
+Dictation overlay — the floating "pill" shown while dictating, ported to match
+the macOS pack pixel-for-pixel (240×68 rounded pill + soft glow):
 
-Critical requirement: it must NOT take keyboard focus. If it did, the
+  - dictate  : 9 reactive gradient bars, centred.
+  - search   : magnifier glyph (left) + bars.
+  - organize : folder glyph (left) + bars.
+  - transcribing (after release, until text appears): 3 pulsing dots.
+
+Critical requirement: it must NOT take keyboard focus — otherwise the
 synthesized Ctrl+V paste would land in the overlay instead of the user's app.
 On Windows we combine Qt's non-activating flags with the Win32 ex-styles
-WS_EX_NOACTIVATE (never activate on show/click) + WS_EX_TOOLWINDOW (keep it off
-the taskbar / alt-tab). This is the Windows analogue of the Mac NSPanel
-setPreventsActivation_.
-
-Minimal for now: a state label ("Listening…" / "Transcribing…") + a thin level
-bar driven by the recorder's `level` signal. The animated waveform can come
-later; this is enough to see what's happening.
+WS_EX_NOACTIVATE + WS_EX_TOOLWINDOW (the analogue of the Mac NSPanel
+preventsActivation). Pure-Qt painting (see icons.AnimatedWaveform / VoiceDots).
 """
 import logging
 
-from PySide6.QtCore import Qt, QTimer
-from PySide6.QtWidgets import QWidget, QHBoxLayout, QLabel, QFrame
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import (QWidget, QHBoxLayout, QVBoxLayout, QLabel,
+                               QFrame, QGraphicsDropShadowEffect)
+from PySide6.QtGui import QColor
+
+from app.ui.icons import AnimatedWaveform, VoiceDots, line_pixmap, ACCENT
 
 logger = logging.getLogger(__name__)
+
+_GLYPH = "#C9B8FF"           # soft lilac for the mode glyph
+_PILL_W, _PILL_H = 240, 68
+_MARGIN = 14                 # space around the pill for the glow
 
 
 class DictationOverlay(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
-        # Frameless, always-on-top, tool window, does-not-accept-focus.
         self.setWindowFlags(
-            Qt.FramelessWindowHint
-            | Qt.WindowStaysOnTopHint
-            | Qt.Tool
+            Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool
             | Qt.WindowDoesNotAcceptFocus
         )
         self.setAttribute(Qt.WA_ShowWithoutActivating, True)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
-        self.setFixedSize(220, 56)
+        self.setFixedSize(_PILL_W + 2 * _MARGIN, _PILL_H + 2 * _MARGIN)
 
-        card = QFrame(self)
-        card.setObjectName("dictationPill")
-        card.setGeometry(0, 0, 220, 56)
-        card.setStyleSheet("""
+        self._mode = "dictate"
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(_MARGIN, _MARGIN, _MARGIN, _MARGIN)
+
+        self._card = QFrame()
+        self._card.setObjectName("dictationPill")
+        self._card.setFixedSize(_PILL_W, _PILL_H)
+        # Exact spec: 240×68, corner 20, bg rgba(10,10,18,.922), border rgba(255,255,255,.11).
+        self._card.setStyleSheet("""
             QFrame#dictationPill {
-                background-color: #16161F;
-                border: 1px solid #2A2A3A;
-                border-radius: 28px;
+                background-color: rgba(10, 10, 18, 235);
+                border: 1px solid rgba(255, 255, 255, 28);
+                border-radius: 20px;
             }
         """)
-        row = QHBoxLayout(card)
-        row.setContentsMargins(18, 0, 18, 0)
-        row.setSpacing(10)
+        glow = QGraphicsDropShadowEffect(self)
+        glow.setBlurRadius(26)
+        glow.setColor(QColor(124, 77, 255, 90))
+        glow.setOffset(0, 0)
+        self._card.setGraphicsEffect(glow)
+        outer.addWidget(self._card)
 
-        self._dot = QLabel("●")
-        self._dot.setStyleSheet("color:#7C4DFF; font-size:16px;")
-        row.addWidget(self._dot)
+        row = QHBoxLayout(self._card)
+        row.setContentsMargins(22, 0, 22, 0)
+        row.setSpacing(12)
 
-        self._label = QLabel("Listening…")
-        self._label.setStyleSheet("color:#E8E8F0; font-size:14px; font-weight:600; background:transparent;")
-        row.addWidget(self._label)
-        row.addStretch()
+        self._glyph = QLabel()
+        self._glyph.setFixedWidth(20)
+        self._glyph.setAlignment(Qt.AlignCenter)
+        row.addWidget(self._glyph)
 
-        self._level_bar = QFrame()
-        self._level_bar.setFixedSize(6, 24)
-        self._level_bar.setStyleSheet("background:#7C4DFF; border-radius:3px;")
-        row.addWidget(self._level_bar)
-
-        # Pulse the dot while listening.
-        self._pulse_on = True
-        self._pulse = QTimer(self)
-        self._pulse.timeout.connect(self._tick_pulse)
+        # 9 bars, fixed 5px wide / 8px gap / 6–40px tall (the exact reference).
+        self._bars = AnimatedWaveform(color=ACCENT, bars=9, width=130, height=48,
+                                      bar_width=5.0, bar_gap=8.0, min_h=6.0, max_h=40.0)
+        self._dots = VoiceDots(color=ACCENT, width=130, height=48)
+        row.addWidget(self._bars, 1)
+        row.addWidget(self._dots, 1)
+        self._dots.setVisible(False)
 
     # ----- Win32 non-activation (applied once the HWND exists) -----
     def showEvent(self, event):
@@ -80,38 +93,36 @@ class DictationOverlay(QWidget):
             ex = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
             user32.SetWindowLongW(hwnd, GWL_EXSTYLE,
                                   ex | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW)
-            logger.debug("[OVERLAY] applied WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW")
         except Exception as e:
             logger.debug(f"[OVERLAY] ex-style apply failed: {e}")
 
-    def _tick_pulse(self):
-        self._pulse_on = not self._pulse_on
-        self._dot.setStyleSheet(
-            f"color:{'#7C4DFF' if self._pulse_on else '#3A2A6A'}; font-size:16px;"
-        )
+    def _set_glyph(self, name):
+        if name:
+            self._glyph.setPixmap(line_pixmap(name, 18, _GLYPH))
+            self._glyph.setVisible(True)
+        else:
+            self._glyph.clear()
+            self._glyph.setVisible(False)
 
     # ----- public API driven by the controller -----
     def show_listening(self, mode: str = "dictate"):
-        labels = {"dictate": "Listening…", "search": "Listening (search)…",
-                  "organize": "Listening (organize)…"}
-        self._label.setText(labels.get(mode, "Listening…"))
+        self._mode = mode
+        self._set_glyph({"search": "search", "organize": "folder"}.get(mode, ""))
+        self._dots.setVisible(False)
+        self._bars.setVisible(True)
         self._position_bottom_center()
         self.show()
         self.raise_()
-        self._pulse.start(450)
 
     def show_transcribing(self):
-        self._label.setText("Transcribing…")
-        self._pulse.stop()
-        self._dot.setStyleSheet("color:#7C4DFF; font-size:16px;")
+        # Keep the mode glyph; swap bars → pulsing dots.
+        self._bars.setVisible(False)
+        self._dots.setVisible(True)
 
     def set_level(self, level: float):
-        # Map 0..1 -> bar height 4..24 px.
-        h = max(4, min(24, int(4 + level * 20)))
-        self._level_bar.setFixedSize(6, h)
+        self._bars.set_level(level)
 
     def hide_pill(self):
-        self._pulse.stop()
         self.hide()
 
     def _position_bottom_center(self):

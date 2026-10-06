@@ -39,7 +39,9 @@ CRITICAL: FOLLOW USER INSTRUCTIONS LITERALLY
 FRESH START ON EVERY REQUEST:
 - Each instruction is a NEW organization request
 - Files may currently be in subfolders - their current folder is shown in the "folder" field
-- Use the current folder information when the user asks to preserve specific folders
+- Use the current folder information ONLY when the user asks to preserve specific folders
+- Otherwise, RECLASSIFY every file into the folders the user asked for — do NOT keep a file in its current subfolder just because that's where it is now
+- Create ONLY the folders the user named. Do not add extra folders (e.g. if the user asks for "animals" and "paintings", return EXACTLY those two — never a third)
 
 FILE INFORMATION PROVIDED:
 - id: unique file identifier (use this in your response)
@@ -52,7 +54,9 @@ STRICT RULES:
 1. Return ONLY valid JSON matching this schema:
 {ORGANIZATION_SCHEMA}
 
-2. folder-name: use EXACTLY what the user specifies, or lowercase kebab-case if organizing by type
+2. folder-name: use EXACTLY what the user specifies, or lowercase kebab-case if organizing by type.
+   The folder-name must be a SIMPLE name only (e.g. "Animals") — NEVER a path, NEVER contain "/" or "\\",
+   and NEVER prefix it with the name of the folder being organized (the target folder is already the parent).
 3. Use ONLY file_ids from the provided list - NEVER invent IDs
 4. By default, EVERY file_id must appear in exactly ONE folder — UNLESS the user asks to preserve specific folders (see below)
 5. Maximum 2 folder levels
@@ -649,6 +653,72 @@ def _request_openai(user_message: str) -> Optional[Dict[str, Any]]:
         return None
 
 
+def resolve_folder_with_ai(instruction: str, candidate_paths: List[str]) -> Optional[str]:
+    """Map a spoken organize request to exactly ONE folder from a bounded
+    candidate list (real paths). Returns the exact path verbatim if the LLM
+    picks one that's in the list, else None.
+
+    This is how voice organize decides WHICH folder to organize — it does NOT
+    read Explorer's current directory. The caller passes the known folders
+    (Desktop / Downloads / Documents + immediate subdirs); the model matches
+    the spoken request against them.
+    """
+    instruction = (instruction or "").strip()
+    if not instruction or not candidate_paths:
+        return None
+    try:
+        from .vision import _call_openai_proxy
+        listing = "\n".join(candidate_paths)
+        system = (
+            "You map a spoken request to the ONE folder the user wants to "
+            "organize. Choose STRICTLY from the AVAILABLE FOLDERS list below "
+            "(they are real paths). Return ONLY the exact folder path, verbatim, "
+            "with nothing else. If none clearly matches, return exactly NONE."
+        )
+        user = f"REQUEST: {instruction}\n\nAVAILABLE FOLDERS:\n{listing}"
+        resp = _call_openai_proxy(
+            "chat",
+            [{"role": "system", "content": system},
+             {"role": "user", "content": user}],
+            max_tokens=120, temperature=0,
+        )
+        if not resp:
+            return None
+        choices = resp.get("choices", [])
+        if not choices:
+            return None
+        answer = (choices[0].get("message", {}).get("content", "") or "").strip()
+        answer = answer.strip().strip('"\'`').strip()
+        if not answer or answer.upper() == "NONE":
+            logger.info(f"[VOICE ORGANIZE] folder resolve: NONE for {instruction!r}")
+            return None
+        # Accept only if the answer actually corresponds to a candidate.
+        cand = {p.rstrip("/\\"): p for p in candidate_paths}
+        resolved = cand.get(answer.rstrip("/\\"))
+        if resolved is None:
+            # Looser normalized match (slash/case differences on Windows).
+            norm = {os.path.normpath(p).lower(): p for p in candidate_paths}
+            resolved = norm.get(os.path.normpath(answer).lower())
+        if resolved is None:
+            # The model sometimes returns just the folder NAME (e.g. "images")
+            # instead of the full path — match on basename. Unique match wins;
+            # if several share the name, prefer a Desktop one, else give up.
+            ans_base = os.path.basename(answer.rstrip("/\\")).lower()
+            if ans_base:
+                matches = [p for p in candidate_paths
+                           if os.path.basename(p.rstrip("/\\")).lower() == ans_base]
+                if len(matches) == 1:
+                    resolved = matches[0]
+                elif len(matches) > 1:
+                    desk = [p for p in matches if "desktop" in p.lower()]
+                    resolved = desk[0] if len(desk) == 1 else None
+        logger.info(f"[VOICE ORGANIZE] folder resolve: {instruction!r} -> {resolved!r} (raw={answer[:80]!r})")
+        return resolved
+    except Exception as e:
+        logger.error(f"[VOICE ORGANIZE] resolve_folder_with_ai failed: {e}")
+        return None
+
+
 def _request_ollama(user_message: str) -> Optional[Dict[str, Any]]:
     """Request plan via local Ollama."""
     import requests
@@ -745,6 +815,128 @@ def deduplicate_plan(plan: Dict[str, Any]) -> Dict[str, Any]:
         logger.warning(f"Removed {duplicates_removed} duplicate file_id(s) from AI plan")
     
     return {"folders": cleaned_folders}
+
+
+# Category words that mean "everything else" — used to find the catch-all
+# folder from the user's instruction (by the CATEGORY word, so the folder can
+# be named anything: "elves", "Bob", "random junk", …).
+_CATCHALL_CATS = {
+    "else", "everything", "other", "rest", "remaining", "remainder",
+    "misc", "general", "leftover", "anything", "whatever", "unsorted",
+}
+
+
+def catchall_folder_from_instruction(instruction: str) -> Optional[str]:
+    """Return the folder the user designated for 'everything else', parsed from
+    their instruction (e.g. '…and everything else in a folder called elves' ->
+    'elves'). Matched on the CATEGORY word, so the folder name is unrestricted.
+    Returns None if the instruction names no catch-all."""
+    try:
+        cat_map = _extract_category_to_folder_map(instruction or "")
+    except Exception:
+        return None
+    for cat, folder in cat_map.items():
+        if _stem_category(str(cat)) in _CATCHALL_CATS or str(cat).lower() in _CATCHALL_CATS:
+            return folder
+    return None
+
+
+def reconcile_plan(
+    plan: Dict[str, Any],
+    files_by_id: Dict[int, Dict[str, Any]],
+    previous_plan: Optional[Dict[str, Any]] = None,
+    catchall_folder: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Enforce the plan invariants in CODE (never trust the AI to get them
+    right). This is the deterministic reconciliation shared by generate + refine:
+
+      #1 Conservation — every known file ends up in EXACTLY ONE folder, or is
+         deliberately left in place. Nothing dropped, nothing duplicated.
+      #2 New-wins   — where this plan and the previous one disagree, THIS plan
+         wins. The previous plan is used ONLY to fill in files this plan forgot
+         (so a sloppy/partial AI refine never loses a file).
+      #3 Catch-all  — files still unplaced go to the user's 'everything else'
+         folder (passed by name) when one was given.
+
+    Returns a cleaned plan {"folders": {name: [int ids]}} with empty folders
+    removed and folder order preserved.
+    """
+    if not isinstance(plan, dict):
+        plan = {}
+    folders_in = plan.get("folders") or {}
+
+    valid_ids = set()
+    for k in (files_by_id or {}).keys():
+        try:
+            valid_ids.add(int(k))
+        except (TypeError, ValueError):
+            pass
+
+    # Previous assignment: file_id -> folder (for new-wins tie-break + drop recovery)
+    prev_assign: Dict[int, str] = {}
+    if isinstance(previous_plan, dict):
+        for fname, ids in (previous_plan.get("folders") or {}).items():
+            for fid in (ids or []):
+                try:
+                    prev_assign.setdefault(int(fid), fname)
+                except (TypeError, ValueError):
+                    pass
+
+    # Collect, in plan order, every (valid) folder this file was placed in.
+    ordered_folders: List[str] = []
+    placed: Dict[int, List[str]] = {}
+    for fname, ids in folders_in.items():
+        if fname not in ordered_folders:
+            ordered_folders.append(fname)
+        for fid in (ids or []):
+            try:
+                fid = int(fid)
+            except (TypeError, ValueError):
+                continue
+            if fid not in valid_ids:
+                continue  # drop hallucinated id
+            lst = placed.setdefault(fid, [])
+            if fname not in lst:
+                lst.append(fname)
+
+    # #1/#2: resolve duplicates — the NEW placement wins over the file's PREVIOUS folder.
+    final: Dict[int, str] = {}
+    for fid, flist in placed.items():
+        if len(flist) == 1:
+            final[fid] = flist[0]
+        else:
+            prev = prev_assign.get(fid)
+            news = [f for f in flist if f != prev]   # folders that aren't the stale one
+            final[fid] = news[-1] if news else flist[-1]
+
+    # #1/#3: recover files THIS plan forgot (keep previous folder, else catch-all).
+    recovered = 0
+    for fid in valid_ids:
+        if fid in final:
+            continue
+        if fid in prev_assign:
+            final[fid] = prev_assign[fid]
+            recovered += 1
+        elif catchall_folder:
+            final[fid] = catchall_folder
+            recovered += 1
+        # else: no prior home and no catch-all -> leave in place (no move)
+
+    # Rebuild, preserving folder order and appending any carried-forward folders.
+    out: Dict[str, List[int]] = {}
+    for fname in ordered_folders:
+        out.setdefault(fname, [])
+    if catchall_folder:
+        out.setdefault(catchall_folder, [])
+    for fid, fname in final.items():
+        out.setdefault(fname, [])
+    for fid in sorted(final.keys()):
+        out[final[fid]].append(fid)
+    out = {k: v for k, v in out.items() if v}   # drop empties
+
+    if recovered:
+        logger.info(f"[reconcile] recovered {recovered} file(s) the AI left unplaced")
+    return {"folders": out}
 
 
 def ensure_all_files_included(
@@ -1023,6 +1215,32 @@ def validate_plan(
 # CONVERT PLAN TO MOVE OPERATIONS
 # ─────────────────────────────────────────────────────────────
 
+def _sanitize_folder_name(folder_name: str, destination_root: Path) -> str:
+    """Flatten an AI-proposed folder name to a SINGLE level — the last path
+    COMPONENT, split on '/' and '\\' (not the last word). Voice-organize folders
+    are always flat, so any stray prefix the AI (or a garbled transcript) adds is
+    dropped, no matter what it is:
+
+        'images/animals'            -> 'animals'
+        'Filect/everything else'    -> 'everything else'   (whole component, not 'else')
+        'images/images/animals'     -> 'animals'
+        'a/b/c/d'                   -> 'd'
+        'animals'                   -> 'animals'
+
+    A component equal to the target folder's own name is dropped (a category
+    named the same as the folder being organized would just nest it).
+    Returns '' if nothing valid remains (caller skips it)."""
+    import re
+    parts = [p.strip() for p in re.split(r'[/\\]+', str(folder_name or '').strip())]
+    parts = [p for p in parts if p and p not in ('.', '..')]
+    if not parts:
+        return ''
+    leaf = parts[-1]
+    if leaf.lower() == destination_root.name.lower():
+        return ''
+    return leaf
+
+
 def plan_to_moves(
     plan: Dict[str, Any],
     files_by_id: Dict[int, Dict[str, Any]],
@@ -1030,7 +1248,7 @@ def plan_to_moves(
 ) -> List[Dict[str, Any]]:
     """
     Convert validated plan to concrete move operations.
-    
+
     This is deterministic - no AI involved here.
     The app fully controls what actually happens.
     """
@@ -1038,10 +1256,18 @@ def plan_to_moves(
     skipped_not_found = 0
     skipped_no_info = 0
     skipped_already_in_dest = 0
-    
-    for folder_name, file_ids in plan.get("folders", {}).items():
+    skipped_bad_folder = 0
+
+    for raw_folder_name, file_ids in plan.get("folders", {}).items():
+        folder_name = _sanitize_folder_name(raw_folder_name, destination_root)
+        if not folder_name:
+            skipped_bad_folder += 1
+            logger.warning(f"plan_to_moves: dropping invalid folder name {raw_folder_name!r}")
+            continue
+        if folder_name != str(raw_folder_name):
+            logger.info(f"plan_to_moves: sanitized folder {raw_folder_name!r} -> {folder_name!r}")
         dest_folder = destination_root / folder_name
-        
+
         for fid in file_ids:
             # Normalize fid to int
             try:

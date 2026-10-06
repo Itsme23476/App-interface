@@ -57,6 +57,7 @@ class DictationController(QObject):
     def __init__(self, main_window=None):
         super().__init__()
         self.main_window = main_window
+        self.organize_controller = None   # injected by main_window (VoiceOrganizeController)
         self._recorder = None
         self._mode = "dictate"
         self._overlay = DictationOverlay()
@@ -96,6 +97,15 @@ class DictationController(QObject):
             return
         self._mode = mode
         logger.info(f"[DICTATION] ▶ start mode={mode}")
+
+        # A new organize request: clear any leftover organize popup NOW (before
+        # recording), so the old 'pick a folder' card doesn't linger over the new
+        # one. The fresh overlay is presented later from the transcript.
+        if mode == "organize" and self.organize_controller is not None:
+            try:
+                self.organize_controller.prepare_new()
+            except Exception:
+                pass
 
         from app.core.transcription import StreamingTranscriber
         terms = self._custom_words()
@@ -230,7 +240,10 @@ class DictationController(QObject):
 
     def _route_organize(self, text: str):
         logger.info(f"[DICTATION] route ORGANIZE: {text[:80]!r}")
-        # Wired fully in C6 (voice-organize controller).
+        if self.organize_controller is not None:
+            self.organize_controller.start_from_transcript(text)
+        else:
+            logger.warning("[DICTATION] no organize_controller injected — organize skipped")
 
     # ----- helpers -----
     def _custom_words(self):
