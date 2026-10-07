@@ -76,11 +76,74 @@ def _waveform(p):
 def _x(p):
     p.drawLine(QLineF(6, 6, 18, 18)); p.drawLine(QLineF(18, 6, 6, 18))
 
+def _folder_up(p):
+    _folder(p)
+    p.drawLine(QLineF(12, 17.5, 12, 11.3))
+    head = QPainterPath()
+    head.moveTo(9.4, 13.7); head.lineTo(12, 11.1); head.lineTo(14.6, 13.7)
+    p.drawPath(head)
+
+def _appearance(p):      # half-filled circle (light/dark / theme)
+    p.drawEllipse(QRectF(4, 4, 16, 16))
+    half = QPainterPath()
+    half.moveTo(12, 4)
+    half.arcTo(QRectF(4, 4, 16, 16), 90, -180)
+    half.closeSubpath()
+    p.fillPath(half, p.pen().color())
+
+def _book(p):
+    p.drawRoundedRect(QRectF(6, 3.5, 12, 17), 1.5, 1.5)
+    p.drawLine(QLineF(9.5, 3.8, 9.5, 20.2))
+    p.drawLine(QLineF(12, 7.5, 15.5, 7.5))
+    p.drawLine(QLineF(12, 10.5, 15.5, 10.5))
+
+def _chat(p):
+    p.drawRoundedRect(QRectF(3, 4, 18, 12.5), 4, 4)
+    tail = QPainterPath()
+    tail.moveTo(8, 16); tail.lineTo(8, 20.5); tail.lineTo(12.5, 16)
+    p.drawPath(tail)
+
+def _user(p):
+    p.drawEllipse(QRectF(8, 4, 8, 8))
+    p.drawArc(QRectF(4.5, 14, 15, 15), 25 * 16, 130 * 16)
+
+def _shield(p):
+    path = QPainterPath()
+    path.moveTo(12, 3); path.lineTo(20, 6); path.lineTo(20, 11.5)
+    path.lineTo(12, 21); path.lineTo(4, 11.5); path.lineTo(4, 6)
+    path.closeSubpath()
+    p.drawPath(path)
+
+def _refresh(p):
+    path = QPainterPath()
+    path.arcMoveTo(QRectF(5, 5, 14, 14), 70)
+    path.arcTo(QRectF(5, 5, 14, 14), 70, 250)
+    p.drawPath(path)
+    a = math.radians(70)
+    sx, sy = 12 + 7 * math.cos(a), 12 - 7 * math.sin(a)
+    p.drawLine(QLineF(sx, sy, sx - 3.2, sy - 1.2))
+    p.drawLine(QLineF(sx, sy, sx - 0.6, sy + 3.1))
+
+def _arrow(p):
+    p.drawLine(QLineF(4.5, 12, 18.5, 12))
+    head = QPainterPath()
+    head.moveTo(12.5, 6); head.lineTo(18.8, 12); head.lineTo(12.5, 18)
+    p.drawPath(head)
+
+def _keyboard(p):
+    p.drawRoundedRect(QRectF(2.5, 6, 19, 12), 2.5, 2.5)
+    for x in (6.5, 10, 13.5, 17):
+        p.drawLine(QLineF(x, 10, x + 0.1, 10))   # key dots (round cap)
+    p.drawLine(QLineF(8, 14, 16, 14))            # spacebar
+
 
 _DRAW = {
     "search": _search, "folder": _folder, "layers": _layers, "mic": _mic,
     "gear": _gear, "sparkle": _sparkle, "globe": _globe, "mute": _mute,
     "clock": _clock, "type": _type, "waveform": _waveform, "x": _x,
+    "folder_up": _folder_up, "appearance": _appearance, "book": _book,
+    "chat": _chat, "user": _user, "shield": _shield, "refresh": _refresh,
+    "arrow": _arrow, "keyboard": _keyboard,
 }
 
 _cache = {}
@@ -111,12 +174,39 @@ def line_pixmap(name: str, size: int = 16, color: str = ACCENT) -> QPixmap:
     return pm
 
 
+def icon_heading(icon_name: str, text: str, label_style: str = "",
+                 color: str = ACCENT, size: int = 16, spacing: int = 9):
+    """Return (row_widget, text_label) — a [line-icon][text] heading row.
+    `label_style` is applied to the text QLabel (keep the site's existing style).
+    The row widget is transparent; add it where the old QLabel was added."""
+    from PySide6.QtWidgets import QHBoxLayout, QLabel
+    row = QWidget()
+    row.setStyleSheet("background: transparent; border: none;")
+    lay = QHBoxLayout(row)
+    lay.setContentsMargins(0, 0, 0, 0)
+    lay.setSpacing(spacing)
+    ic = QLabel()
+    ic.setPixmap(line_pixmap(icon_name, size, color))
+    ic.setStyleSheet("background: transparent; border: none;")
+    lay.addWidget(ic, 0, Qt.AlignVCenter)
+    lbl = QLabel(text)
+    _sora = "font-family: 'Sora', 'SF Pro Display', sans-serif;"
+    lbl.setStyleSheet(((label_style.rstrip().rstrip(';') + '; ') if label_style else '') + _sora)
+    lay.addWidget(lbl, 0, Qt.AlignVCenter)
+    lay.addStretch(1)
+    return row, lbl
+
+
 def line_icon(name: str, size: int = 18, on_color: str = ACCENT,
               off_color: str = None) -> QIcon:
+    """QIcon for a (possibly checkable) button. off_color is used for the
+    unchecked/normal state, on_color for the checked/selected state."""
     icon = QIcon()
     off = off_color or on_color
     icon.addPixmap(line_pixmap(name, size, off), QIcon.Normal, QIcon.Off)
     icon.addPixmap(line_pixmap(name, size, on_color), QIcon.Normal, QIcon.On)
+    icon.addPixmap(line_pixmap(name, size, on_color), QIcon.Active, QIcon.Off)
+    icon.addPixmap(line_pixmap(name, size, on_color), QIcon.Selected, QIcon.On)
     return icon
 
 
@@ -146,10 +236,13 @@ class AnimatedWaveform(QWidget):
                  width: int = 180, height: int = 48, interval: int = 16,
                  bar_width: float = 5.0, bar_gap: float = 8.0,
                  min_h: float = 6.0, max_h: float = 40.0, wave_amp: float = 0.34,
-                 level_gain: float = 0.4):
+                 level_gain: float = 0.4, idle_shimmer: bool = False):
         super().__init__(parent)
         self._c_top = QColor(ACCENT_LIGHT)
         self._c_bot = QColor(color)
+        # Decorative mode: bars shimmer across the FULL height range even with
+        # no mic input (the Mac landing-strip look), instead of idling low.
+        self._idle_shimmer = idle_shimmer
         self._n = max(3, bars)
         self._bw = bar_width
         self._gap = bar_gap
@@ -179,8 +272,15 @@ class AnimatedWaveform(QWidget):
 
     def _tick(self):
         self._phase += 0.16
-        self._level += (self._level_target - self._level) * self.EASE
         n = self._n
+        if self._idle_shimmer:
+            # Decorative: full-range travelling shimmer (Mac landing-strip icon).
+            for i in range(n):
+                target = 0.5 + 0.5 * math.sin(self._phase + i * 0.85)
+                self._vals[i] += (target - self._vals[i]) * self.EASE
+            self.update()
+            return
+        self._level += (self._level_target - self._level) * self.EASE
         center = (n - 1) / 2.0 if n > 1 else 0.5
         for i in range(n):
             dist = abs(i - center) / center if center else 0.0

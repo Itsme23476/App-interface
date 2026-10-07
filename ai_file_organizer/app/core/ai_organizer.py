@@ -388,22 +388,95 @@ def _apply_tag_safety_net(
 # LLM REQUEST
 # ─────────────────────────────────────────────────────────────
 
+PLAN_CHUNK_THRESHOLD = 250  # above this, split the request into chunks
+
+
 def request_organization_plan(
     user_instruction: str,
     files: List[Dict[str, Any]],
 ) -> Optional[Dict[str, Any]]:
+    """Dispatcher: one AI request for a normal folder, chunked requests for a big
+    one.
+
+    For <= PLAN_CHUNK_THRESHOLD files this calls ``_request_plan_single`` and
+    returns its result UNCHANGED — i.e. behaviour for normal folders is byte-for-
+    byte what it was before. Only large folders change: previously
+    ``build_file_summary`` capped the prompt at 300 files and silently truncated
+    the rest, so files past 300 were never planned. Now we split into
+    PLAN_CHUNK_THRESHOLD-sized chunks and plan them **concurrently** (up to 6 in
+    flight), then MERGE by folder name. Chunks are disjoint sets of file_ids, so
+    the union can never place a file twice — conservation is preserved — and the
+    callers' deduplicate_plan / ensure_all_files_included finish the job. Running
+    the chunks in parallel (instead of one after another) is what keeps a big
+    folder's planning from taking N sequential AI calls' worth of wall-clock.
+    The merged plan has the exact same shape (``{"folders": {name: [file_id,…]}}``)
+    the single path returns, so everything downstream is unchanged.
     """
-    Send user instruction + file metadata to LLM.
-    Returns the proposed plan as a dict, or None on failure.
-    
-    The LLM acts only as a planner - it never executes anything.
-    """
-    from .settings import settings
-    
     if not files:
         logger.warning("No files provided for organization")
         return None
-    
+
+    if len(files) <= PLAN_CHUNK_THRESHOLD:
+        return _request_plan_single(user_instruction, files)
+
+    chunks = [files[i:i + PLAN_CHUNK_THRESHOLD]
+              for i in range(0, len(files), PLAN_CHUNK_THRESHOLD)]
+    logger.info(f"Large organize ({len(files)} files): planning {len(chunks)} chunks in parallel")
+
+    # Text-only calls on background threads — no RAM spike, only a handful at
+    # once (capped at 6). Each _request_plan_single keeps its own retry. We drop
+    # the old cross-chunk folder-name hint (it forced sequential ordering); the
+    # merge-by-name below + the callers' deduplicate_plan/ensure_all_files_included
+    # preserve conservation. Worst case is a tiny folder-naming inconsistency,
+    # never a correctness one.
+    from concurrent.futures import ThreadPoolExecutor
+    results: List[Optional[Dict[str, Any]]] = [None] * len(chunks)
+
+    def _plan_chunk(item):
+        idx, chunk = item
+        try:
+            return idx, _request_plan_single(user_instruction, chunk)
+        except Exception as e:
+            logger.warning(f"Chunk {idx + 1}/{len(chunks)} failed: {e}")
+            return idx, None
+
+    with ThreadPoolExecutor(max_workers=min(6, len(chunks))) as ex:
+        for idx, plan in ex.map(_plan_chunk, list(enumerate(chunks))):
+            results[idx] = plan
+
+    merged_folders: Dict[str, list] = {}
+    any_ok = False
+    for plan in results:
+        if not plan or not isinstance(plan.get("folders"), dict):
+            continue
+        any_ok = True
+        for name, ids in plan["folders"].items():
+            if not isinstance(ids, (list, tuple)):
+                continue
+            merged_folders.setdefault(name, []).extend(ids)
+
+    if not any_ok or not merged_folders:
+        logger.error("Chunked organize produced no plan")
+        return None
+    return {"folders": merged_folders}
+
+
+def _request_plan_single(
+    user_instruction: str,
+    files: List[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """
+    Send user instruction + file metadata to LLM (single request).
+    Returns the proposed plan as a dict, or None on failure.
+
+    The LLM acts only as a planner - it never executes anything.
+    """
+    from .settings import settings
+
+    if not files:
+        logger.warning("No files provided for organization")
+        return None
+
     file_summary = build_file_summary(files)
     
     # Detect auto-organize mode vs specific instruction mode

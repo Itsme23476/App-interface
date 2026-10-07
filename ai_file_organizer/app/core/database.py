@@ -56,7 +56,17 @@ class FileIndex:
         """Initialize database tables."""
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
-            
+
+            # Enable WAL journalling once — it persists in the DB file, so every
+            # future connection inherits it. WAL lets a search read the index
+            # while an organize's batch path-update is writing (no reader/writer
+            # lock contention — the lag we flagged on big folders). Safe on local
+            # storage (the DB lives in AppData); creates .db-wal/.db-shm sidecars.
+            try:
+                cursor.execute("PRAGMA journal_mode=WAL")
+            except Exception as _wal_err:
+                logger.warning(f"Could not enable WAL journal mode: {_wal_err}")
+
             # Create files table
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS files (
@@ -275,6 +285,78 @@ class FileIndex:
         except Exception as e:
             logger.error(f"Error updating file path for {file_id}: {e}")
             return False
+
+    def update_file_paths_batch(self, updates: List[tuple]) -> int:
+        """Update file_path for MANY files in one connection + one transaction.
+
+        Behaves like calling update_file_path() for each ``(file_id, new_path)``
+        pair, but without the per-file connect→commit→close round-trip — the main
+        cost when an organize moves thousands of files. Mirrors the per-file logic
+        exactly: stale-path cleanup, main-table update, and the external-content
+        FTS delete+reinsert. Per-file ``update_file_path`` is left untouched (the
+        auto-watcher still uses it). Returns the number of main-table rows updated.
+        """
+        if not updates:
+            return 0
+        rows_updated_total = 0
+        needs_fts_rebuild = False
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                # NORMAL is safe under WAL and removes an fsync per commit — fine
+                # for bulk path updates (worst case on power loss = redo the move).
+                try:
+                    cursor.execute("PRAGMA synchronous=NORMAL")
+                except Exception:
+                    pass
+                for file_id, new_path in updates:
+                    try:
+                        # Remove any stale entry occupying the new path (different id).
+                        cursor.execute(
+                            "DELETE FROM files WHERE file_path = ? AND id != ?",
+                            (new_path, file_id)
+                        )
+                        if cursor.rowcount > 0:
+                            cursor.execute(
+                                "DELETE FROM files_fts WHERE rowid NOT IN (SELECT id FROM files)"
+                            )
+                        # Update main table.
+                        cursor.execute(
+                            "UPDATE files SET file_path = ? WHERE id = ?",
+                            (new_path, file_id)
+                        )
+                        if cursor.rowcount > 0:
+                            rows_updated_total += 1
+                        # Rebuild this row's external-content FTS entry.
+                        try:
+                            cursor.execute("DELETE FROM files_fts WHERE rowid = ?", (file_id,))
+                            cursor.execute(
+                                """
+                                INSERT INTO files_fts(rowid, file_name, file_path, category, ocr_text, caption, tags)
+                                SELECT id, file_name, file_path, category, ocr_text, caption, tags
+                                FROM files WHERE id = ?
+                                """,
+                                (file_id,)
+                            )
+                        except Exception as fts_err:
+                            error_str = str(fts_err).lower()
+                            if "malformed" in error_str or "corrupt" in error_str:
+                                needs_fts_rebuild = True
+                            else:
+                                logger.warning(f"FTS update failed for {file_id}: {fts_err}")
+                    except Exception as row_err:
+                        logger.warning(f"Batch path update failed for id {file_id}: {row_err}")
+                        continue
+                conn.commit()
+            # Auto-heal a corrupted FTS index once, after the main-table commit.
+            if needs_fts_rebuild:
+                logger.warning("FTS index corrupted during batch update, triggering auto-rebuild...")
+                self._auto_rebuild_fts()
+            logger.info(f"Batch-updated {rows_updated_total}/{len(updates)} file paths in database")
+            return rows_updated_total
+        except Exception as e:
+            logger.error(f"Error in batch path update: {e}")
+            return rows_updated_total
 
     def update_file_path_by_old_path(self, old_path: str, new_path: str) -> bool:
         """Update a file's path when we only know its CURRENT (old) path.

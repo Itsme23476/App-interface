@@ -53,6 +53,16 @@ class Settings:
         self.auth_access_token: str = ''
         self.auth_refresh_token: str = ''
         self.auth_user_email: str = ''
+
+        # ======= VOICE / DICTATION SETTINGS =======
+        # Language for transcription ('' = auto-detect; else an ISO code like 'en').
+        self.dictation_language: str = ''
+        # Custom Words — names/jargon biased to spell correctly during transcription.
+        self.dictation_custom_terms: List[str] = []
+        # Mute other audio output while actively recording the mic.
+        self.dictation_mute_while_recording: bool = False
+        # AI Cleanup level applied to a finished transcript: 'none' | 'light' | 'polished'.
+        self.dictation_polish_level: str = 'none'
         
         # ======= AUTO-ORGANIZE WATCHER SETTINGS =======
         # List of folders with per-folder instructions: [{path: str, instruction: str}, ...]
@@ -317,7 +327,15 @@ class Settings:
         self.auth_access_token = data.get('auth_access_token', '')
         self.auth_refresh_token = data.get('auth_refresh_token', '')
         self.auth_user_email = data.get('auth_user_email', '')
-        
+
+        # Voice / dictation settings
+        self.dictation_language = data.get('dictation_language', self.dictation_language)
+        _terms = data.get('dictation_custom_terms', self.dictation_custom_terms)
+        self.dictation_custom_terms = [str(t) for t in _terms] if isinstance(_terms, list) else []
+        self.dictation_mute_while_recording = bool(data.get('dictation_mute_while_recording', self.dictation_mute_while_recording))
+        _lvl = data.get('dictation_polish_level', self.dictation_polish_level)
+        self.dictation_polish_level = _lvl if _lvl in ('none', 'light', 'polished') else 'none'
+
         # Auto-organize watcher settings
         auto_folders = data.get('auto_organize_folders', [])
         if isinstance(auto_folders, list):
@@ -366,6 +384,11 @@ class Settings:
             'auth_access_token': self.auth_access_token,
             'auth_refresh_token': self.auth_refresh_token,
             'auth_user_email': self.auth_user_email,
+            # Voice / dictation settings
+            'dictation_language': self.dictation_language,
+            'dictation_custom_terms': self.dictation_custom_terms,
+            'dictation_mute_while_recording': self.dictation_mute_while_recording,
+            'dictation_polish_level': self.dictation_polish_level,
             # Auto-organize watcher settings
             'auto_organize_folders': self.auto_organize_folders,
             'auto_organize_auto_start': self.auto_organize_auto_start,

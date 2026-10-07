@@ -168,9 +168,9 @@ class AutoWatcherWorker(QThread):
             
             # Index files in PARALLEL (mirrors the manual-indexing path), so
             # when several new files appear at once the vision API calls run
-            # concurrently instead of one-by-one. Cap by MAX_CONCURRENT_AI_REQUESTS.
-            from app.core.search import MAX_CONCURRENT_AI_REQUESTS
-            workers = max(1, min(MAX_CONCURRENT_AI_REQUESTS, len(files_to_index)))
+            # concurrently instead of one-by-one. RAM-capped (see search.py).
+            from app.core.search import recommended_index_workers
+            workers = recommended_index_workers(len(files_to_index))
             total = len(files_to_index)
             limit_reached = False
             limit_signal_emitted = False

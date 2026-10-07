@@ -26,3 +26,5 @@ websockets>=12.0
 pycaw>=20230407
 comtypes>=1.2.0
 pynput>=1.7.6
+# RAM-aware indexing concurrency cap (falls back to a static cap if missing).
+psutil>=5.9.0

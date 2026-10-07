@@ -139,8 +139,8 @@ class DictationController(QObject):
         self._overlay.hide_pill()
         self.state_changed.emit("idle")
 
-        # Optional polishing (Voice "Polishing" setting).
-        level = getattr(settings, "dictation_cleanup_level", "off")
+        # Optional polishing (Voice "AI Cleanup" setting).
+        level = getattr(settings, "dictation_polish_level", "none")
         if text and level in ("light", "polished"):
             try:
                 from app.core.transcription import clean_transcript
@@ -248,16 +248,18 @@ class DictationController(QObject):
     # ----- helpers -----
     def _custom_words(self):
         try:
-            words = getattr(settings, "dictation_custom_words", None) or []
+            words = getattr(settings, "dictation_custom_terms", None) or []
             return list(words) if words else None
         except Exception:
             return None
 
     def _save_history(self, text: str, mode: str):
         try:
-            hist = list(getattr(settings, "dictation_history", []) or [])
-            hist.insert(0, {"text": text, "mode": mode})
-            if hasattr(settings, "set_dictation_history"):
-                settings.set_dictation_history(hist[:100])
+            from app.core import dictation_history
+            dictation_history.add(text)
+            # Refresh the Voice page's History card if it's live.
+            mw = self.main_window
+            if mw is not None and hasattr(mw, "_on_dictation_saved"):
+                mw._on_dictation_saved()
         except Exception as e:
             logger.debug(f"[DICTATION] history save skipped: {e}")

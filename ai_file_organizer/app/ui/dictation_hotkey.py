@@ -9,7 +9,7 @@ GetAsyncKeyState). So we poll the trigger key's state via GetAsyncKeyState on a
 QTimer on the GUI thread — no hook, no admin, ARM64-safe.
 
 Gesture:
-  - Hold the trigger key longer than ``hold_ms`` -> dictate_start(mode).
+  - Hold the trigger longer than ``hold_ms`` -> dictate_start(mode).
   - Release -> dictate_stop().
   - A quick tap (< hold_ms) passes through normally and fires nothing.
 Modes (read at the moment the hold threshold is crossed):
@@ -17,7 +17,11 @@ Modes (read at the moment the hold threshold is crossed):
   - trigger + Shift      -> 'search'
   - trigger + Alt        -> 'organize'
 
-The trigger key is configurable (default Right Ctrl) via settings.
+Default trigger is ``ctrl+win`` (hold Ctrl **and** the Windows key) — the de-facto
+standard push-to-talk hotkey for Windows dictation apps (Wispr Flow, Typeless,
+etc.), chosen because it doesn't collide with common Windows system shortcuts.
+The trigger is configurable via settings (a single named modifier, the ctrl+win
+chord, or a single alphanumeric key for testing).
 """
 import logging
 from PySide6.QtCore import QObject, Signal, QTimer
@@ -36,10 +40,13 @@ _VK = {
 }
 _VK_SHIFT = 0x10          # VK_SHIFT (either)
 _VK_ALT = 0x12            # VK_MENU (either)
+_VK_CTRL = 0x11           # VK_CONTROL (either)
+_VK_LWIN = 0x5B           # VK_LWIN
+_VK_RWIN = 0x5C           # VK_RWIN
 _SHIFT_VKS = {0x10, 0xA0, 0xA1}
 _ALT_VKS = {0x12, 0xA4, 0xA5}
 
-DEFAULT_TRIGGER = "right ctrl"
+DEFAULT_TRIGGER = "ctrl+win"
 
 
 def _key_down(vk: int) -> bool:
@@ -49,6 +56,14 @@ def _key_down(vk: int) -> bool:
         return bool(ctypes.windll.user32.GetAsyncKeyState(vk) & 0x8000)
     except Exception:
         return False
+
+
+def _ctrl_down() -> bool:
+    return _key_down(_VK_CTRL) or _key_down(0xA2) or _key_down(0xA3)
+
+
+def _win_down() -> bool:
+    return _key_down(_VK_LWIN) or _key_down(_VK_RWIN)
 
 
 class DictationHotkey(QObject):
@@ -71,19 +86,31 @@ class DictationHotkey(QObject):
         self._timer.timeout.connect(self._poll)
 
     def set_trigger(self, trigger: str):
-        """Set the trigger key. Accepts a named modifier (see _VK) OR a single
-        alphanumeric character (e.g. 'a' for testing in environments like a
-        Parallels VM where modifier keys are intercepted by the host)."""
-        trigger = (trigger or DEFAULT_TRIGGER).lower()
-        if trigger in _VK:
+        """Set the trigger. Accepts the ``ctrl+win`` chord (default), a named
+        modifier (see _VK), OR a single alphanumeric character (e.g. 'a' for
+        testing in environments where modifier keys are intercepted by a host)."""
+        trigger = (trigger or DEFAULT_TRIGGER).lower().strip()
+        self._chord = False
+        if trigger in ("ctrl+win", "win+ctrl", "ctrl win"):
+            self._trigger_name = "ctrl+win"
+            self._chord = True
+            self._vk = None
+        elif trigger in _VK:
             self._trigger_name = trigger
             self._vk = _VK[trigger]
         elif len(trigger) == 1 and trigger.isalnum():
             self._trigger_name = trigger
             self._vk = ord(trigger.upper())   # VK for 'A'..'Z'/'0'..'9'
         else:
-            self._trigger_name = DEFAULT_TRIGGER
-            self._vk = _VK[DEFAULT_TRIGGER]
+            self._trigger_name = "ctrl+win"
+            self._chord = True
+            self._vk = None
+
+    def _trigger_down(self) -> bool:
+        """True while the trigger is held — the Ctrl+Win chord, or a single key."""
+        if self._chord:
+            return _ctrl_down() and _win_down()
+        return _key_down(self._vk)
 
     @property
     def trigger_name(self) -> str:
@@ -110,9 +137,10 @@ class DictationHotkey(QObject):
 
     def _current_mode(self) -> str:
         # Don't treat the trigger key itself as a mode modifier (e.g. if the
-        # trigger IS Shift, holding it must mean 'dictate', not 'search').
-        shift_is_trigger = self._vk in _SHIFT_VKS
-        alt_is_trigger = self._vk in _ALT_VKS
+        # trigger IS Shift, holding it must mean 'dictate', not 'search'). For
+        # the ctrl+win chord, Ctrl/Win are the trigger and Shift/Alt are free.
+        shift_is_trigger = (not self._chord) and self._vk in _SHIFT_VKS
+        alt_is_trigger = (not self._chord) and self._vk in _ALT_VKS
         if not shift_is_trigger and _key_down(_VK_SHIFT):
             return "search"
         if not alt_is_trigger and _key_down(_VK_ALT):
@@ -120,7 +148,7 @@ class DictationHotkey(QObject):
         return "dictate"
 
     def _poll(self):
-        down = _key_down(self._vk)
+        down = self._trigger_down()
         if down:
             self._down_frames += 1
             if self._down_frames == self._hold_frames and not self._active:

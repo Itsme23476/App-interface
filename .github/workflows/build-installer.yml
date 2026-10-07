@@ -85,6 +85,7 @@ jobs:
             "--collect-data", "certifi",
             "--add-data", "app/ui/styles.qss;app/ui",
             "--add-data", "app/ui/styles_light.qss;app/ui",
+            "--add-data", "app/ui/fonts;app/ui/fonts",
             "--add-data", "resources;resources",
             "--hidden-import", "PySide6.QtCore",
             "--hidden-import", "PySide6.QtGui",
@@ -99,6 +100,7 @@ jobs:
             "--hidden-import", "openai",
             "--hidden-import", "json5",
             "--hidden-import", "spellchecker",
+            "--hidden-import", "psutil",
             "--noconfirm"
           )
           if (Test-Path "resources/iconnn.ico") {

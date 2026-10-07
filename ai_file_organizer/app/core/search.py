@@ -23,6 +23,32 @@ logger = logging.getLogger(__name__)
 # Parallel processing settings
 MAX_CONCURRENT_AI_REQUESTS = 50  # Tier 2: 5,000 RPM allows 50-80 safely
 
+
+def recommended_index_workers(total: Optional[int] = None) -> int:
+    """How many files to analyse in parallel, capped by available RAM.
+
+    ``MAX_CONCURRENT_AI_REQUESTS`` (50) is the cloud API's *rate* ceiling, not a
+    memory-safe number: each worker decodes a full-resolution image into RAM
+    (``Image.open().convert("RGB")`` before the 1024px downscale), so 50 large
+    decodes at once can exhaust an 8 GB machine and crash. We therefore scale the
+    pool with *available* RAM — roughly 2 workers per free GB — clamped to
+    ``[4, MAX_CONCURRENT_AI_REQUESTS]`` so weak machines stay alive and powerful
+    ones keep their throughput. ``total`` (when known) caps it further so we never
+    spawn more workers than files. Falls back to a safe static cap if psutil is
+    unavailable (e.g. a stripped frozen build).
+    """
+    ceiling = MAX_CONCURRENT_AI_REQUESTS
+    try:
+        import psutil
+        avail_gb = psutil.virtual_memory().available / (1024 ** 3)
+        ram_cap = int(avail_gb * 2)
+    except Exception:
+        ram_cap = 8  # conservative default when we can't measure RAM
+    workers = max(4, min(ceiling, ram_cap))
+    if total is not None:
+        workers = max(1, min(workers, int(total)))
+    return workers
+
 # Media file extensions that count against the index limit
 MEDIA_EXTENSIONS = {
     # Images
@@ -389,9 +415,10 @@ class SearchService:
             completed = 0
             cancelled = False
             
-            logger.info(f"Processing {total} files with {MAX_CONCURRENT_AI_REQUESTS} concurrent workers")
-            
-            with ThreadPoolExecutor(max_workers=MAX_CONCURRENT_AI_REQUESTS) as executor:
+            _workers = recommended_index_workers(total)
+            logger.info(f"Processing {total} files with {_workers} concurrent workers (RAM-capped)")
+
+            with ThreadPoolExecutor(max_workers=_workers) as executor:
                 # Submit all tasks
                 future_to_idx = {
                     executor.submit(self._process_single_file, file_data, directory_path, False, user_instructions): idx

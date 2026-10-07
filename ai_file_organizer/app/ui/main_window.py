@@ -892,19 +892,24 @@ class MainWindow(QMainWindow):
         self.nav_button_group = QButtonGroup(self)
         self.nav_button_group.setExclusive(True)
         
+        # Line-icons (drawn, theme-agnostic) replace the old emoji glyphs.
+        from app.ui.icons import line_icon as _line_icon
+        from PySide6.QtCore import QSize as _QSize
         nav_items = [
-            ("🔍", "Search", 0),
-            ("🗂️", "Organize", 1),
-            ("📁", "Index Files", 2),
-            ("🎤", "Voice", 3),
-            ("⚙️", "Settings", 4),
+            ("search", "Search", 0),
+            ("folder", "Organize", 1),
+            ("layers", "Analyze Files", 2),
+            ("mic", "Voice", 3),
+            ("gear", "Settings", 4),
         ]
-        
-        for icon, text, idx in nav_items:
-            btn = QPushButton(f"  {icon}  {text}")
+
+        for icon_name, text, idx in nav_items:
+            btn = QPushButton(f"  {text}")
             btn.setObjectName("navButton")
             btn.setCheckable(True)
             btn.setCursor(Qt.PointingHandCursor)
+            btn.setIcon(_line_icon(icon_name, 18, on_color="#7C4DFF", off_color="#8C8AA0"))
+            btn.setIconSize(_QSize(18, 18))
             btn.clicked.connect(lambda checked, i=idx: self._on_nav_clicked(i))
             nav_layout.addWidget(btn)
             self.nav_buttons.append(btn)
@@ -1053,6 +1058,55 @@ class MainWindow(QMainWindow):
         # Add organize tab
         self.tab_widget.addTab(organize_widget, "Organize Files")
     
+    def _build_voice_hint_row(self):
+        """Landing-only strip showing the voice hotkeys (waveform + key chips).
+        Visual + discoverability only; theme-agnostic translucent styling.
+
+        Windows keys: the global voice hotkeys are Ctrl+Win (dictate),
+        Ctrl+Win+Shift (voice search) and Ctrl+Win+Alt (voice organize) — the
+        de-facto Windows dictation standard (Wispr Flow, Typeless, etc.).
+        """
+        from app.ui.icons import AnimatedWaveform
+        frame = QWidget()
+        frame.setObjectName("voiceHintRow")
+        frame.setStyleSheet(
+            "#voiceHintRow { background: rgba(124,77,255,0.06);"
+            " border: 1px solid rgba(124,77,255,0.22); border-radius: 13px; }"
+            "#voiceHintRow QLabel { background: transparent; border: none; }"
+        )
+        lay = QHBoxLayout(frame)
+        lay.setContentsMargins(18, 12, 18, 12)
+        lay.setSpacing(16)
+
+        wave = AnimatedWaveform(color="#7C4DFF", bars=5, width=30, height=26,
+                                bar_width=2.6, bar_gap=2.6, min_h=5.0, max_h=22.0,
+                                idle_shimmer=True)
+        lay.addWidget(wave, 0, Qt.AlignVCenter)
+
+        kbd_style = ("QLabel { background: rgba(124,77,255,0.10);"
+                     " border: 1px solid rgba(124,77,255,0.28); border-radius: 6px;"
+                     " color: #7C4DFF; font-size: 11px; font-weight: 600; padding: 2px 7px; }")
+
+        def chip(keys, text):
+            w = QWidget()
+            w.setStyleSheet("background: transparent;")
+            cl = QHBoxLayout(w)
+            cl.setContentsMargins(0, 0, 0, 0)
+            cl.setSpacing(6)
+            for k in keys:
+                kb = QLabel(k)
+                kb.setStyleSheet(kbd_style)
+                cl.addWidget(kb, 0, Qt.AlignVCenter)
+            t = QLabel(text)
+            t.setStyleSheet("color: #8C8AA0; font-size: 12px; background: transparent;")
+            cl.addWidget(t, 0, Qt.AlignVCenter)
+            return w
+
+        lay.addWidget(chip(["Ctrl", "Win"], "dictate"), 0, Qt.AlignVCenter)
+        lay.addWidget(chip(["Ctrl", "Win", "⇧"], "voice search"), 0, Qt.AlignVCenter)
+        lay.addWidget(chip(["Ctrl", "Win", "Alt"], "voice organize"), 0, Qt.AlignVCenter)
+        return frame
+
     def setup_search_page(self):
         """Setup the clean Search page with hero heading and modern search bar."""
         search_page = QWidget()
@@ -1075,8 +1129,9 @@ class MainWindow(QMainWindow):
         hero_layout.setSpacing(12)
         
         # Hero heading
-        self.hero_heading = QLabel("What are you looking for?")
+        self.hero_heading = QLabel("What are you <span style='color:#7C4DFF;'>looking</span> for?")
         self.hero_heading.setObjectName("heroHeading")
+        self.hero_heading.setTextFormat(Qt.RichText)
         self.hero_heading.setAlignment(Qt.AlignCenter)
         hero_layout.addWidget(self.hero_heading)
         
@@ -1119,8 +1174,13 @@ class MainWindow(QMainWindow):
         search_bar_layout.addWidget(self.ai_label)
         
         # Round search button - larger
-        self.search_button = QPushButton("→")
+        # Drawn arrow icon (the "→" text glyph was getting clipped by the button).
+        from app.ui.icons import line_icon as _arrow_icon
+        from PySide6.QtCore import QSize as _ArrowQSize
+        self.search_button = QPushButton()
         self.search_button.setObjectName("searchSubmitBtnLarge")
+        self.search_button.setIcon(_arrow_icon("arrow", 22, on_color="#FFFFFF", off_color="#FFFFFF"))
+        self.search_button.setIconSize(_ArrowQSize(22, 22))
         self.search_button.setFixedSize(50, 50)
         self.search_button.setCursor(Qt.PointingHandCursor)
         search_bar_layout.addWidget(self.search_button)
@@ -1131,7 +1191,16 @@ class MainWindow(QMainWindow):
         search_row.addWidget(self.search_container)
         search_row.addStretch()
         page_layout.addLayout(search_row)
-        
+
+        # Voice-hotkey hint row (landing only) — waveform + Ctrl+Win chips.
+        self.voice_hint_row = self._build_voice_hint_row()
+        vhint_row = QHBoxLayout()
+        vhint_row.addStretch()
+        vhint_row.addWidget(self.voice_hint_row)
+        vhint_row.addStretch()
+        page_layout.addSpacing(18)
+        page_layout.addLayout(vhint_row)
+
         page_layout.addSpacing(40)
         
         # Bottom spacer for landing mode (hidden after search)
@@ -1364,11 +1433,13 @@ class MainWindow(QMainWindow):
         drop_layout.setAlignment(Qt.AlignCenter)
         drop_layout.setSpacing(16)
         
-        # Large icon
-        self.drop_icon = QLabel("📁")
+        # Large icon (drawn line-icon, replaces the old emoji glyph)
+        self.drop_icon = QLabel()
         self.drop_icon.setObjectName("dropIconLarge")
         self.drop_icon.setAlignment(Qt.AlignCenter)
-        self.drop_icon.setStyleSheet("font-size: 64px; background: transparent;")
+        from app.ui.icons import line_pixmap as _line_pixmap
+        self.drop_icon.setPixmap(_line_pixmap("folder_up", 46, "#7C4DFF"))
+        self.drop_icon.setStyleSheet("background: transparent; border: none;")
         drop_layout.addWidget(self.drop_icon, 0, Qt.AlignCenter)
         
         # Main text
@@ -1479,8 +1550,8 @@ class MainWindow(QMainWindow):
         self.custom_folders_list = QWidget()
         self.custom_folders_list_layout = QVBoxLayout(self.custom_folders_list)
         
-        # View Indexed Files button - prominent and centered
-        self.view_files_btn = QPushButton("View Indexed Files (0)")
+        # View Analyzed Files button - prominent and centered
+        self.view_files_btn = QPushButton("View Analyzed Files (0)")
         self.view_files_btn.setObjectName("viewFilesButton")
         self.view_files_btn.setCursor(Qt.PointingHandCursor)
         self.view_files_btn.setMinimumHeight(52)
@@ -1673,7 +1744,7 @@ class MainWindow(QMainWindow):
         
         # Create overlay dialog
         overlay = QDialog(self)
-        overlay.setWindowTitle("Indexed Files")
+        overlay.setWindowTitle("Analyzed Files")
         overlay.setObjectName("filesOverlay")
         overlay.setModal(True)
         overlay.resize(int(self.width() * 0.92), int(self.height() * 0.88))
@@ -1736,7 +1807,7 @@ class MainWindow(QMainWindow):
         title_container.setSpacing(2)
         title_container.setContentsMargins(0, 0, 0, 0)
         
-        title = QLabel("Indexed Files")
+        title = QLabel("Analyzed Files")
         title.setStyleSheet(f"font-size: 24px; font-weight: 600; color: #7C4DFF; background: transparent;")
         title_container.addWidget(title)
         
@@ -2232,10 +2303,10 @@ class MainWindow(QMainWindow):
         try:
             from app.core.database import file_index
             count = file_index.get_file_count()
-            self.view_files_btn.setText(f"View Indexed Files ({count})")
+            self.view_files_btn.setText(f"View Analyzed Files ({count})")
         except Exception as e:
             logger.error(f"Error updating file count: {e}")
-            self.view_files_btn.setText("View Indexed Files (0)")
+            self.view_files_btn.setText("View Analyzed Files (0)")
 
     def setup_organize_page(self):
         """Setup the AI-powered file organization page."""
@@ -2259,6 +2330,8 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(40, 30, 40, 30)
         layout.setSpacing(16)
 
+        # Line-icon section headers (replace the old emoji glyphs).
+        from app.ui.icons import icon_heading as _icon_heading
         # Style variables for settings (no cascading - applied individually)
         settings_title_style = "font-size: 15px; font-weight: 600; color: #7C4DFF; background: transparent; border: none;"
         settings_label_style = "color: #7A7A90; font-size: 13px; background: transparent; border: none;"
@@ -2282,9 +2355,8 @@ class MainWindow(QMainWindow):
         appearance_layout.setContentsMargins(20, 20, 20, 20)
         appearance_layout.setSpacing(12)
         
-        appearance_title = QLabel("🎨 Appearance")
-        appearance_title.setStyleSheet(settings_title_style)
-        appearance_layout.addWidget(appearance_title)
+        appearance_title_row, appearance_title = _icon_heading("appearance", "Appearance", settings_title_style)
+        appearance_layout.addWidget(appearance_title_row)
         
         theme_row = QHBoxLayout()
         theme_label = QLabel("Theme:")
@@ -2339,9 +2411,8 @@ class MainWindow(QMainWindow):
         help_layout.setContentsMargins(20, 20, 20, 20)
         help_layout.setSpacing(12)
         
-        help_title = QLabel("🎓 Help & Guidance")
-        help_title.setStyleSheet(settings_title_style)
-        help_layout.addWidget(help_title)
+        help_title_row, help_title = _icon_heading("book", "Help & Guidance", settings_title_style)
+        help_layout.addWidget(help_title_row)
         
         help_desc = QLabel("New to the app? Take a quick tour to learn the basics.")
         help_desc.setStyleSheet(settings_hint_style)
@@ -2388,9 +2459,8 @@ class MainWindow(QMainWindow):
         support_layout.setContentsMargins(20, 20, 20, 20)
         support_layout.setSpacing(12)
 
-        support_title = QLabel("💬 Support")
-        support_title.setStyleSheet(settings_title_style)
-        support_layout.addWidget(support_title)
+        support_title_row, support_title = _icon_heading("chat", "Support", settings_title_style)
+        support_layout.addWidget(support_title_row)
 
         support_desc = QLabel("Experiencing an issue? Email us directly:")
         support_desc.setStyleSheet(settings_hint_style)
@@ -2455,9 +2525,8 @@ class MainWindow(QMainWindow):
         qs_layout.setContentsMargins(20, 20, 20, 20)
         qs_layout.setSpacing(12)
         
-        qs_title = QLabel("🔍 Quick Search")
-        qs_title.setStyleSheet(settings_title_style)
-        qs_layout.addWidget(qs_title)
+        qs_title_row, qs_title = _icon_heading("search", "Quick Search", settings_title_style)
+        qs_layout.addWidget(qs_title_row)
         
         toggle_btn_style = """
             QPushButton {
@@ -2581,9 +2650,8 @@ class MainWindow(QMainWindow):
         search_layout.setContentsMargins(20, 20, 20, 20)
         search_layout.setSpacing(12)
         
-        search_title = QLabel("✨ Search Enhancements")
-        search_title.setStyleSheet(settings_title_style)
-        search_layout.addWidget(search_title)
+        search_title_row, search_title = _icon_heading("sparkle", "Search Enhancements", settings_title_style)
+        search_layout.addWidget(search_title_row)
         
         # Smart Rerank toggle
         gpt_row = QHBoxLayout()
@@ -2639,9 +2707,8 @@ class MainWindow(QMainWindow):
         account_layout.setContentsMargins(20, 20, 20, 20)
         account_layout.setSpacing(12)
         
-        account_title = QLabel("👤 Account")
-        account_title.setStyleSheet(settings_title_style)
-        account_layout.addWidget(account_title)
+        account_title_row, account_title = _icon_heading("user", "Account", settings_title_style)
+        account_layout.addWidget(account_title_row)
         
         # Email display
         email_row = QHBoxLayout()
@@ -2919,122 +2986,73 @@ class MainWindow(QMainWindow):
         self._apply_settings_theme_styles(theme_manager.current_theme)
 
     def setup_voice_page(self):
-        """Voice dictation page: push-to-talk button + live transcript.
+        """Voice page (index 3) — dictation sub-features as self-contained cards
+        (Shortcuts, Custom Words, Language, AI Cleanup, Mute, History), mirroring
+        the Mac layout. Dictation is triggered by the GLOBAL hotkey (Ctrl+Win,
+        +Shift = voice search, +Alt = voice organize), NOT an in-app button."""
+        from PySide6.QtWidgets import QScrollArea, QHBoxLayout as _QHBox
+        from app.ui.theme_manager import get_theme_colors, theme_manager
+        from app.ui.icons import line_pixmap
+        from app.ui.voice_cards.custom_words_card import VoiceCustomWordsCard
+        from app.ui.voice_cards.language_card import VoiceLanguageCard
+        from app.ui.voice_cards.cleanup_card import VoiceCleanupCard
+        from app.ui.voice_cards.mute_card import VoiceMuteCard
+        from app.ui.voice_cards.history_card import VoiceHistoryCard
 
-        The button is the reliable trigger everywhere (incl. Parallels VMs
-        where the global hotkey can't capture keys). The global hotkey
-        (default Right Ctrl) also runs for real-Windows users.
-        """
+        c = get_theme_colors()
+        scroll_area = QScrollArea()
+        scroll_area.setObjectName("voicePage")
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll_area.setFrameShape(QScrollArea.NoFrame)
+
         page = QWidget()
-        page.setObjectName("voicePage")
+        page.setObjectName("voiceContent")
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(40, 32, 40, 32)
+        layout.setContentsMargins(40, 30, 40, 30)
         layout.setSpacing(16)
 
-        heading = QLabel("Voice Dictation")
-        heading.setStyleSheet("font-size: 28px; font-weight: 700; color: #7C4DFF; background: transparent;")
-        layout.addWidget(heading)
+        # Header: mic line-icon + "Voice"
+        _trow = _QHBox(); _trow.setSpacing(10)
+        _ic = QLabel(); _ic.setPixmap(line_pixmap("mic", 22, "#7C4DFF"))
+        _ic.setStyleSheet("background: transparent; border: none;")
+        _trow.addWidget(_ic, 0, Qt.AlignVCenter)
+        title = QLabel("Voice")
+        title.setStyleSheet("font-family: 'Sora', 'SF Pro Display', sans-serif; font-size: 22px; "
+                            "font-weight: 700; color: #7C4DFF; background: transparent; border: none;")
+        _trow.addWidget(title, 0, Qt.AlignVCenter)
+        _trow.addStretch(1)
+        layout.addLayout(_trow)
+        self.voice_subtitle = QLabel("Hold Ctrl + Win to dictate anywhere; add Shift to search your files "
+                                     "by voice, or Alt to organize them.")
+        self.voice_subtitle.setWordWrap(True)
+        self.voice_subtitle.setStyleSheet(f"color: {c['text_muted']}; font-size: 13px; "
+                                           "background: transparent; border: none;")
+        layout.addWidget(self.voice_subtitle)
 
-        subtitle = QLabel("Hold the button and speak. Release, and your words are transcribed. "
-                          "On a regular Windows PC you can also hold the Right Ctrl key anywhere.")
-        subtitle.setWordWrap(True)
-        subtitle.setStyleSheet("font-size: 14px; color: #8B8B96; background: transparent;")
-        layout.addWidget(subtitle)
+        # Cards (Shortcuts built inline; the rest are self-contained widgets).
+        layout.addWidget(self._build_voice_shortcuts_card(c))
+        self.voice_custom_words_card = VoiceCustomWordsCard()
+        layout.addWidget(self.voice_custom_words_card)
+        self.voice_language_card = VoiceLanguageCard()
+        layout.addWidget(self.voice_language_card)
+        self.voice_cleanup_card = VoiceCleanupCard()
+        layout.addWidget(self.voice_cleanup_card)
+        self.voice_mute_card = VoiceMuteCard()
+        layout.addWidget(self.voice_mute_card)
+        self.voice_history_card = VoiceHistoryCard()
+        layout.addWidget(self.voice_history_card)
+        layout.addStretch()
 
-        # Mode selector (Dictate / Search / Organize) — picks what Hold-to-
-        # Dictate does. On a real Windows PC these also map to Right Ctrl,
-        # Right Ctrl+Shift, Right Ctrl+Alt.
-        self._voice_mode = "dictate"
-        self.voice_mode_btns = {}
-        mode_row = QHBoxLayout()
-        mode_row.setSpacing(8)
-        self._voice_mode_group = QButtonGroup(self)
-        self._voice_mode_group.setExclusive(True)
-        _mode_pill = """
-            QPushButton { background:#16161F; color:#B0B0C0; border:1px solid #2A2A3A;
-                          border-radius:10px; font-size:14px; font-weight:600; padding:8px 14px; }
-            QPushButton:hover { border-color:#7C4DFF; }
-            QPushButton:checked { background:#7C4DFF; color:white; border-color:#7C4DFF; }
-        """
-        for key, label in [("dictate", "💬 Dictate"), ("search", "🔍 Search"),
-                           ("organize", "🗂️ Organize")]:
-            b = QPushButton(label)
-            b.setCheckable(True)
-            b.setCursor(Qt.PointingHandCursor)
-            b.setMinimumHeight(40)
-            b.setStyleSheet(_mode_pill)
-            b.clicked.connect(lambda checked, k=key: self._set_voice_mode(k))
-            mode_row.addWidget(b)
-            self.voice_mode_btns[key] = b
-            self._voice_mode_group.addButton(b)
-        self.voice_mode_btns["dictate"].setChecked(True)
-        mode_row.addStretch()
-        layout.addLayout(mode_row)
+        scroll_area.setWidget(page)
+        self.page_stack.addWidget(scroll_area)   # Index 3 (Voice)
 
-        layout.addSpacing(8)
-
-        # Voice-reactive waveform (hidden until recording). Lives in a fixed-
-        # height slot above the button so the layout doesn't jump.
-        from app.ui.icons import AnimatedWaveform
-        wave_slot = QWidget()
-        wave_slot.setFixedHeight(76)
-        wave_row = QHBoxLayout(wave_slot)
-        wave_row.setContentsMargins(0, 0, 0, 0)
-        wave_row.addStretch()
-        self.voice_waveform = AnimatedWaveform(color="#7C4DFF", bars=9, width=260, height=64)
-        self.voice_waveform.setVisible(False)
-        wave_row.addWidget(self.voice_waveform)
-        wave_row.addStretch()
-        layout.addWidget(wave_slot)
-
-        # Record button — TAP to start, TAP again to stop & send (so you don't
-        # have to hold the mouse down while speaking a long instruction).
-        self._recording = False
-        self._voice_idle_style = """
-            QPushButton { background: qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #7C4DFF, stop:1 #9575FF);
-                          color:white; border:none; border-radius:16px; font-size:20px; font-weight:700; }
-            QPushButton:hover { background: qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #8B5EFF, stop:1 #A385FF); }
-        """
-        self._voice_rec_style = """
-            QPushButton { background:#E0464B; color:white; border:none; border-radius:16px;
-                          font-size:20px; font-weight:700; }
-            QPushButton:hover { background:#EF5257; }
-        """
-        self.voice_ptt_btn = QPushButton("🎤  Tap to Dictate")
-        self.voice_ptt_btn.setMinimumHeight(72)
-        self.voice_ptt_btn.setCursor(Qt.PointingHandCursor)
-        self.voice_ptt_btn.setStyleSheet(self._voice_idle_style)
-        layout.addWidget(self.voice_ptt_btn)
-
-        self.voice_status = QLabel("Ready.")
-        self.voice_status.setAlignment(Qt.AlignCenter)
-        self.voice_status.setStyleSheet("font-size: 14px; color: #8B8B96; background: transparent;")
-        layout.addWidget(self.voice_status)
-
-        layout.addSpacing(8)
-
-        result_label = QLabel("Transcript")
-        result_label.setStyleSheet("font-size: 13px; font-weight: 600; color: #B0B0C0; background: transparent;")
-        layout.addWidget(result_label)
-
-        self.voice_result = QTextEdit()
-        self.voice_result.setReadOnly(True)
-        self.voice_result.setPlaceholderText("Your transcribed words will appear here…")
-        self.voice_result.setStyleSheet("""
-            QTextEdit { background:#16161F; color:#E8E8F0; border:1px solid #2A2A3A;
-                        border-radius:12px; padding:12px; font-size:15px; }
-        """)
-        layout.addWidget(self.voice_result, 1)
-
-        self.page_stack.addWidget(page)
-
-        # Build the controller + wire the button (defer heavy import to here).
+        # Build the dictation controller. The trigger is the GLOBAL hotkey only
+        # (no in-app button). The live waveform/transcript are shown by the
+        # floating dictation overlay, not this page.
         try:
             from app.ui.dictation import DictationController
             self.dictation_controller = DictationController(main_window=self)
-            self.dictation_controller.transcript_ready.connect(self._on_voice_transcript)
-            self.dictation_controller.level.connect(self.voice_waveform.set_level)
-            self.dictation_controller.state_changed.connect(self._on_voice_state)
             # Voice Organize controller — drives the floating plan overlay.
             try:
                 from app.ui.voice_organize_controller import VoiceOrganizeController
@@ -3044,76 +3062,133 @@ class MainWindow(QMainWindow):
                     logger.info("[VOICE] organize controller wired")
             except Exception as e:
                 logger.error(f"[VOICE] organize controller init failed: {e}")
-            self.voice_ptt_btn.clicked.connect(self._on_voice_toggle)
-            # Start the global hotkey too (works on real Windows; harmless here).
             self.dictation_controller.start()
-            logger.info("[VOICE] page ready, controller started")
+            logger.info("[VOICE] page ready, controller started (hotkey trigger)")
         except Exception as e:
             logger.error(f"[VOICE] controller init failed: {e}")
-            self.voice_status.setText(f"Voice unavailable: {e}")
 
-    def _voice_idle_btn_text(self):
-        return {"dictate": "🎤  Tap to Dictate", "search": "🎤  Tap to Search",
-                "organize": "🎤  Tap to Organize"}.get(self._voice_mode, "🎤  Tap to Dictate")
+        # Re-theme the shortcut rows on theme toggle (cards theme themselves).
+        try:
+            theme_manager.theme_changed.connect(self._apply_voice_theme_styles)
+        except Exception as e:
+            logger.debug(f"[VOICE] theme hook failed: {e}")
 
-    def _set_voice_mode(self, mode: str):
-        self._voice_mode = mode
-        hints = {
-            "dictate": "Tap to dictate — your words paste into the focused app.",
-            "search": "Tap to search — speak what you're looking for.",
-            "organize": "Tap to organize — speak how you want files organized.",
-        }
-        self.voice_status.setText(hints.get(mode, "Ready."))
-        if not getattr(self, "_recording", False):
-            self.voice_ptt_btn.setText(self._voice_idle_btn_text())
+    def _build_voice_shortcuts_card(self, c):
+        """Shortcuts reference card: the three voice hotkeys with gradient icon
+        badges and Windows Ctrl key chips. Display-only (the actual trigger is the
+        global DictationHotkey)."""
+        from PySide6.QtWidgets import QFrame, QVBoxLayout, QHBoxLayout
+        from app.ui.icons import line_pixmap
+        self._voice_shortcut_rows = []   # (name_label, desc_label) re-themed on toggle
+        card = QFrame()
+        card.setObjectName("settingsCard")
+        card.setStyleSheet(
+            f"QFrame#settingsCard {{ background-color: {c.get('surface', '#111119')}; "
+            f"border: 1px solid {c.get('border', '#1C1C28')}; border-radius: 16px; }}"
+            "QFrame#settingsCard > QLabel { border: none; background: transparent; }"
+        )
+        self.voice_shortcuts_card = card
+        v = QVBoxLayout(card)
+        v.setContentsMargins(20, 18, 20, 18)
+        v.setSpacing(12)
 
-    def _on_voice_toggle(self):
-        """Tap to start; tap again to stop & send (replaces hold-to-talk so
-        there's an explicit button to click to end recording)."""
-        if not self._recording:
-            self._recording = True
-            logger.info(f"[VOICE] record START (mode={self._voice_mode})")
-            self.voice_status.setText("🔴 Listening… (tap Stop to send)")
+        trow = QHBoxLayout(); trow.setSpacing(9)
+        tic = QLabel(); tic.setPixmap(line_pixmap("keyboard", 16, "#7C4DFF"))
+        tic.setStyleSheet("background: transparent; border: none;")
+        trow.addWidget(tic, 0, Qt.AlignVCenter)
+        tt = QLabel("Shortcuts")
+        tt.setStyleSheet("font-family: 'Sora', 'SF Pro Display', sans-serif; font-size: 15px; "
+                         "font-weight: 600; color: #7C4DFF; background: transparent; border: none;")
+        trow.addWidget(tt, 0, Qt.AlignVCenter); trow.addStretch(1)
+        v.addLayout(trow)
+
+        rows = [
+            ("mic", "Dictation", "Hold to talk — pastes into the focused app", ["Ctrl", "Win"]),
+            ("search", "Voice search", "Ask out loud, jump to the file", ["Ctrl", "Win", "⇧"]),
+            ("folder", "Voice organize", "Describe a cleanup, review the plan", ["Ctrl", "Win", "Alt"]),
+        ]
+        for icon_name, name, desc, keys in rows:
+            v.addWidget(self._voice_shortcut_row(icon_name, name, desc, keys, c))
+        return card
+
+    def _voice_shortcut_row(self, icon_name, name, desc, keys, c):
+        from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout
+        from app.ui.icons import line_pixmap
+        row = QWidget(); row.setStyleSheet("background: transparent;")
+        h = QHBoxLayout(row); h.setContentsMargins(0, 0, 0, 0); h.setSpacing(13)
+
+        badge = QLabel(); badge.setFixedSize(38, 38)
+        badge.setPixmap(line_pixmap(icon_name, 18, "#FFFFFF"))
+        badge.setAlignment(Qt.AlignCenter)
+        badge.setStyleSheet("QLabel { background: qlineargradient(x1:0, y1:0, x2:1, y2:1, "
+                            "stop:0 #B28BFF, stop:1 #6D28D9); border-radius: 10px; }")
+        h.addWidget(badge, 0, Qt.AlignVCenter)
+
+        col = QVBoxLayout(); col.setContentsMargins(0, 0, 0, 0); col.setSpacing(1)
+        nm = QLabel(name)
+        nm.setStyleSheet(f"font-weight: 600; font-size: 13.5px; color: {c.get('text', '#E8E8F0')}; "
+                         "background: transparent; border: none;")
+        ds = QLabel(desc)
+        ds.setStyleSheet(f"font-size: 12px; color: {c.get('text_muted', '#7A7A90')}; "
+                         "background: transparent; border: none;")
+        if hasattr(self, '_voice_shortcut_rows'):
+            self._voice_shortcut_rows.append((nm, ds))
+        col.addWidget(nm); col.addWidget(ds)
+        h.addLayout(col, 1)
+
+        kbd_style = ("QLabel { background: rgba(124,77,255,0.10); "
+                     "border: 1px solid rgba(124,77,255,0.28); border-radius: 6px; "
+                     "color: #7C4DFF; font-size: 11px; font-weight: 600; padding: 2px 7px; }")
+        for k in keys:
+            kl = QLabel(k); kl.setStyleSheet(kbd_style)
+            h.addWidget(kl, 0, Qt.AlignVCenter)
+        return row
+
+    def _apply_voice_theme_styles(self, *_):
+        """Re-theme the Voice page on theme toggle: the inline shortcut card +
+        each self-contained card (via its apply_theme()). STYLING only."""
+        try:
+            from app.ui.theme_manager import get_theme_colors
+            c = get_theme_colors()
+        except Exception:
+            return
+        # Each voice card restyles itself.
+        for card_attr in ("voice_custom_words_card", "voice_language_card",
+                          "voice_cleanup_card", "voice_mute_card", "voice_history_card"):
+            _cd = getattr(self, card_attr, None)
+            if _cd is not None and hasattr(_cd, "apply_theme"):
+                try:
+                    _cd.apply_theme()
+                except Exception:
+                    pass
+        card = getattr(self, "voice_shortcuts_card", None)
+        if card is not None:
+            card.setStyleSheet(
+                f"QFrame#settingsCard {{ background-color: {c.get('surface', '#111119')}; "
+                f"border: 1px solid {c.get('border', '#1C1C28')}; border-radius: 16px; }}"
+                "QFrame#settingsCard > QLabel { border: none; background: transparent; }"
+            )
+        for nm, ds in getattr(self, "_voice_shortcut_rows", []):
             try:
-                self.dictation_controller.begin_dictation(self._voice_mode)
-            except Exception as e:
-                logger.error(f"[VOICE] begin failed: {e}")
-                self._recording = False
-        else:
-            self._recording = False
-            logger.info("[VOICE] record STOP (sending)")
-            self.voice_status.setText("⏳ Transcribing…")
-            # Reset the button immediately — recording is over; _on_voice_state
-            # ('idle') will also run when the transcript lands.
-            self.voice_ptt_btn.setText(self._voice_idle_btn_text())
-            self.voice_ptt_btn.setStyleSheet(self._voice_idle_style)
-            try:
-                self.dictation_controller.end_dictation()
-            except Exception as e:
-                logger.error(f"[VOICE] end failed: {e}")
+                nm.setStyleSheet(f"font-weight: 600; font-size: 13.5px; color: {c.get('text', '#E8E8F0')}; "
+                                 "background: transparent; border: none;")
+                ds.setStyleSheet(f"font-size: 12px; color: {c.get('text_muted', '#7A7A90')}; "
+                                 "background: transparent; border: none;")
+            except Exception:
+                pass
+        sub = getattr(self, "voice_subtitle", None)
+        if sub is not None:
+            sub.setStyleSheet(f"color: {c.get('text_muted', '#7A7A90')}; font-size: 13px; "
+                              "background: transparent; border: none;")
 
-    def _on_voice_transcript(self, text: str, mode: str):
-        logger.info(f"[VOICE] transcript (mode={mode}): {text!r}")
-        self.voice_status.setText("Ready.")
-        if text:
-            cur = self.voice_result.toPlainText()
-            self.voice_result.setPlainText((cur + "\n" + text).strip() if cur else text)
-        else:
-            self.voice_status.setText("No speech detected — try again, louder.")
-
-    def _on_voice_state(self, state: str):
-        """Show the reactive waveform + the red Stop button while listening;
-        restore the idle record button when done."""
-        if state == "listening":
-            self.voice_waveform.setVisible(True)
-            self.voice_ptt_btn.setText("⏹  Stop & Send")
-            self.voice_ptt_btn.setStyleSheet(self._voice_rec_style)
-        else:
-            # Transcript arrived / error — recording is over.
-            self._recording = False
-            self.voice_waveform.setVisible(False)
-            self.voice_ptt_btn.setText(self._voice_idle_btn_text())
-            self.voice_ptt_btn.setStyleSheet(self._voice_idle_style)
+    def _on_dictation_saved(self):
+        """A dictation was just saved — refresh the Voice History card."""
+        try:
+            card = getattr(self, "voice_history_card", None)
+            if card is not None and hasattr(card, "refresh"):
+                card.refresh()
+        except Exception:
+            pass
 
     def _update_theme_button(self):
         """Update the theme toggle button text and state."""
@@ -5768,7 +5843,7 @@ Move Plan Summary:
         
         # Create custom styled dialog
         dialog = QDialog(self)
-        dialog.setWindowTitle("Index Entire PC")
+        dialog.setWindowTitle("Analyze Entire PC")
         dialog.setObjectName("styledWarningDialog")
         dialog.setFixedSize(460, 420)
         dialog.setWindowFlags(Qt.Dialog | Qt.FramelessWindowHint)
@@ -6784,7 +6859,9 @@ Move Plan Summary:
         """Show loading state on search bar (like ChatGPT/Claude)."""
         # Change button to loading spinner
         if hasattr(self, 'search_button'):
+            from PySide6.QtGui import QIcon as _QIcon
             self._original_btn_text = self.search_button.text()
+            self.search_button.setIcon(_QIcon())   # hide the arrow while loading
             self.search_button.setText("⏳")
             self.search_button.setEnabled(False)
         
@@ -6809,7 +6886,9 @@ Move Plan Summary:
         """Hide loading state and restore normal search bar."""
         # Restore button
         if hasattr(self, 'search_button') and hasattr(self, '_original_btn_text'):
+            from app.ui.icons import line_icon as _arrow_icon
             self.search_button.setText(self._original_btn_text)
+            self.search_button.setIcon(_arrow_icon("arrow", 22, on_color="#FFFFFF", off_color="#FFFFFF"))
             self.search_button.setEnabled(True)
         
         # Restore AI label
@@ -7410,7 +7489,11 @@ Move Plan Summary:
         if hasattr(self, '_in_results_view') and self._in_results_view:
             return
         self._in_results_view = True
-        
+
+        # Hide the landing-only voice-hotkey hint strip.
+        if hasattr(self, 'voice_hint_row'):
+            self.voice_hint_row.setVisible(False)
+
         # Show the results container
         if hasattr(self, 'results_container'):
             self.results_container.setVisible(True)
@@ -7472,7 +7555,11 @@ Move Plan Summary:
         if not hasattr(self, '_in_results_view') or not self._in_results_view:
             return
         self._in_results_view = False
-        
+
+        # Restore the landing-only voice-hotkey hint strip.
+        if hasattr(self, 'voice_hint_row'):
+            self.voice_hint_row.setVisible(True)
+
         # Hide the results container
         if hasattr(self, 'results_container'):
             self.results_container.setVisible(False)
@@ -7833,7 +7920,7 @@ Move Plan Summary:
         c = get_theme_colors()
         
         confirm_dialog = QDialog(self)
-        confirm_dialog.setWindowTitle("Index Files")
+        confirm_dialog.setWindowTitle("Analyze Files")
         confirm_dialog.setModal(True)
         confirm_dialog.setFixedSize(400, 320)
 
@@ -8378,7 +8465,7 @@ Move Plan Summary:
             
             # Update the View Files button count
             if hasattr(self, 'view_files_btn'):
-                self.view_files_btn.setText(f"View Indexed Files ({len(rows)})")
+                self.view_files_btn.setText(f"View Analyzed Files ({len(rows)})")
             
         except Exception as e:
             QMessageBox.critical(self, "Debug Error", f"Error refreshing debug view:\n{e}")

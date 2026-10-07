@@ -243,6 +243,28 @@ def main():
     if icon_path.exists():
         app.setWindowIcon(QIcon(str(icon_path)))
 
+    # Load bundled brand fonts (Inter + Sora) BEFORE applying the theme, so the
+    # stylesheet's font-family rules resolve. Byte-based load (not path-based) is
+    # cross-platform-safe and works inside the frozen .exe (datas -> _MEIPASS).
+    try:
+        from PySide6.QtGui import QFontDatabase, QFont
+        from PySide6.QtCore import QByteArray
+        import app.ui as _appui
+        _fonts_dir = os.path.join(os.path.dirname(_appui.__file__), 'fonts')
+        for _fn in ('Inter-Regular.ttf', 'Inter-Medium.ttf', 'Inter-SemiBold.ttf',
+                    'Sora-SemiBold.ttf', 'Sora-Bold.ttf'):
+            try:
+                with open(os.path.join(_fonts_dir, _fn), 'rb') as _fh:
+                    QFontDatabase.addApplicationFontFromData(QByteArray(_fh.read()))
+            except Exception:
+                pass
+        # Default body font = Inter (headings use Sora via the stylesheet).
+        _appfont = app.font()
+        _appfont.setFamily("Inter")
+        app.setFont(_appfont)
+    except Exception as e:
+        print(f"Font load failed: {e}")
+
     # Apply saved theme (dark/light)
     try:
         from app.ui.theme_manager import theme_manager

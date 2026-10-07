@@ -4961,6 +4961,80 @@ class _VoiceApplyWorker(QThread):
             self.failed.emit(str(e))
 
 
+class ApplyMovesWorker(QThread):
+    """Apply a move plan — moves + batched DB path update + empty-folder cleanup
+    — entirely OFF the UI thread, so a big organize never freezes or crashes the
+    window (the manual 'Organize' path used to run all of this synchronously).
+
+    Only filesystem + DB work runs here, which is thread-safe in this app:
+    apply_moves is pure filesystem; the DB opens a fresh sqlite connection per
+    call; and the empty-folder helpers (_collect_empty_folders /
+    _scan_all_empty_folders / _delete_folders) only touch the filesystem — never
+    Qt widgets. Every widget/dialog/status update stays on the UI thread in the
+    finished handler."""
+    progress = Signal(int, int)        # (done, total)
+    result_ready = Signal(object)      # result dict
+    failed = Signal(str)
+
+    def __init__(self, move_plan: list, moves_snapshot: list,
+                 destination_path, page):
+        super().__init__()
+        self._move_plan = move_plan          # dicts fed to apply_moves
+        self._moves = moves_snapshot         # [{file_id, source_path, destination_path}]
+        self._destination_path = destination_path
+        self._page = page                    # for the FS-only cleanup helpers
+
+    def run(self):
+        try:
+            from app.core.apply import apply_moves
+            from app.core.database import file_index
+
+            success, errors, log_file, renamed_count = apply_moves(
+                self._move_plan, progress_cb=lambda d, t: self.progress.emit(d, t))
+
+            # DB path updates, batched into one transaction. Mirror the manual
+            # flow exactly: on full success update every move; on partial update
+            # only the moves whose destination actually exists now.
+            if success:
+                updates = [(m["file_id"], m["destination_path"]) for m in self._moves]
+            else:
+                updates = [(m["file_id"], m["destination_path"]) for m in self._moves
+                           if Path(m["destination_path"]).exists()]
+            paths_updated = file_index.update_file_paths_batch(updates)
+
+            # Empty-folder cleanup — only on full success (parity with manual).
+            removed_count = 0
+            if success:
+                try:
+                    source_folders = {Path(m["source_path"]).parent for m in self._moves}
+                    all_empty = list({*self._page._collect_empty_folders(source_folders),
+                                      *self._page._scan_all_empty_folders()})
+                    all_empty.sort(key=lambda p: len(Path(p).parts), reverse=True)
+                    if all_empty:
+                        removed_count = self._page._delete_folders(all_empty)
+                        # Second pass: parents emptied once their children were deleted.
+                        parent_candidates = {
+                            str(Path(p).parent) for p in all_empty
+                            if len(Path(p).parent.parts) > 2
+                        }
+                        parent_candidates -= set(all_empty)
+                        if parent_candidates:
+                            removed_count += self._page._delete_folders(list(parent_candidates))
+                except Exception as e:
+                    logger.warning(f"Empty-folder cleanup failed: {e}")
+
+            self.result_ready.emit({
+                "success": success,
+                "errors": errors,
+                "log_file": log_file,
+                "renamed_count": renamed_count,
+                "paths_updated": paths_updated,
+                "removed_count": removed_count,
+            })
+        except Exception as e:
+            self.failed.emit(str(e))
+
+
 class _VoiceIndexWorker(QThread):
     """Index a folder's UNINDEXED media files off the UI thread. Already-indexed
     files are skipped (fast). Emits (new_indexed, not_indexed_remaining).
@@ -5039,7 +5113,8 @@ class _VoiceIndexWorker(QThread):
 
             # 2) AI-analyse in parallel; add_file serially as results land.
             completed = 0
-            with ThreadPoolExecutor(max_workers=min(MAX_CONCURRENT_AI_REQUESTS, total)) as ex:
+            from app.core.search import recommended_index_workers as _rec_workers
+            with ThreadPoolExecutor(max_workers=_rec_workers(total)) as ex:
                 futs = {
                     ex.submit(search_service._process_single_file,
                               {"source_path": str(p), "name": p.name}, root, False, None): p
@@ -5267,10 +5342,10 @@ class OrganizePage(QWidget):
         instruction_layout.setContentsMargins(20, 20, 20, 20)
         instruction_layout.setSpacing(12)
         
-        # Section title
-        inst_title = QLabel("✨ Your Instruction")
-        inst_title.setStyleSheet("font-size: 16px; font-weight: 600; color: #7C4DFF; background: transparent;")
-        instruction_layout.addWidget(inst_title)
+        # Section title (line-icon heading, replaces the old emoji glyph)
+        from app.ui.icons import icon_heading as _icon_heading
+        _inst_hdr, inst_title = _icon_heading("sparkle", "Your Instruction", "font-size: 16px; font-weight: 600; color: #7C4DFF; background: transparent;")
+        instruction_layout.addWidget(_inst_hdr)
         
         # Input row with text field and mic button
         input_row = QHBoxLayout()
@@ -5357,8 +5432,10 @@ class OrganizePage(QWidget):
         dest_layout.setContentsMargins(20, 16, 20, 16)
         dest_layout.setSpacing(16)
         
-        dest_icon = QLabel("📂")
-        dest_icon.setStyleSheet("font-size: 24px; background: transparent;")
+        dest_icon = QLabel()
+        from app.ui.icons import line_pixmap as _line_pixmap
+        dest_icon.setPixmap(_line_pixmap("folder", 22, "#7C4DFF"))
+        dest_icon.setStyleSheet("background: transparent; border: none;")
         dest_layout.addWidget(dest_icon)
         
         dest_info = QVBoxLayout()
@@ -5654,15 +5731,14 @@ class OrganizePage(QWidget):
         plan_layout.setSpacing(12)
         
         # Simple title matching input card style
-        plan_title = QLabel("📁 Proposed Organization")
-        plan_title.setStyleSheet("""
-            font-family: "Segoe UI", sans-serif;
+        from app.ui.icons import icon_heading as _icon_heading
+        _plan_hdr, plan_title = _icon_heading("folder", "Proposed Organization", """
             font-weight: 600;
             font-size: 16px;
             color: #7C4DFF;
             background: transparent;
         """)
-        plan_layout.addWidget(plan_title)
+        plan_layout.addWidget(_plan_hdr)
         
         self.plan_tree = QTreeWidget()
         self.plan_tree.setHeaderHidden(True)
@@ -7492,15 +7568,15 @@ class OrganizePage(QWidget):
             # at the old paths -> inflated/"invented" file counts. plan_to_moves
             # already resolved collision-free destination_paths, so this is the
             # file's real final location.
-            updated = 0
-            for m in self.current_moves:
-                dest = m["destination_path"]
-                if success or Path(dest).exists():
-                    try:
-                        if file_index.update_file_path(m["file_id"], dest):
-                            updated += 1
-                    except Exception:
-                        pass
+            # Batched into one transaction (same semantics as before: on full
+            # success update every move, otherwise only those whose destination
+            # exists). Far fewer DB round-trips than the old per-file loop.
+            if success:
+                _updates = [(m["file_id"], m["destination_path"]) for m in self.current_moves]
+            else:
+                _updates = [(m["file_id"], m["destination_path"]) for m in self.current_moves
+                            if Path(m["destination_path"]).exists()]
+            updated = file_index.update_file_paths_batch(_updates)
             logger.info(f"[VOICE ORGANIZE] updated {updated}/{n} DB paths after move")
 
             # Save undo info (parity with the manual flow's last_organization).
@@ -8261,13 +8337,60 @@ Caption: {file_info.get('caption', 'none')}
         self.generate_button.setEnabled(False)
         self.status_label.setText("Moving files...")
         
-        success, errors, log_file, renamed_count = apply_moves(move_plan)
-        
+        # Apply OFF the UI thread so a big move never freezes / crashes the
+        # window. All UI work (undo, dialogs, status, buttons) happens here or in
+        # the finished handler; the worker does only filesystem + DB work.
+        self._apply_move_count = len(move_plan)
+        self._apply_progress_last = 0
+        moves_snapshot = [{
+            "file_id": m["file_id"],
+            "source_path": m["source_path"],
+            "destination_path": m["destination_path"],
+        } for m in self.current_moves]
+
+        self._apply_worker = ApplyMovesWorker(
+            move_plan, moves_snapshot, self.destination_path, self)
+        self._apply_worker.progress.connect(self._on_apply_progress)
+        self._apply_worker.result_ready.connect(self._on_manual_apply_finished)
+        self._apply_worker.failed.connect(self._on_manual_apply_failed)
+        self._apply_worker.start()
+
+    def _on_apply_progress(self, done: int, total: int):
+        """Throttled progress-bar update during a move (every ~25 files)."""
+        try:
+            if done - self._apply_progress_last >= 25 or done >= total:
+                self._apply_progress_last = done
+                self.progress_bar.setValue(done)
+        except Exception:
+            pass
+
+    def _on_manual_apply_failed(self, msg: str):
+        """Worker raised — restore the UI so the user can retry."""
         self.progress_bar.setVisible(False)
         self.generate_button.setEnabled(True)
-        
+        self.apply_button.setEnabled(True)
+        self.status_label.setText("Move failed")
+        ModernInfoDialog.show_warning(
+            self, title="Organization Failed",
+            message="The move could not be completed.",
+            details=[msg], info_text="Check the log file for more details.")
+
+    def _on_manual_apply_finished(self, result: dict):
+        """Runs on the UI thread after the worker finishes the move + DB + cleanup.
+        Preserves the exact behaviour of the old synchronous path."""
+        success = result.get("success", False)
+        errors = result.get("errors", [])
+        log_file = result.get("log_file", "")
+        renamed_count = result.get("renamed_count", 0)
+        paths_updated = result.get("paths_updated", 0)
+        removed_count = result.get("removed_count", 0)
+        move_count = getattr(self, "_apply_move_count", len(self.current_moves))
+
+        self.progress_bar.setVisible(False)
+        self.generate_button.setEnabled(True)
+
         if success:
-            # Save undo information BEFORE updating database paths
+            # Save undo info (current_moves is still intact until clear_plan()).
             self.last_organization = []
             for m in self.current_moves:
                 self.last_organization.append({
@@ -8277,47 +8400,22 @@ Caption: {file_info.get('caption', 'none')}
                 })
             self.undo_button.setEnabled(True)
             logger.info(f"Saved {len(self.last_organization)} moves for potential undo")
-            
-            paths_updated = 0
-            for m in self.current_moves:
-                if file_index.update_file_path(m["file_id"], m["destination_path"]):
-                    paths_updated += 1
-            
-            logger.info(f"Updated {paths_updated}/{len(self.current_moves)} file paths in database")
-            
-            # Collect source folders (where files came from) and scan destination too
-            source_folders = {Path(m["source_path"]).parent for m in self.current_moves}
-            empty_from_sources = self._collect_empty_folders(source_folders)
-            empty_from_dest = self._scan_all_empty_folders()
-            all_empty = list({*empty_from_sources, *empty_from_dest})
-            all_empty.sort(key=lambda p: len(Path(p).parts), reverse=True)
+            logger.info(f"Updated {paths_updated} file paths in database")
 
             cleanup_msg = ""
-            if all_empty:
-                removed_count = self._delete_folders(all_empty)
-
-                # Second pass: parents that became empty after their children were deleted
-                parent_candidates = {
-                    str(Path(p).parent) for p in all_empty
-                    if len(Path(p).parent.parts) > 2
-                }
-                parent_candidates -= set(all_empty)
-                if parent_candidates:
-                    removed_count += self._delete_folders(list(parent_candidates))
-
-                if removed_count > 0:
-                    cleanup_msg = f"\n\nDeleted {removed_count} empty folder(s)."
+            if removed_count > 0:
+                cleanup_msg = f"\n\nDeleted {removed_count} empty folder(s)."
 
             # Build details list for success dialog
             details = [
-                f"Organized {len(move_plan)} file(s)",
+                f"Organized {move_count} file(s)",
                 "File paths updated in database"
             ]
             if renamed_count > 0:
                 details.append(f"{renamed_count} file(s) renamed to avoid duplicates")
             if cleanup_msg:
                 details.append(cleanup_msg.strip())
-            
+
             ModernInfoDialog.show_info(
                 self,
                 title="Organization Complete",
@@ -8330,20 +8428,13 @@ Caption: {file_info.get('caption', 'none')}
             self.clear_plan()
             self._update_file_count()
         else:
-            paths_updated = 0
-            for m in self.current_moves:
-                dest_path = Path(m["destination_path"])
-                if dest_path.exists():
-                    if file_index.update_file_path(m["file_id"], m["destination_path"]):
-                        paths_updated += 1
-            
             logger.info(f"Partial success: Updated {paths_updated} file paths in database")
-            
+
             # Build error details (first 5 errors)
             error_details = errors[:5]
             if len(errors) > 5:
                 error_details.append(f"... and {len(errors) - 5} more errors")
-            
+
             ModernInfoDialog.show_warning(
                 self,
                 title="Partial Failure",
@@ -8584,7 +8675,7 @@ Caption: {file_info.get('caption', 'none')}
                 real_contents = [p for p in folder.iterdir() if p.name not in _META]
                 if not real_contents:
                     empty_folders.append(str(folder))
-                    logger.info(f"Found empty source folder: {folder}")
+                    logger.debug(f"Found empty source folder: {folder}")
 
                     # Recursively check parent
                     check_folder_and_parents(folder.parent, min_depth)
@@ -8636,7 +8727,7 @@ Caption: {file_info.get('caption', 'none')}
                     real_contents = [p for p in folder.iterdir() if p.name not in _META]
                     if not real_contents:
                         empty_folders.append(str(folder))
-                        logger.info(f"Found empty folder: {folder}")
+                        logger.debug(f"Found empty folder: {folder}")
                 except OSError as e:
                     logger.debug(f"Could not check folder {folder}: {e}")
                 except Exception as e:

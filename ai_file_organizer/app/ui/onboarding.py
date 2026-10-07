@@ -91,8 +91,10 @@ class OnboardingAnimation(QWidget):
         elif self._step == 4:
             self._draw_index(painter)
         elif self._step == 5:
-            self._draw_settings(painter)
+            self._draw_voice(painter)
         elif self._step == 6:
+            self._draw_settings(painter)
+        elif self._step == 7:
             self._draw_ready(painter)
         
         painter.end()
@@ -477,7 +479,69 @@ class OnboardingAnimation(QWidget):
         p.setFont(font)
         p.drawText(QRectF(0, h - 28, w, 20), Qt.AlignCenter, f"Indexing... {pct}%")
 
-    # ── Step 5: Settings ─────────────────────────────
+    # ── Step 5: Voice ────────────────────────────────
+    def _draw_voice(self, p: QPainter):
+        t = self._frame / 60.0
+        w, h = self.width(), self.height()
+        mic_cx, cy = w * 0.33, h / 2 - 8
+
+        # Pulsing sound-wave rings emanating from the mic (both sides).
+        for i in range(3):
+            phase = (t * 0.85 + i * 0.4) % 1.2
+            r = 24 + phase * 40
+            alpha = int(max(0, 150 * (1 - phase / 1.2)))
+            col = QColor(self._purple); col.setAlpha(alpha)
+            p.setPen(QPen(col, 2.5)); p.setBrush(Qt.NoBrush)
+            p.drawArc(QRectF(mic_cx - r, cy - r, 2 * r, 2 * r), int(-50 * 16), int(100 * 16))
+            p.drawArc(QRectF(mic_cx - r, cy - r, 2 * r, 2 * r), int(130 * 16), int(100 * 16))
+
+        # Mic body (gradient capsule) + cradle + stand.
+        grad = QLinearGradient(mic_cx, cy - 20, mic_cx, cy + 10)
+        grad.setColorAt(0, QColor("#B28BFF")); grad.setColorAt(1, QColor("#6D28D9"))
+        p.setPen(Qt.NoPen); p.setBrush(grad)
+        p.drawRoundedRect(QRectF(mic_cx - 10, cy - 22, 20, 32), 10, 10)
+        p.setPen(QPen(self._purple, 2.5)); p.setBrush(Qt.NoBrush)
+        p.drawArc(QRectF(mic_cx - 16, cy - 14, 32, 32), int(200 * 16), int(140 * 16))
+        p.setPen(QPen(self._purple, 2.5, Qt.SolidLine, Qt.RoundCap))
+        p.drawLine(QPointF(mic_cx, cy + 18), QPointF(mic_cx, cy + 26))
+        p.drawLine(QPointF(mic_cx - 7, cy + 26), QPointF(mic_cx + 7, cy + 26))
+
+        # Reactive waveform bars to the right (the 'listening' motif).
+        bars, bx0, gap = 9, w * 0.56, 11
+        for i in range(bars):
+            amp = 0.5 + 0.5 * math.sin(t * 5 + i * 0.7)
+            bh = 8 + amp * 34
+            x = bx0 + i * gap
+            bg = QLinearGradient(x, cy - bh / 2, x, cy + bh / 2)
+            bg.setColorAt(0, QColor("#B39DFF")); bg.setColorAt(1, QColor("#7C4DFF"))
+            p.setPen(QPen(bg, 4, Qt.SolidLine, Qt.RoundCap))
+            p.drawLine(QPointF(x, cy - bh / 2), QPointF(x, cy + bh / 2))
+
+        # Caption: [Ctrl] + [Win] key chips, centered.
+        p.setFont(QFont("Segoe UI", 8, QFont.Bold))
+        fm = p.fontMetrics()
+        keys = ["Ctrl", "Win"]
+        chip_ws = [fm.horizontalAdvance(k) + 16 for k in keys]
+        plus_w = 14
+        tail = "  to dictate"
+        total = sum(chip_ws) + plus_w + fm.horizontalAdvance(tail) + 6
+        x = (w - total) / 2
+        cap_y = h - 26
+        for i, k in enumerate(keys):
+            cw = chip_ws[i]
+            p.setPen(Qt.NoPen); p.setBrush(QColor(124, 77, 255, 36))
+            p.drawRoundedRect(QRectF(x, cap_y, cw, 18), 5, 5)
+            p.setPen(QPen(QColor(124, 77, 255, 120), 1)); p.setBrush(Qt.NoBrush)
+            p.drawRoundedRect(QRectF(x + 0.5, cap_y + 0.5, cw - 1, 17), 5, 5)
+            p.setPen(self._purple); p.drawText(QRectF(x, cap_y, cw, 18), Qt.AlignCenter, k)
+            x += cw
+            if i < len(keys) - 1:
+                p.setPen(self._purple); p.drawText(QRectF(x, cap_y, plus_w, 18), Qt.AlignCenter, "+")
+                x += plus_w
+        p.setPen(self._gray)
+        p.drawText(QRectF(x + 4, cap_y, fm.horizontalAdvance(tail) + 10, 18), Qt.AlignVCenter | Qt.AlignLeft, tail.strip())
+
+    # ── Step 6: Settings ─────────────────────────────
     def _draw_settings(self, p: QPainter):
         t = self._frame / 60.0
         w, h = self.width(), self.height()
@@ -562,7 +626,7 @@ class OnboardingAnimation(QWidget):
             p.setFont(font)
             p.drawText(QRectF(px, py, 44, 20), Qt.AlignCenter, pat)
 
-    # ── Step 6: Ready ────────────────────────────────
+    # ── Step 7: Ready ────────────────────────────────
     def _draw_ready(self, p: QPainter):
         t = self._frame / 60.0
         w, h = self.width(), self.height()
@@ -655,8 +719,8 @@ class OnboardingOverlay(QDialog):
         self.is_minimized = False  # For "Try It" mode
         
         # Steps definition with shorter, bullet-point text
-        # nav_index: 0=Search, 1=Organize, 2=Index Files, 3=Settings
-        # highlight: attribute name on main_window to spotlight
+        # nav_index: 0=Search, 1=Organize, 2=Analyze Files, 3=Voice, 4=Settings
+        # highlight: attribute name on main_window to spotlight (dotted path ok)
         self.steps = [
             {
                 "title": "Welcome to Filect! 🎉",
@@ -664,7 +728,7 @@ class OnboardingOverlay(QDialog):
                 "nav_index": None,
                 "button_text": "Let's Go!",
                 "show_try_it": False,
-                "highlight": None
+                "highlight": "__full_dim__"
             },
             {
                 "title": "🔍 Smart Search",
@@ -694,28 +758,36 @@ class OnboardingOverlay(QDialog):
             },
             {
                 "title": "📁 Index Files",
-                "description": "• AI learns about your files first\n• Click \"Add Folder\" to start\n• Required before search/organize",
+                "description": "• AI learns about your files first\n• Drop a folder here, or click to browse\n• Required before search/organize",
                 "nav_index": 2,
                 "button_text": "Next",
                 "show_try_it": True,
-                "highlight": None
+                "highlight": "drop_zone"
+            },
+            {
+                "title": "🎤 Talk to Filect",
+                "description": "• Hold Ctrl+Win to dictate anywhere\n• Add Shift to search, Alt to organize — by voice\n• Custom words, language & cleanup live here",
+                "nav_index": 3,
+                "button_text": "Next",
+                "show_try_it": False,
+                "highlight": "voice_shortcuts_card"
             },
             {
                 "title": "⚙️ Settings",
                 "description": "• Protect files from being moved\n• Add exclusion patterns (.json, .py)\n• Configure app behavior",
-                "nav_index": 3,
+                "nav_index": 4,
                 "button_text": "Next",
                 "show_try_it": False,
-                "highlight": None
+                "highlight": "exclusion_input"
             },
             {
-                "title": "✅ You're Ready!",
-                "description": "• Press Ctrl+Alt+H for quick search\n• Check History for past actions\n• Pin files to lock them in place",
+                "title": "✅ Organize something now",
+                "description": "• Type what you want in plain English\n• e.g. \"group my screenshots by month\"\n• Then Generate Plan & apply",
                 "nav_index": 1,
                 "sub_tab": 0,
-                "button_text": "Start Using the App",
+                "button_text": "Start Organizing",
                 "show_try_it": False,
-                "highlight": None
+                "highlight": "organize_page.instruction_input"
             }
         ]
         
@@ -961,7 +1033,7 @@ class OnboardingOverlay(QDialog):
     # ``onboarding_step_viewed`` / ``onboarding_dismissed`` events.
     _STEP_SLUGS = [
         "welcome", "smart_search", "organize_files",
-        "auto_organize", "index_files", "settings", "ready",
+        "auto_organize", "index_files", "voice", "settings", "ready",
     ]
 
     def _update_step(self):
@@ -1031,7 +1103,19 @@ class OnboardingOverlay(QDialog):
             if self.spotlight:
                 self.spotlight.hide()
             return
-        
+
+        # Full-screen dim with NO hole — used on the Welcome step so the whole
+        # app fades back and attention lands on the onboarding card itself.
+        if highlight_attr == "__full_dim__":
+            if not self.spotlight:
+                self.spotlight = SpotlightOverlay(self.main_window)
+            self.spotlight.setGeometry(self.main_window.rect())
+            self.spotlight.set_spotlight(None)   # None -> paintEvent fills the whole rect
+            self.spotlight.show()
+            self.spotlight.raise_()
+            self.raise_()   # keep the onboarding card above the dim
+            return
+
         # Get the widget to highlight - supports dot-path like "organize_page.content_stack"
         target_widget = None
         parts = highlight_attr.split(".")

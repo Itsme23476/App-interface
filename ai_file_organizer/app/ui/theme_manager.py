@@ -48,36 +48,38 @@ _DARK_COLORS = {
 }
 
 _LIGHT_COLORS = {
-    "bg":               "#FAFBFC",
+    # Dark-violet-family LIGHT theme: lilac-grey page, white cards, soft lilac borders.
+    # Accent stays #7C4DFF (handled outside this dict); purple tints live in purple_light_*.
+    "bg":               "#F3F1FB",
     "surface":          "#FFFFFF",
     "card":             "#FFFFFF",
-    "border":           "#E8E8E8",
-    "border_strong":    "#D0D0D0",
-    "text":             "#1A1A1A",
-    "text_secondary":   "#666666",
-    "text_muted":       "#888888",
-    "text_disabled":    "#888888",
-    "input_bg":         "#FFFFFF",
-    "hover":            "#F5F5F5",
-    "pressed":          "#E8E8E8",
-    "tab_unchecked_bg": "#FFFFFF",
-    "tab_unchecked_border": "#E0E0E0",
-    "tab_unchecked_text": "#666666",
-    "tab_unchecked_hover": "#F5F5F5",
-    "danger_bg":        "#FFF0F0",
-    "danger_hover":     "#FFEBEE",
-    "danger_border":    "#FFCCCC",
-    "danger_text":      "#CC6666",
-    "purple_light_bg":  "#E8DFFF",
-    "purple_light_hover":"#EDE7FF",
-    "purple_pressed":   "#E8E0FF",
-    "scrollbar_bg":     "#F0F0F0",
-    "scrollbar_handle": "#AAAAAA",
-    "icon_bg":          "#F3EEFF",
-    "item_bg":          "#FAFAFA",
-    "divider":          "#EEEEEE",
+    "border":           "#E2DEF0",
+    "border_strong":    "#DCD7ED",
+    "text":             "#1B1730",
+    "text_secondary":   "#454156",
+    "text_muted":       "#6F6B83",
+    "text_disabled":    "#A6A2B6",
+    "input_bg":         "#F4F2FC",
+    "hover":            "#F1EEFA",
+    "pressed":          "#EBE8F7",
+    "tab_unchecked_bg": "#F4F2FC",
+    "tab_unchecked_border": "#E2DEF0",
+    "tab_unchecked_text": "#6F6B83",
+    "tab_unchecked_hover": "#EBE8F7",
+    "danger_bg":        "#FDEEF0",
+    "danger_hover":     "#FBE4E7",
+    "danger_border":    "#F3C7CD",
+    "danger_text":      "#D13A48",
+    "purple_light_bg":  "#EDE7FF",
+    "purple_light_hover":"#E4DAFF",
+    "purple_pressed":   "#DED0FF",
+    "scrollbar_bg":     "#ECE9F6",
+    "scrollbar_handle": "#C4BEDA",
+    "icon_bg":          "#F0EAFE",
+    "item_bg":          "#FFFFFF",
+    "divider":          "#ECE9F6",
     "dialog_bg":        "#FFFFFF",
-    "dialog_border":    "#E0E0E0",
+    "dialog_border":    "#E2DEF0",
 }
 
 
@@ -114,6 +116,9 @@ class ThemeManager(QObject):
         else:
             # Running from source
             self._ui_dir = Path(__file__).parent
+        # Cache of the combined (base + tooltip) QSS per theme, so a toggle
+        # doesn't re-read ~26 KB from disk every time.
+        self._qss_cache: dict = {}
     
     @property
     def current_theme(self) -> str:
@@ -139,58 +144,66 @@ class ThemeManager(QObject):
         app = QApplication.instance()
         if not app:
             return
-        
-        # Load appropriate stylesheet
+
+        # Palette (cheap).
         if theme == 'dark':
-            style_path = self._ui_dir / 'styles.qss'
             self._apply_dark_palette(app)
         else:
-            style_path = self._ui_dir / 'styles_light.qss'
             self._apply_light_palette(app)
-        
-        # Load and apply stylesheet
-        if style_path.exists():
-            with open(style_path, 'r', encoding='utf-8') as f:
-                base_style = f.read()
-        else:
+
+        combined_style = self._combined_qss(theme)
+
+        # A toggle used to repaint N times: app.setStyleSheet() re-polishes every
+        # widget, then every theme_changed listener restyles its own subtree —
+        # each a separate repaint on the UI thread, which froze big windows.
+        # Freeze painting on the visible top-level windows, do ALL the restyling,
+        # then re-enable and repaint ONCE.
+        tops = [w for w in app.topLevelWidgets() if w.isVisible()]
+        for w in tops:
+            try:
+                w.setUpdatesEnabled(False)
+            except Exception:
+                pass
+        try:
+            app.setStyleSheet(combined_style)
+            # Apply dark/light title bar on Windows
+            self._apply_windows_titlebar(theme)
+            # Save setting
+            if settings.theme != theme:
+                settings.set_theme(theme)
+            # Listeners restyle their subtrees while painting is frozen.
+            self.theme_changed.emit(theme)
+        finally:
+            for w in tops:
+                try:
+                    w.setUpdatesEnabled(True)
+                    w.update()
+                except Exception:
+                    pass
+
+    def _combined_qss(self, theme: str) -> str:
+        """Combined (base stylesheet + tooltip) QSS for the theme, cached so a
+        toggle never re-reads the ~26 KB .qss file from disk."""
+        if theme in self._qss_cache:
+            return self._qss_cache[theme]
+        style_path = self._ui_dir / ('styles.qss' if theme == 'dark' else 'styles_light.qss')
+        try:
+            base_style = style_path.read_text(encoding='utf-8') if style_path.exists() else ""
+        except Exception:
             base_style = ""
-        
-        # Add explicit tooltip styling to ensure it's applied globally
         if theme == 'dark':
-            tooltip_style = """
-                QToolTip {
-                    background-color: #1E1E2E;
-                    color: #E8E8F0;
-                    border: 1px solid #7C4DFF;
-                    border-radius: 6px;
-                    padding: 8px 12px;
-                    font-size: 12px;
-                }
-            """
+            tooltip_style = (
+                "QToolTip { background-color: #1E1E2E; color: #E8E8F0;"
+                " border: 1px solid #7C4DFF; border-radius: 6px; padding: 8px 12px; font-size: 12px; }"
+            )
         else:
-            tooltip_style = """
-                QToolTip {
-                    background-color: #FFFFFF;
-                    color: #1A1A1A;
-                    border: 1px solid #7C4DFF;
-                    border-radius: 6px;
-                    padding: 8px 12px;
-                    font-size: 12px;
-                }
-            """
-        
-        # Combine and apply
-        app.setStyleSheet(base_style + tooltip_style)
-        
-        # Apply dark/light title bar on Windows
-        self._apply_windows_titlebar(theme)
-        
-        # Save setting
-        if settings.theme != theme:
-            settings.set_theme(theme)
-        
-        # Emit signal for any listeners
-        self.theme_changed.emit(theme)
+            tooltip_style = (
+                "QToolTip { background-color: #FFFFFF; color: #1A1A1A;"
+                " border: 1px solid #7C4DFF; border-radius: 6px; padding: 8px 12px; font-size: 12px; }"
+            )
+        combined = base_style + tooltip_style
+        self._qss_cache[theme] = combined
+        return combined
     
     def _apply_windows_titlebar(self, theme: str):
         """Set Windows title bar to dark or light using DwmSetWindowAttribute.
@@ -299,15 +312,15 @@ class ThemeManager(QObject):
     def _apply_light_palette(self, app: QApplication):
         """Apply light color palette with purple accent."""
         palette = QPalette()
-        palette.setColor(QPalette.Window, QColor(250, 251, 252))     # #FAFBFC
-        palette.setColor(QPalette.WindowText, QColor(26, 26, 26))    # #1A1A1A
-        palette.setColor(QPalette.Base, QColor(255, 255, 255))       # #FFFFFF
-        palette.setColor(QPalette.AlternateBase, QColor(248, 248, 248))
+        palette.setColor(QPalette.Window, QColor(243, 241, 251))     # #F3F1FB lilac-grey page
+        palette.setColor(QPalette.WindowText, QColor(27, 23, 48))    # #1B1730
+        palette.setColor(QPalette.Base, QColor(255, 255, 255))       # #FFFFFF cards/fields
+        palette.setColor(QPalette.AlternateBase, QColor(239, 237, 248))  # #EFEDF8
         palette.setColor(QPalette.ToolTipBase, QColor(255, 255, 255))
-        palette.setColor(QPalette.ToolTipText, QColor(26, 26, 26))
-        palette.setColor(QPalette.Text, QColor(26, 26, 26))
+        palette.setColor(QPalette.ToolTipText, QColor(27, 23, 48))
+        palette.setColor(QPalette.Text, QColor(27, 23, 48))
         palette.setColor(QPalette.Button, QColor(255, 255, 255))
-        palette.setColor(QPalette.ButtonText, QColor(26, 26, 26))
+        palette.setColor(QPalette.ButtonText, QColor(27, 23, 48))
         palette.setColor(QPalette.BrightText, Qt.red)
         palette.setColor(QPalette.Link, QColor(124, 77, 255))        # #7C4DFF Purple accent
         palette.setColor(QPalette.Highlight, QColor(124, 77, 255))   # #7C4DFF

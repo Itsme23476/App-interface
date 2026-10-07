@@ -7,7 +7,7 @@ import logging
 import shutil
 from datetime import datetime
 from pathlib import Path
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Optional, Callable
 from .settings import settings
 
 
@@ -45,20 +45,25 @@ def _get_unique_path(dest_path: Path) -> Path:
             raise ValueError(f"Could not find unique name for {dest_path.name} after 1000 attempts")
 
 
-def apply_moves(move_plan: List[Dict[str, Any]]) -> Tuple[bool, List[str], str, int]:
+def apply_moves(move_plan: List[Dict[str, Any]],
+                progress_cb: Optional[Callable[[int, int], None]] = None) -> Tuple[bool, List[str], str, int]:
     """
     Apply the move plan to actually move files.
-    
+
     Handles duplicate files by auto-renaming (e.g., file.pdf → file (1).pdf).
-    
+
     Args:
         move_plan: List of move plan dictionaries
-        
+        progress_cb: Optional callback ``progress_cb(done, total)`` fired after
+            each file (in a ``finally`` so one bad move never stalls progress).
+            When ``None`` (the default) behaviour is identical to before.
+
     Returns:
         Tuple of (success, list_of_errors, log_file_path, renamed_count)
     """
     errors = []
     successful_moves = []
+    _total = len(move_plan)
     
     # Create move log entry
     move_log = {
@@ -80,7 +85,7 @@ def apply_moves(move_plan: List[Dict[str, Any]]) -> Tuple[bool, List[str], str, 
                     if dest_path.exists():
                         # File already reached its destination — treat as success
                         successful_moves.append(move)
-                        logger.info(f"Already at destination, counting as success: {source_path.name}")
+                        logger.debug(f"Already at destination, counting as success: {source_path.name}")
                     else:
                         error_msg = f"Source file no longer exists: {source_path}"
                         errors.append(error_msg)
@@ -115,13 +120,21 @@ def apply_moves(move_plan: List[Dict[str, Any]]) -> Tuple[bool, List[str], str, 
                 move_log["moves"].append(move_entry)
                 successful_moves.append(move)
                 
-                logger.info(f"Moved {source_path.name} to {dest_path}")
-                
+                logger.debug(f"Moved {source_path.name} to {dest_path}")
+
             except Exception as e:
                 error_msg = f"Error moving {move.get('file_name', 'unknown')}: {e}"
                 errors.append(error_msg)
                 logger.error(error_msg)
                 continue
+            finally:
+                # Fire progress even when the iteration ends via continue/raise,
+                # so a single bad move never stalls the progress bar.
+                if progress_cb is not None:
+                    try:
+                        progress_cb(i + 1, _total)
+                    except Exception:
+                        pass
         
         # Save move log
         log_file_path = _save_move_log(move_log)
