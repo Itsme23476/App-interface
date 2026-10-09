@@ -742,13 +742,17 @@ def resolve_folder_with_ai(instruction: str, candidate_paths: List[str]) -> Opti
     try:
         from .vision import _call_openai_proxy
         listing = "\n".join(candidate_paths)
+        # NOTE: the shared openai-proxy forces response_format=json_object on ALL
+        # chat calls, so the request MUST ask for JSON (and contain the word
+        # "json") or OpenAI 400s. Return the choice as a JSON object and parse it.
         system = (
             "You map a spoken request to the ONE folder the user wants to "
             "organize. Choose STRICTLY from the AVAILABLE FOLDERS list below "
-            "(they are real paths). Return ONLY the exact folder path, verbatim, "
-            "with nothing else. If none clearly matches, return exactly NONE."
+            "(they are real paths). Respond with a JSON object of the form "
+            '{"folder": "<exact folder path, verbatim>"} — or {"folder": "NONE"} '
+            "if none clearly matches. JSON only, no prose."
         )
-        user = f"REQUEST: {instruction}\n\nAVAILABLE FOLDERS:\n{listing}"
+        user = f"REQUEST: {instruction}\n\nAVAILABLE FOLDERS:\n{listing}\n\nReturn JSON only."
         resp = _call_openai_proxy(
             "chat",
             [{"role": "system", "content": system},
@@ -760,7 +764,16 @@ def resolve_folder_with_ai(instruction: str, candidate_paths: List[str]) -> Opti
         choices = resp.get("choices", [])
         if not choices:
             return None
-        answer = (choices[0].get("message", {}).get("content", "") or "").strip()
+        raw = (choices[0].get("message", {}).get("content", "") or "").strip()
+        # Extract the folder value from the JSON object (fall back to raw text if
+        # the model somehow returned a bare string).
+        answer = ""
+        try:
+            s = raw.find("{"); e = raw.rfind("}")
+            obj = json.loads(raw[s:e + 1] if (s != -1 and e != -1) else raw)
+            answer = str(obj.get("folder", "") or "").strip()
+        except Exception:
+            answer = raw
         answer = answer.strip().strip('"\'`').strip()
         if not answer or answer.upper() == "NONE":
             logger.info(f"[VOICE ORGANIZE] folder resolve: NONE for {instruction!r}")

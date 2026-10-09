@@ -377,10 +377,12 @@ class SupabaseAuth:
                 # trial-end / first-period date and would wrongly flag long-time
                 # active subscribers as expired. Stripe moves truly-ended subs off
                 # 'active'/'trialing', so status is the reliable signal.
-                # past_due is treated as still-subscribed: Stripe is automatically
-                # retrying the card for up to ~3 weeks. Once Stripe gives up, it
-                # auto-flips the status to canceled, which cuts access naturally.
-                # This matches Spotify / Notion / Slack / Adobe behaviour.
+                # NO grace for failed payments: only 'active' (currently paying)
+                # or 'trialing' grant access. 'past_due' (a failed charge) is
+                # locked out immediately — a user who is neither trialing nor
+                # paying gets no access, matching the server-side get_entitlement
+                # change. Stripe still retries the card in the background; if it
+                # recovers, the status flips back to 'active' and access returns.
                 #
                 # trial_blocked_reason gating: when the server-side abuse check
                 # (duplicate-card detection, etc.) sets this field, the trial is
@@ -389,7 +391,7 @@ class SupabaseAuth:
                 # as NOT subscribed — no matter what Stripe status says — so the
                 # post-checkout poll race can't slip the user into the app during
                 # the gap between "trialing" and "canceled".
-                is_active = status in ('active', 'trialing', 'past_due') and not trial_blocked_reason
+                is_active = status in ('active', 'trialing') and not trial_blocked_reason
                 logger.info(
                     f"[SUB CHECK] Status: {status}, "
                     f"current_period_end: {period_end}, "
@@ -459,7 +461,7 @@ class SupabaseAuth:
         price_id = self._subscription.get('price_id', '')
         status = self._subscription.get('status', '')
 
-        if status not in ('active', 'trialing', 'past_due'):
+        if status not in ('active', 'trialing'):
             return 'free'
 
         # Unknown-but-active price falls back to 'basic' so the user isn't locked out.

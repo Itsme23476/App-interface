@@ -101,6 +101,7 @@ jobs:
             "--hidden-import", "json5",
             "--hidden-import", "spellchecker",
             "--hidden-import", "psutil",
+            "--hidden-import", "app.core.dictation_format",
             "--noconfirm"
           )
           if (Test-Path "resources/iconnn.ico") {

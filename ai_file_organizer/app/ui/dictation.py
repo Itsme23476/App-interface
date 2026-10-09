@@ -135,6 +135,17 @@ class DictationController(QObject):
     # ----- transcript result -----
     def _on_finished(self, text: str):
         text = (text or "").strip()
+
+        # Deterministic spoken-number -> written-form pass (always on, zero
+        # latency, no API call): "ten thousand dollars" -> "$10,000",
+        # "fifty percent" -> "50%". Lossless on anything it doesn't recognize.
+        if text:
+            try:
+                from app.core.dictation_format import format_spoken
+                text = format_spoken(text)
+            except Exception as e:
+                logger.warning(f"[DICTATION] number formatting skipped: {e}")
+
         logger.info(f"[DICTATION] transcript (mode={self._mode}, {len(text)} chars): {text[:120]!r}")
         self._overlay.hide_pill()
         self.state_changed.emit("idle")

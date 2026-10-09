@@ -93,8 +93,10 @@ class OnboardingAnimation(QWidget):
         elif self._step == 5:
             self._draw_voice(painter)
         elif self._step == 6:
-            self._draw_settings(painter)
+            self._draw_cleanup(painter)
         elif self._step == 7:
+            self._draw_settings(painter)
+        elif self._step == 8:
             self._draw_ready(painter)
         
         painter.end()
@@ -541,7 +543,63 @@ class OnboardingAnimation(QWidget):
         p.setPen(self._gray)
         p.drawText(QRectF(x + 4, cap_y, fm.horizontalAdvance(tail) + 10, 18), Qt.AlignVCenter | Qt.AlignLeft, tail.strip())
 
-    # ── Step 6: Settings ─────────────────────────────
+    # ── Step 6: AI Cleanup (optional) ────────────────
+    def _draw_cleanup(self, p: QPainter):
+        t = self._frame / 60.0
+        w, h = self.width(), self.height()
+        cx, cy = w / 2, h / 2 - 6
+
+        # A small "document" of text lines. A sparkle sweep passes left→right,
+        # turning messy/dim lines into clean bright ones — the AI-polish motif.
+        doc_w, doc_h = 158, 94
+        dx, dy = cx - doc_w / 2, cy - doc_h / 2
+        p.setPen(Qt.NoPen); p.setBrush(QColor(255, 255, 255, 10))
+        p.drawRoundedRect(QRectF(dx, dy, doc_w, doc_h), 10, 10)
+        p.setPen(QPen(QColor(124, 77, 255, 70), 1)); p.setBrush(Qt.NoBrush)
+        p.drawRoundedRect(QRectF(dx + 0.5, dy + 0.5, doc_w - 1, doc_h - 1), 10, 10)
+
+        sweep = (t * 0.45) % 1.0
+        sweep_x = dx + 14 + sweep * (doc_w - 28)
+
+        fracs = [0.78, 0.94, 0.58, 0.86, 0.66]
+        ly = dy + 16
+        for i, frac in enumerate(fracs):
+            lx = dx + 16
+            line_w = (doc_w - 32) * frac
+            cleaned = sweep_x >= (lx + line_w) or sweep >= 0.98
+            if cleaned:
+                g = QLinearGradient(lx, 0, lx + line_w, 0)
+                g.setColorAt(0, QColor("#B39DFF")); g.setColorAt(1, QColor("#7C4DFF"))
+                p.setPen(QPen(g, 5, Qt.SolidLine, Qt.RoundCap))
+                p.drawLine(QPointF(lx, ly), QPointF(lx + line_w, ly))
+            else:
+                wob = 2.0 * math.sin(t * 4 + i)
+                p.setPen(QPen(QColor(150, 150, 172, 90), 5, Qt.SolidLine, Qt.RoundCap))
+                p.drawLine(QPointF(lx, ly + wob), QPointF(lx + line_w * 0.82, ly - wob))
+            ly += 16
+
+        # Bright translucent sweep bar.
+        bar = QLinearGradient(sweep_x - 11, 0, sweep_x + 11, 0)
+        bar.setColorAt(0, QColor(124, 77, 255, 0))
+        bar.setColorAt(0.5, QColor(179, 157, 255, 130))
+        bar.setColorAt(1, QColor(124, 77, 255, 0))
+        p.setPen(Qt.NoPen); p.setBrush(bar)
+        p.drawRect(QRectF(sweep_x - 11, dy + 6, 22, doc_h - 12))
+
+        # Twinkling sparkles riding the sweep.
+        for i in range(3):
+            s = 4 + 3 * abs(math.sin(t * 6 + i))
+            sxx = sweep_x + (i - 1) * 9
+            syy = dy - 6 + i * 5
+            col = QColor(self._purple); col.setAlpha(int(140 + 100 * abs(math.sin(t * 5 + i))))
+            p.setBrush(col); p.setPen(Qt.NoPen)
+            self._draw_star(p, sxx, syy, max(3, s))
+
+        p.setFont(QFont("Segoe UI", 8, QFont.Bold))
+        p.setPen(self._gray)
+        p.drawText(QRectF(0, h - 30, w, 20), Qt.AlignCenter, "Optional — off by default")
+
+    # ── Step 7: Settings ─────────────────────────────
     def _draw_settings(self, p: QPainter):
         t = self._frame / 60.0
         w, h = self.width(), self.height()
@@ -771,6 +829,14 @@ class OnboardingOverlay(QDialog):
                 "button_text": "Next",
                 "show_try_it": False,
                 "highlight": "voice_shortcuts_card"
+            },
+            {
+                "title": "✨ AI Cleanup (optional)",
+                "description": "• Off by default — your dictation stays instant\n• Turn it on to auto-format dates & emails and strip filler\n• Adds ~1s per dictation — flip it on here anytime",
+                "nav_index": 3,
+                "button_text": "Next",
+                "show_try_it": False,
+                "highlight": "voice_cleanup_card"
             },
             {
                 "title": "⚙️ Settings",
@@ -1033,7 +1099,7 @@ class OnboardingOverlay(QDialog):
     # ``onboarding_step_viewed`` / ``onboarding_dismissed`` events.
     _STEP_SLUGS = [
         "welcome", "smart_search", "organize_files",
-        "auto_organize", "index_files", "voice", "settings", "ready",
+        "auto_organize", "index_files", "voice", "cleanup", "settings", "ready",
     ]
 
     def _update_step(self):
@@ -1132,14 +1198,43 @@ class OnboardingOverlay(QDialog):
             if self.spotlight:
                 self.spotlight.hide()
             return
-        
+
+        # If the target lives inside a scroll area (e.g. the AI Cleanup card at
+        # the bottom of the Voice page), scroll it into view FIRST — otherwise the
+        # spotlight lands on a card stuck below the fold. Walk up to the enclosing
+        # scroll area and pull the widget toward the centre of the viewport.
+        try:
+            from PySide6.QtWidgets import QAbstractScrollArea
+            from PySide6.QtWidgets import QApplication as _QApp
+            anc = target_widget.parentWidget()
+            scroller = None
+            while anc is not None:
+                if isinstance(anc, QAbstractScrollArea):
+                    scroller = anc
+                    break
+                anc = anc.parentWidget()
+            if scroller is not None:
+                vp = scroller.viewport()
+                vp_h = vp.height()
+                # Only scroll if the card isn't already fully inside the viewport,
+                # so steps that were already well-placed are left untouched.
+                top = target_widget.mapTo(vp, QPoint(0, 0)).y()
+                bottom = top + target_widget.height()
+                if top < 0 or bottom > vp_h:
+                    # A ymargin near half the viewport centres the card rather
+                    # than nudging it barely into view at the bottom edge.
+                    scroller.ensureWidgetVisible(target_widget, 0, max(80, vp_h // 2))
+                    _QApp.processEvents()
+        except Exception:
+            pass
+
         # Create spotlight if needed
         if not self.spotlight:
             self.spotlight = SpotlightOverlay(self.main_window)
-        
+
         # Position and show spotlight
         self.spotlight.setGeometry(self.main_window.rect())
-        
+
         # Get widget rect relative to main window
         widget_pos = target_widget.mapTo(self.main_window, QPoint(0, 0))
         widget_rect = QRect(widget_pos.x(), widget_pos.y(), target_widget.width(), target_widget.height())

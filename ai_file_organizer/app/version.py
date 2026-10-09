@@ -2,8 +2,8 @@
 Version information for Filect - File Search Assistant.
 """
 
-VERSION = "12.2.18"
-BUILD_DATE = "2026-10-07"
+VERSION = "12.2.19"
+BUILD_DATE = "2026-10-09"
 APP_NAME = "Filect"
 
 # GitHub repository info (for reference)

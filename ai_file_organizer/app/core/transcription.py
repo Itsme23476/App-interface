@@ -459,13 +459,28 @@ class StreamingTranscriber(QObject):
         except ImportError as e:
             logger.warning(f"[STREAM] websockets missing ({e}); batch fallback")
             websockets = None
+        # wss:// uses stdlib ssl, which in a frozen bundle has NO default CA bundle — without
+        # an explicit one the TLS handshake fails (CERTIFICATE_VERIFY_FAILED) and streaming
+        # silently falls back to the slow batch path. requests/httpx are unaffected (they carry
+        # their own certifi), which is why batch works but streaming didn't — only when frozen.
+        ssl_ctx = None
+        try:
+            import ssl as _ssl, certifi
+            ssl_ctx = _ssl.create_default_context(cafile=certifi.where())
+        except Exception as e:
+            logger.warning(f"[STREAM] certifi ssl context unavailable ({e}); using default")
+
         if token and websockets is not None:
             try:
                 t0 = asyncio.get_event_loop().time()
+                connect_kwargs = {
+                    "additional_headers": {"Authorization": f"Bearer {token}"},
+                    "max_size": None,
+                }
+                if ssl_ctx is not None:
+                    connect_kwargs["ssl"] = ssl_ctx
                 ws = await asyncio.wait_for(
-                    websockets.connect(self._build_url(),
-                                       additional_headers={"Authorization": f"Bearer {token}"},
-                                       max_size=None),
+                    websockets.connect(self._build_url(), **connect_kwargs),
                     timeout=8)
                 logger.info(f"[STREAM] connected in {asyncio.get_event_loop().time()-t0:.2f}s "
                             f"({len(self._outbox)} frames buffered while connecting)")

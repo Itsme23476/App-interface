@@ -1098,24 +1098,25 @@ class AuthDialog(QDialog):
         card_layout.setContentsMargins(24, 24, 24, 24)
         card_layout.setSpacing(16)
         
-        # Plan badge
-        plan_badge = QLabel("CHOOSE YOUR PLAN")
-        plan_badge.setObjectName("planBadge")
-        plan_badge.setAlignment(Qt.AlignCenter)
-        card_layout.addWidget(plan_badge)
+        # Plan badge — text set per eligibility in _show_subscribe_page (no price).
+        self.plan_badge = QLabel("10-DAY FREE TRIAL")
+        self.plan_badge.setObjectName("planBadge")
+        self.plan_badge.setAlignment(Qt.AlignCenter)
+        card_layout.addWidget(self.plan_badge)
 
-        # Price
+        # Headline — intentionally price-free (the $15/$25 A/B test lives on the
+        # web). Shows "Free / for 10 days" or "Full / access" per eligibility.
         price_layout = QHBoxLayout()
         price_layout.setAlignment(Qt.AlignCenter)
-        price_layout.setSpacing(4)
+        price_layout.setSpacing(6)
 
-        price_amount = QLabel("from $15")
-        price_amount.setObjectName("priceAmount")
-        price_period = QLabel("/ mo")
-        price_period.setObjectName("pricePeriod")
-        
-        price_layout.addWidget(price_amount)
-        price_layout.addWidget(price_period)
+        self.price_amount = QLabel("Free")
+        self.price_amount.setObjectName("priceAmount")
+        self.price_period = QLabel("for 10 days")
+        self.price_period.setObjectName("pricePeriod")
+
+        price_layout.addWidget(self.price_amount)
+        price_layout.addWidget(self.price_period)
         card_layout.addLayout(price_layout)
         
         # Features - just 2 to fit the space
@@ -1770,13 +1771,42 @@ class AuthDialog(QDialog):
             error = result.get('error', 'Signup failed')
             self.signup_error.setText(error)
     
-    def _show_subscribe_page(self):
-        """Show the subscription page."""
+    def _show_subscribe_page(self, blocked=False):
+        """Show the subscription page — eligibility-aware and price-free.
+
+        The $15-vs-$25 A/B pricing test lives on the website, so the in-app
+        paywall must never quote a fixed price (it would mismatch whatever the
+        web shows). Copy is chosen from the cached subscription record with NO
+        network call:
+
+          * never subscribed (``_subscription is None``) -> trial-eligible:
+            lead with the free trial.
+          * lapsed (had a subscription) -> neutral "choose a plan".
+          * card already used (``blocked=True``, post-checkout lock) -> neutral
+            "choose a plan", but the button says "Subscribe to unlock".
+
+        The button still opens the web pricing page (bucketed price + checkout
+        live there); only the copy changes.
+        """
         email = supabase_auth.user_email or settings.auth_user_email
         short_email = email.split('@')[0] if email else "there"
         self.welcome_label.setText(f"Hey {short_email}! 👋")
         self.title_label.setText("Unlock Filect")
-        self.subtitle_label.setText("Choose a plan to access all features")
+
+        trial_eligible = (getattr(supabase_auth, "_subscription", None) is None) and not blocked
+        if trial_eligible:
+            self.plan_badge.setText("10-DAY FREE TRIAL")
+            self.price_amount.setText("Free")
+            self.price_period.setText("for 10 days")
+            self.subscribe_button.setText("Start free trial")
+            self.subtitle_label.setText("All features · cancel anytime")
+        else:
+            self.plan_badge.setText("CHOOSE YOUR PLAN")
+            self.price_amount.setText("Full")
+            self.price_period.setText("access")
+            self.subscribe_button.setText("Subscribe to unlock" if blocked else "View plans")
+            self.subtitle_label.setText("Choose a plan to continue · cancel anytime")
+
         self.stack.setCurrentIndex(2)
         # Taller than the other pages so the plan card isn't clipped on
         # high-DPI / scaled displays.
@@ -1868,7 +1898,7 @@ class AuthDialog(QDialog):
                 f"[AUTH] Trial blocked ({result.get('trial_blocked_reason')}) — "
                 "routing to subscribe page"
             )
-            self._show_subscribe_page()
+            self._show_subscribe_page(blocked=True)
             self.sub_status.setText(
                 "This card was already used for a Filect trial. "
                 "Pick a paid plan to continue."
