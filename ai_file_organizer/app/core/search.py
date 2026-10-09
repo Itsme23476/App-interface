@@ -846,11 +846,14 @@ class SearchService:
                 "caption": (c.get('caption') or '')[:300],
                 "ocr": (c.get('ocr_text') or '')[:200]
             })
+        # NOTE: the shared openai-proxy forces response_format=json_object on ALL
+        # chat calls, so ask for a JSON OBJECT (not a bare array), and the prompt
+        # must contain "json" or OpenAI 400s.
         system = (
             "You are a reranker. Given a user query and a list of items (id, name, label, tags, caption, ocr), "
-            "return a JSON array of item ids sorted from best to worst match. JSON only."
+            'return a JSON object of the form {"ids": [item ids sorted best to worst match]}. JSON only.'
         )
-        user = [{"type": "text", "text": f"Query: {query}\nItems: {_json.dumps(items)}\nReturn: [ids in best->worst order]"}]
+        user = [{"type": "text", "text": f"Query: {query}\nItems: {_json.dumps(items)}\nReturn JSON: {{\"ids\": [best->worst]}}"}]
         try:
             resp_data = _call_openai_proxy(
                 "chat",
@@ -867,10 +870,25 @@ class SearchService:
             if not choices:
                 return []
             content = choices[0].get("message", {}).get("content", "") or ""
-            s = content.find('['); e = content.rfind(']')
-            if s != -1 and e != -1 and e > s:
-                import json
-                order = json.loads(content[s:e+1])
+            # Parse the ordered id list from the JSON object (fallbacks: a bare
+            # array, or an array embedded in stray prose).
+            order = None
+            try:
+                obj = _json.loads(content)
+                if isinstance(obj, dict):
+                    order = obj.get("ids") or obj.get("order") or obj.get("ranking")
+                elif isinstance(obj, list):
+                    order = obj
+            except Exception:
+                order = None
+            if order is None:
+                s = content.find('['); e = content.rfind(']')
+                if s != -1 and e != -1 and e > s:
+                    try:
+                        order = _json.loads(content[s:e + 1])
+                    except Exception:
+                        order = None
+            if order:
                 id_to_item = {c['id']: c for c in candidates}
                 ranked = [id_to_item[i] for i in order if i in id_to_item]
                 # assign a simple rank boost for UI sorting
