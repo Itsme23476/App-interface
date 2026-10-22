@@ -7138,9 +7138,17 @@ class OrganizePage(QWidget):
         
         if not self.destination_path:
             return
-        
+
+        # One-shot guard: when generate_plan is re-invoked right after an index
+        # (or skip) pass, DON'T re-scan for unindexed files — that re-check is
+        # what produced the endless "new files detected" loop on folders bigger
+        # than the index cap. Consume the flag immediately so a fresh, user-
+        # initiated Generate/Enter re-checks normally.
+        skip_index_check = getattr(self, "_skip_index_check_once", False)
+        self._skip_index_check_once = False
+
         # Check for unindexed files and offer to index them with full AI analysis
-        unindexed_files = self._check_for_unindexed_files()
+        unindexed_files = [] if skip_index_check else self._check_for_unindexed_files()
         if unindexed_files:
             # Ask user if they want to index new files first
             confirmed = ModernConfirmDialog.ask(
@@ -7472,8 +7480,22 @@ class OrganizePage(QWidget):
         """Validate a plan (no dialogs) and emit voice_plan_ready."""
         try:
             if not plan or not plan.get("folders"):
-                self.voice_plan_error.emit("The AI couldn't build a plan — try rephrasing.")
-                return
+                # Lapsed subscription -> honest resubscribe message; entitled user
+                # -> deterministic by-type fallback (still previewed before applying).
+                # Default entitled on any check error (don't block a paying user).
+                try:
+                    from app.core.supabase_client import supabase_auth
+                    entitled = bool(supabase_auth.check_subscription().get('has_subscription', True))
+                except Exception:
+                    entitled = True
+                if not entitled:
+                    self.voice_plan_error.emit("Your subscription is inactive — please resubscribe to keep organizing.")
+                    return
+                from app.core.ai_organizer import _fallback_plan_by_category
+                plan = _fallback_plan_by_category(list(self.files_by_id.values()))
+                if not plan or not plan.get("folders"):
+                    self.voice_plan_error.emit("The AI couldn't build a plan — try rephrasing.")
+                    return
             # Enforce the invariants in code (never trust the AI):
             #  #1 every file in exactly one folder (no drops / no duplicates),
             #  #2 on a refine, THIS plan wins, previous plan only fills gaps,
@@ -7704,7 +7726,10 @@ class OrganizePage(QWidget):
         if main_window and hasattr(main_window, '_update_usage_labels'):
             main_window._update_usage_labels()
         
-        # Continue with plan generation using existing indexed files
+        # Continue with plan generation using existing indexed files. Skip the
+        # unindexed re-check on this re-invocation (we just handled indexing) so
+        # we don't re-trigger the "new files detected" prompt in a loop.
+        self._skip_index_check_once = True
         QTimer.singleShot(100, self.generate_plan)
     
     def _on_index_cancelled(self):
@@ -7738,11 +7763,15 @@ class OrganizePage(QWidget):
         
         if indexed_count > 0:
             self.status_label.setText(f"Indexed {indexed_count} files. Generating organization plan...")
-            # Now call generate_plan again - files should be available
+            # Now call generate_plan again - files should be available. Skip the
+            # unindexed re-check on this pass (loop guard).
+            self._skip_index_check_once = True
             QTimer.singleShot(100, self.generate_plan)
         else:
             self.status_label.setText("No new files to index.")
-            # Still proceed with plan if there are already indexed files
+            # Still proceed with plan if there are already indexed files. Skip the
+            # unindexed re-check on this pass (loop guard).
+            self._skip_index_check_once = True
             QTimer.singleShot(100, self.generate_plan)
     
     def _on_index_error(self, error: str):
@@ -7767,13 +7796,40 @@ class OrganizePage(QWidget):
         self.generate_button.setEnabled(True)
         
         if not plan:
-            self.status_label.setText("Failed to generate plan. Check AI settings.")
-            QMessageBox.warning(
-                self, "Plan Failed",
-                "Could not generate organization plan. Make sure your AI provider is configured in Settings."
-            )
-            return
-        
+            # Distinguish a lapsed subscription (403 at the proxy) from a transient
+            # AI miss. Entitled users get a deterministic by-type fallback (previewed
+            # before applying); lapsed users get an honest resubscribe prompt — never
+            # the misleading "configure your AI provider" message. Default to entitled
+            # on any check error so a network hiccup never locks out a paying user.
+            try:
+                from app.core.supabase_client import supabase_auth
+                entitled = bool(supabase_auth.check_subscription().get('has_subscription', True))
+            except Exception:
+                entitled = True
+            if not entitled:
+                self.status_label.setText("Your subscription is inactive — resubscribe to keep organizing.")
+                if QMessageBox.question(
+                    self, "Subscription Inactive",
+                    "Your subscription is inactive. Resubscribe to keep organizing.\n\n"
+                    "Open the plans page now?",
+                    QMessageBox.Yes | QMessageBox.No
+                ) == QMessageBox.Yes:
+                    try:
+                        supabase_auth.open_web_pricing()
+                    except Exception:
+                        pass
+                return
+            from app.core.ai_organizer import _fallback_plan_by_category
+            plan = _fallback_plan_by_category(list(self.files_by_id.values()))
+            if not plan:
+                self.status_label.setText("Couldn't generate a plan. Please try again in a moment.")
+                QMessageBox.warning(
+                    self, "Plan Failed",
+                    "Could not generate an organization plan. Please try again in a moment."
+                )
+                return
+            self.status_label.setText("AI was busy — grouped files by type. Review and refine before applying.")
+
         # Deduplicate file IDs (AI sometimes puts same file in multiple folders)
         plan = deduplicate_plan(plan)
         

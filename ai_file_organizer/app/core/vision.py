@@ -49,7 +49,7 @@ def _get_auth_token() -> Optional[str]:
         return None
 
 
-def _call_openai_proxy(endpoint: str, messages: List[Dict], max_tokens: int = 500, temperature: float = 0.2) -> Optional[Dict[str, Any]]:
+def _call_openai_proxy(endpoint: str, messages: List[Dict], max_tokens: int = 500, temperature: float = 0.2, model: str = None) -> Optional[Dict[str, Any]]:
     """Call OpenAI via the Supabase Edge Function proxy.
 
     Args:
@@ -57,6 +57,10 @@ def _call_openai_proxy(endpoint: str, messages: List[Dict], max_tokens: int = 50
         messages: OpenAI-format messages array.
         max_tokens: Response token cap.
         temperature: Sampling temperature.
+        model: Optional model override. Only sent to the proxy when provided;
+            the proxy allow-lists it (gpt-5-nano / gpt-5-mini) and defaults to
+            nano when absent. Tagging/vision/resolve/rerank send none (-> nano);
+            the organize planner sends gpt-5-mini.
 
     Returns:
         OpenAI response JSON (choices/message/content shape) or None on failure.
@@ -77,8 +81,12 @@ def _call_openai_proxy(endpoint: str, messages: List[Dict], max_tokens: int = 50
             "max_tokens": max_tokens,
             "temperature": temperature,
         }
+        # Only forward a model when explicitly requested; the proxy defaults to
+        # nano otherwise. Keeps every existing (model-less) caller on nano.
+        if model:
+            payload["model"] = model
 
-        logger.info(f"Calling OpenAI proxy: endpoint={endpoint}")
+        logger.info(f"Calling OpenAI proxy: endpoint={endpoint}" + (f", model={model}" if model else ""))
         response = requests.post(OPENAI_PROXY_URL, json=payload, headers=headers, timeout=120)
 
         if response.status_code == 401:

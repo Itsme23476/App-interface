@@ -390,6 +390,77 @@ def _apply_tag_safety_net(
 
 PLAN_CHUNK_THRESHOLD = 250  # above this, split the request into chunks
 
+# The organize PLAN runs on the sturdier gpt-5-mini (cleaner plans: ~100% file
+# coverage, no id double-placement). High-volume tagging/vision stays on nano
+# (cheap, 0 failures) by simply sending no model. Split is enforced per-call.
+PLAN_MODEL = "gpt-5-mini"
+_PLAN_CHUNK_RETRIES = 3  # a single gpt-5 call occasionally returns a bad/empty plan
+
+
+def _normalize_plan_shape(plan: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Coerce an LLM reply into the canonical ``{"folders": {name: [ids]}}`` shape.
+
+    - A correct plan (non-empty ``folders`` dict) is returned UNCHANGED.
+    - A wrapper-less reply (``{name: [ids], ...}``) is wrapped as ``{"folders": …}``.
+    - Empty / garbled replies return ``None`` so the retry loop kicks in.
+
+    Idempotent: normalizing an already-correct plan is a no-op.
+    """
+    if not isinstance(plan, dict):
+        return None
+    if "folders" in plan:
+        folders = plan.get("folders")
+        if isinstance(folders, dict) and folders:
+            return plan
+        return None  # empty folders -> treat as failure so we retry
+    # Wrapper-less: keep only keys whose value is a list of ids.
+    folders = {k: v for k, v in plan.items() if isinstance(v, (list, tuple))}
+    if not folders:
+        return None
+    return {"folders": folders}
+
+
+def _plan_with_retries(
+    user_instruction: str,
+    files: List[Dict[str, Any]],
+    idx: int = 0,
+    n_chunks: int = 1,
+) -> Optional[Dict[str, Any]]:
+    """Call ``_request_plan_single`` up to ``_PLAN_CHUNK_RETRIES`` times, returning
+    the first result that actually carries a non-empty ``folders`` dict. Returns
+    ``None`` only after every attempt failed. Used for BOTH the single-folder path
+    and each chunk of a large folder."""
+    for attempt in range(1, _PLAN_CHUNK_RETRIES + 1):
+        part = _request_plan_single(user_instruction, files)
+        if part and part.get("folders"):
+            if attempt > 1:
+                logger.info(f"Plan chunk {idx + 1}/{n_chunks} succeeded on attempt {attempt}")
+            return part
+        logger.warning(f"Plan chunk {idx + 1}/{n_chunks} attempt {attempt}/{_PLAN_CHUNK_RETRIES} produced no usable plan")
+    return None
+
+
+def _fallback_plan_by_category(files: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Deterministic, network-free grouping used as a last resort by the UI when
+    the AI plan fails for an ENTITLED user. Groups each file by its ``category``
+    (or file extension if no category). Returns ``{"folders": {…}}`` or ``None``
+    when there are no files. NEVER called by the background auto-watcher (it moves
+    files without a human preview, so on failure it skips + retries next scan)."""
+    if not files:
+        return None
+    folders: Dict[str, list] = {}
+    for f in files:
+        fid = f.get("id")
+        if fid is None:
+            continue
+        cat = (f.get("category") or "").strip()
+        if not cat:
+            name = f.get("file_name") or f.get("name") or ""
+            ext = os.path.splitext(name)[1].lstrip(".").upper()
+            cat = f"{ext} Files" if ext else "Other"
+        folders.setdefault(cat, []).append(fid)
+    return {"folders": folders} if folders else None
+
 
 def request_organization_plan(
     user_instruction: str,
@@ -417,14 +488,14 @@ def request_organization_plan(
         return None
 
     if len(files) <= PLAN_CHUNK_THRESHOLD:
-        return _request_plan_single(user_instruction, files)
+        return _plan_with_retries(user_instruction, files, 0, 1)
 
     chunks = [files[i:i + PLAN_CHUNK_THRESHOLD]
               for i in range(0, len(files), PLAN_CHUNK_THRESHOLD)]
     logger.info(f"Large organize ({len(files)} files): planning {len(chunks)} chunks in parallel")
 
     # Text-only calls on background threads — no RAM spike, only a handful at
-    # once (capped at 6). Each _request_plan_single keeps its own retry. We drop
+    # once (capped at 6). Each chunk retries via _plan_with_retries. We drop
     # the old cross-chunk folder-name hint (it forced sequential ordering); the
     # merge-by-name below + the callers' deduplicate_plan/ensure_all_files_included
     # preserve conservation. Worst case is a tiny folder-naming inconsistency,
@@ -435,7 +506,7 @@ def request_organization_plan(
     def _plan_chunk(item):
         idx, chunk = item
         try:
-            return idx, _request_plan_single(user_instruction, chunk)
+            return idx, _plan_with_retries(user_instruction, chunk, idx, len(chunks))
         except Exception as e:
             logger.warning(f"Chunk {idx + 1}/{len(chunks)} failed: {e}")
             return idx, None
@@ -635,6 +706,10 @@ Propose an organization plan. Return JSON only."""
         logger.warning("No AI provider configured")
         return None
 
+    # Coerce to the canonical {"folders": {...}} shape: wraps a wrapper-less
+    # reply, and nulls an empty/garbled one so _plan_with_retries can retry.
+    plan = _normalize_plan_shape(plan)
+
     # Deterministic tag-based safety net: rewrite any placement that violates
     # an explicit user category→folder rule. No-op when the instruction has
     # no extractable mapping, or when no file's tags match a user rule.
@@ -705,7 +780,7 @@ def _request_openai(user_message: str) -> Optional[Dict[str, Any]]:
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": user_message},
         ]
-        resp_data = _call_openai_proxy("chat", messages, max_tokens=4000, temperature=0.1)
+        resp_data = _call_openai_proxy("chat", messages, max_tokens=4000, temperature=0.1, model=PLAN_MODEL)
         if not resp_data:
             logger.error("OpenAI proxy returned no data for organization plan")
             return None

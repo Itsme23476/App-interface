@@ -374,8 +374,21 @@ class SearchService:
             self._cancel_flag.clear()
             self._pause_flag.clear()
             
-            # Scan directory for files
-            files = scan_directory(directory_path)
+            # Scan directory for files. Cap the scan by the user's TIER limit
+            # (basic 1000 / pro 5000 / premium 50000) instead of a hardcoded
+            # 1000. A hardcoded 1000 was the root of the "new files detected"
+            # loop: the uncapped unindexed check always found files the capped
+            # scan could never reach. Falls back to 1000 when unauthenticated or
+            # on any error. (The media-quota gate _check_index_limit below is
+            # unchanged — this only widens how many TOTAL files get scanned.)
+            try:
+                from app.core.supabase_client import supabase_auth
+                scan_cap = supabase_auth.get_index_limit() if supabase_auth.is_authenticated else 1000
+            except Exception:
+                scan_cap = 1000
+            if not scan_cap or scan_cap <= 0:
+                scan_cap = 1000
+            files = scan_directory(directory_path, max_files=scan_cap)
             total = len(files)
             
             if progress_cb:
