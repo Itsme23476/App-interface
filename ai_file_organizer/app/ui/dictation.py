@@ -136,16 +136,6 @@ class DictationController(QObject):
     def _on_finished(self, text: str):
         text = (text or "").strip()
 
-        # Deterministic spoken-number -> written-form pass (always on, zero
-        # latency, no API call): "ten thousand dollars" -> "$10,000",
-        # "fifty percent" -> "50%". Lossless on anything it doesn't recognize.
-        if text:
-            try:
-                from app.core.dictation_format import format_spoken
-                text = format_spoken(text)
-            except Exception as e:
-                logger.warning(f"[DICTATION] number formatting skipped: {e}")
-
         logger.info(f"[DICTATION] transcript (mode={self._mode}, {len(text)} chars): {text[:120]!r}")
         self._overlay.hide_pill()
         self.state_changed.emit("idle")
@@ -161,6 +151,28 @@ class DictationController(QObject):
                     logger.info(f"[DICTATION] polished ({level}): {text[:120]!r}")
             except Exception as e:
                 logger.warning(f"[DICTATION] polish failed: {e}")
+
+        # Deterministic formatting — runs on the FINAL text (raw OR polished) so
+        # output is identical regardless of the AI Cleanup setting: spoken
+        # numbers/currency/percent -> written form, whitespace/punctuation tidy,
+        # and context-aware sentence casing. apply_sentence_case safely no-ops
+        # when the caret context can't be read (text_before_caret() -> None).
+        if text:
+            try:
+                from app.core.dictation_format import format_spoken, tidy_text, apply_sentence_case
+                before = None
+                try:
+                    from app.ui.win_hotkey import text_before_caret
+                    before = text_before_caret()
+                except Exception:
+                    before = None
+                text = apply_sentence_case(
+                    tidy_text(format_spoken(text)),
+                    before,
+                    getattr(settings, "dictation_custom_terms", []) or [],
+                )
+            except Exception as e:
+                logger.warning(f"[DICTATION] deterministic formatting skipped: {e}")
 
         self._recorder = None
         # Notify listeners (UI) with the final text + mode before routing.

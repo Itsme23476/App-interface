@@ -244,6 +244,30 @@ class SearchService:
                         full_metadata.update(vision)
                         if 'ai_source' not in full_metadata:
                             full_metadata['ai_source'] = 'ollama:local'
+            elif ext in {'.mp4', '.mov', '.m4v', '.avi', '.mkv', '.webm', '.wmv', '.flv', '.mpeg', '.mpg'}:
+                # Video: sample keyframes -> vision + extract audio -> transcription, producing
+                # the same metadata fields an image does, so search/organize need no changes.
+                # Cloud provider only (the local Ollama path has no video analyzer); otherwise
+                # it falls through to filename-based indexing. Never raises into indexing.
+                if settings.ai_provider == 'openai':
+                    try:
+                        from .video_analysis import analyze_video
+                        vinfo = analyze_video(file_path)
+                        if vinfo:
+                            full_metadata.update(vinfo)
+                    except Exception as e:
+                        logger.warning(f"Video analysis failed for {file_path.name}: {e}")
+            elif ext in {'.mp3', '.wav', '.m4a', '.aac', '.flac', '.ogg', '.oga', '.opus', '.aiff', '.aif', '.wma', '.caf'}:
+                # Audio: transcribe the file + tag it from what's said (same metadata shape).
+                # Cloud provider only; otherwise falls through to filename-based indexing.
+                if settings.ai_provider == 'openai':
+                    try:
+                        from .video_analysis import analyze_audio
+                        ainfo = analyze_audio(file_path)
+                        if ainfo:
+                            full_metadata.update(ainfo)
+                    except Exception as e:
+                        logger.warning(f"Audio analysis failed for {file_path.name}: {e}")
             else:
                 # Non-image: Extract text and analyze
                 snippet = ""
@@ -251,7 +275,7 @@ class SearchService:
                     extracted = extract_file_text(file_path)
                     if extracted:
                         snippet = extracted
-                        if ext == '.csv' or ext in {'.xlsx', '.xls'}:
+                        if ext == '.csv' or ext in {'.xlsx', '.xls', '.pdf', '.docx', '.pptx', '.rtf', '.eml', '.epub', '.odt', '.ods', '.odp'}:
                             full_metadata['ocr_text'] = extracted[:5000]
                             full_metadata['has_ocr'] = True
                     else:

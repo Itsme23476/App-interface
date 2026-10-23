@@ -452,22 +452,32 @@ def analyze_image(image_path: Path, model: str = None, user_instructions: str = 
 def _gpt_text_analysis(text: str, filename: Optional[str] = None, user_instructions: str = None) -> Optional[Dict[str, Any]]:
     """Analyze text content using OpenAI through the Supabase Edge Function proxy."""
     try:
-        name_part = f"Filename: {filename}\n" if filename else ""
-        snippet = (text or "").strip()
-        if len(snippet) > 5000:
-            snippet = snippet[:5000]
-
-        user_prompt = (
-            "Classify the following file content. Return STRICT JSON only.\n"
-            + name_part
-            + "Content snippet:\n" + snippet
+        snippet = (text or "").strip()[:5000]
+        focus = (f"\nFocus especially on: {user_instructions.strip()}"
+                 if user_instructions and user_instructions.strip() else "")
+        # Document/text tagging for a FILE-SEARCH index: emit only tags a person would actually
+        # type to find the file. No format/extension, filename, layout/visual, or filler tags.
+        system_prompt = (
+            "You tag a document for a FILE-SEARCH index. Tags are the words a person would "
+            "actually TYPE to find this file later: its real topics, names, people, companies, "
+            "products, tools, places, projects and key terms — plus a short document type (e.g. "
+            "email, report, resume, invoice, meeting notes, presentation, ebook, contract). "
+            "Return STRICT JSON only: {\"type\": \"<document type>\", \"caption\": \"<one-sentence "
+            "summary>\", \"tags\": [\"keyword1\", \"keyword2\"]}. Rules for tags: ONLY things someone "
+            "would search for. NEVER include the file format/extension (pdf, docx, pptx, eml, epub, "
+            "odt...), the filename, layout or visual descriptions (columns, images, thumbnail, 16:9, "
+            "caption, no images), or vague filler (document, page, text, plain text, office, "
+            "professional, business, formal, official). Up to 20 tags, lowercase, no duplicates — "
+            "but only as many as the file GENUINELY covers; do NOT pad a short or simple file to "
+            "reach a number (a one-line note should get a handful of tags, not twenty). For "
+            "an email, DO include the sender and recipient." + focus
         )
-
-        system = build_analysis_prompt(SYSTEM_PROMPT, user_instructions)
+        user_prompt = ((f"Filename (context only - do NOT tag it): {filename}\n" if filename else "")
+                       + "Content:\n" + snippet)
         resp_data = _call_openai_proxy(
             "chat",
             [
-                {"role": "system", "content": system},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
             max_tokens=500,
@@ -494,13 +504,13 @@ def _gpt_text_analysis(text: str, filename: Optional[str] = None, user_instructi
         tags = data.get("tags") or []
         if not isinstance(tags, list):
             tags = []
-        tags = [str(t).lower()[:64] for t in tags][:25]
+        tags = [str(t).lower()[:64] for t in tags][:20]
         caption = str(data.get("caption", "")).strip()[:400]
         try:
             conf = float(data.get("confidence", 0))
         except Exception:
             conf = 0.0
-        
+
         return {
             "label": label,
             "tags": tags,

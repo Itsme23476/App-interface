@@ -209,6 +209,123 @@ def extract_spreadsheet_text(file_path: Path) -> Optional[str]:
     return None
 
 
+def extract_docx_text(file_path: Path, max_chars: int = 20000) -> Optional[str]:
+    """Extract text from a Word .docx (paragraphs + table cells)."""
+    try:
+        import docx
+        doc = docx.Document(str(file_path))
+        parts = [p.text for p in doc.paragraphs if p.text.strip()]
+        for table in doc.tables:
+            for row in table.rows:
+                cells = [c.text.strip() for c in row.cells if c.text.strip()]
+                if cells:
+                    parts.append(" | ".join(cells))
+        text = "\n".join(parts).strip()
+        return text[:max_chars] if text else None
+    except Exception as e:
+        logger.warning(f"docx extraction failed for {file_path.name}: {e}")
+        return None
+
+
+def extract_pptx_text(file_path: Path, max_chars: int = 20000) -> Optional[str]:
+    """Extract text from a PowerPoint .pptx (slide shapes + speaker notes)."""
+    try:
+        from pptx import Presentation
+        prs = Presentation(str(file_path))
+        parts = []
+        for i, slide in enumerate(prs.slides, 1):
+            bits = [sh.text_frame.text.strip() for sh in slide.shapes
+                    if sh.has_text_frame and sh.text_frame.text.strip()]
+            if slide.has_notes_slide and slide.notes_slide.notes_text_frame:
+                note = slide.notes_slide.notes_text_frame.text.strip()
+                if note:
+                    bits.append(f"[notes] {note}")
+            if bits:
+                parts.append(f"Slide {i}: " + "\n".join(bits))
+        text = "\n\n".join(parts).strip()
+        return text[:max_chars] if text else None
+    except Exception as e:
+        logger.warning(f"pptx extraction failed for {file_path.name}: {e}")
+        return None
+
+
+def extract_rtf_text(file_path: Path, max_chars: int = 20000) -> Optional[str]:
+    """Extract plain text from a .rtf file."""
+    try:
+        from striprtf.striprtf import rtf_to_text
+        with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+            raw = f.read()
+        text = rtf_to_text(raw).strip()
+        return text[:max_chars] if text else None
+    except Exception as e:
+        logger.warning(f"rtf extraction failed for {file_path.name}: {e}")
+        return None
+
+
+def extract_eml_text(file_path: Path, max_chars: int = 20000) -> Optional[str]:
+    """Extract subject + sender + body from an .eml email (stdlib; strips HTML if needed)."""
+    try:
+        import re as _re
+        from email import policy
+        from email.parser import BytesParser
+        with open(file_path, "rb") as f:
+            msg = BytesParser(policy=policy.default).parse(f)
+        header = [f"{h}: {msg.get(h)}" for h in ("From", "To", "Subject", "Date") if msg.get(h)]
+        body = ""
+        part = msg.get_body(preferencelist=("plain", "html"))
+        if part is not None:
+            content = part.get_content()
+            if part.get_content_subtype() == "html":
+                content = _re.sub(r"<[^>]+>", " ", content)
+            body = _re.sub(r"[ \t]+", " ", content).strip()
+        text = ("\n".join(header) + "\n\n" + body).strip()
+        return text[:max_chars] if text else None
+    except Exception as e:
+        logger.warning(f"eml extraction failed for {file_path.name}: {e}")
+        return None
+
+
+def extract_epub_text(file_path: Path, max_chars: int = 20000) -> Optional[str]:
+    """Extract text from an .epub ebook (HTML chapters -> plain text)."""
+    try:
+        import ebooklib
+        from ebooklib import epub
+        from bs4 import BeautifulSoup
+        book = epub.read_epub(str(file_path))
+        parts, total = [], 0
+        for item in book.get_items_of_type(ebooklib.ITEM_DOCUMENT):
+            t = BeautifulSoup(item.get_content(), "html.parser").get_text(separator=" ", strip=True)
+            if t:
+                parts.append(t); total += len(t)
+            if total > max_chars:
+                break
+        text = "\n".join(parts).strip()
+        return text[:max_chars] if text else None
+    except Exception as e:
+        logger.warning(f"epub extraction failed for {file_path.name}: {e}")
+        return None
+
+
+def extract_odf_text(file_path: Path, max_chars: int = 20000) -> Optional[str]:
+    """Extract text from an OpenDocument file (.odt/.ods/.odp) via odfpy."""
+    try:
+        from odf.opendocument import load
+        from odf.text import P, H
+        from odf import teletype
+        doc = load(str(file_path))
+        parts = []
+        for tag in (H, P):
+            for el in doc.getElementsByType(tag):
+                t = teletype.extractText(el).strip()
+                if t:
+                    parts.append(t)
+        text = "\n".join(parts).strip()
+        return text[:max_chars] if text else None
+    except Exception as e:
+        logger.warning(f"odf extraction failed for {file_path.name}: {e}")
+        return None
+
+
 def extract_file_text(file_path: Path) -> Optional[str]:
     """
     Extract readable text from a file based on its type.
@@ -233,7 +350,21 @@ def extract_file_text(file_path: Path) -> Optional[str]:
     # Excel files
     if ext in {'.xlsx', '.xls'}:
         return extract_spreadsheet_text(file_path)
-    
+
+    # Office documents + email (reuse the same text -> analyze_text pipeline)
+    if ext == '.docx':
+        return extract_docx_text(file_path)
+    if ext == '.pptx':
+        return extract_pptx_text(file_path)
+    if ext == '.rtf':
+        return extract_rtf_text(file_path)
+    if ext == '.eml':
+        return extract_eml_text(file_path)
+    if ext == '.epub':
+        return extract_epub_text(file_path)
+    if ext in {'.odt', '.ods', '.odp'}:
+        return extract_odf_text(file_path)
+
     # Plain text files
     text_extensions = {
         '.txt', '.md', '.json', '.xml', '.html', '.htm',
@@ -257,6 +388,7 @@ def get_supported_text_formats() -> List[str]:
     """Return list of file extensions that can be text-extracted."""
     return [
         '.csv', '.xlsx', '.xls',
+        '.docx', '.pptx', '.rtf', '.eml', '.epub', '.odt', '.ods', '.odp',
         '.txt', '.md', '.json', '.xml', '.html', '.htm',
         '.log', '.ini', '.cfg', '.yaml', '.yml', '.toml',
         '.py', '.js', '.ts', '.jsx', '.tsx', '.css', '.scss',

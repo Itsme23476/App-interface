@@ -12,6 +12,20 @@ MOD_CONTROL = 0x0002
 MOD_SHIFT = 0x0004
 
 
+def text_before_caret(max_chars: int = 40) -> Optional[str]:
+    """Return up to ``max_chars`` characters immediately before the system text
+    caret in the focused control, or ``None`` if it can't be read.
+
+    Dictation's sentence-case pass uses this to tell a sentence start from
+    mid-sentence. This is the safe stub: it returns ``None``, so
+    ``apply_sentence_case`` no-ops and nothing breaks. The real UI-Automation
+    implementation (TextPattern / GetSelection) lands in the context-aware
+    capitalization change (#2); until then formatting simply skips the
+    context-dependent step.
+    """
+    return None
+
+
 class _WinHotkeyFilter(QAbstractNativeEventFilter):
     def __init__(self, hotkey_id: int, on_activated: Callable[[], None]):
         super().__init__()

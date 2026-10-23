@@ -28,3 +28,13 @@ comtypes>=1.2.0
 pynput>=1.7.6
 # RAM-aware indexing concurrency cap (falls back to a static cap if missing).
 psutil>=5.9.0
+# Document analysis (v14.8.0 port): Word/PowerPoint/RTF/ebook/OpenDocument text extraction.
+python-docx>=1.1.0    # Word .docx
+python-pptx>=1.0.0    # PowerPoint .pptx
+striprtf>=0.0.26      # RTF -> plain text (.eml uses the stdlib email module)
+ebooklib>=0.18        # .epub ebook
+beautifulsoup4>=4.12  # HTML parsing for .epub chapters
+odfpy>=1.4            # OpenDocument (.odt/.ods/.odp)
+# Video/audio analysis (v14.7.0 port): ffmpeg for keyframe + audio extraction. Replaces macOS
+# AVFoundation; imageio-ffmpeg bundles its own binary and survives PyInstaller.
+imageio-ffmpeg>=0.4.9
