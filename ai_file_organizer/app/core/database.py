@@ -51,7 +51,8 @@ class FileIndex:
         self.db_path = db_path
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_database()
-    
+        self._ensure_fts_healthy()
+
     def _init_database(self):
         """Initialize database tables."""
         with sqlite3.connect(self.db_path) as conn:
@@ -123,26 +124,41 @@ class FileIndex:
             except Exception as e:
                 logger.warning(f"Schema migration warning: {e}")
             
-            # Create full-text search index
-            # Recreate FTS with latest schema (drop if exists)
-            try:
-                cursor.execute("DROP TABLE IF EXISTS files_fts")
-            except Exception:
-                pass
-            cursor.execute(
-                """
-                CREATE VIRTUAL TABLE files_fts USING fts5(
-                    file_name,
-                    file_path,
-                    category,
-                    ocr_text,
-                    caption,
-                    tags,
-                    content='files',
-                    content_rowid='id'
-                )
-                """
+            # Full-text search index. FTS5 can't be ALTER-ed, so the ONLY way to change its columns
+            # is drop+recreate. Doing that on every start — and, worse, without repopulating an
+            # external-content index — silently empties search on every launch. Instead: recreate
+            # ONLY when the columns actually differ from what we expect, and ALWAYS repopulate when
+            # we do. Normal launches leave the index intact (no wipe, no rebuild, no lag). On any
+            # detection error we fall back to a full recreate+repopulate — never worse than before.
+            _fts_cols = ("file_name", "file_path", "category", "ocr_text", "caption", "tags")
+            _create_fts = (
+                "CREATE VIRTUAL TABLE files_fts USING fts5("
+                + ", ".join(_fts_cols)
+                + ", content='files', content_rowid='id')"
             )
+            def _recreate_fts():
+                cursor.execute("DROP TABLE IF EXISTS files_fts")
+                cursor.execute(_create_fts)
+                # external-content FTS5 is empty after CREATE — 'rebuild' fills the inverted index.
+                cursor.execute("INSERT INTO files_fts(files_fts) VALUES('rebuild')")
+            try:
+                _existing = [r[1] for r in cursor.execute("PRAGMA table_info(files_fts)").fetchall()]
+                if set(_existing) == set(_fts_cols):
+                    logger.debug("FTS index schema current — preserved (no rebuild).")
+                else:
+                    _recreate_fts()
+                    logger.info("FTS index (re)created + repopulated (schema was %s).", _existing or "missing")
+            except Exception as e:
+                logger.warning("FTS schema check failed (%s); doing a full recreate+repopulate.", e)
+                try:
+                    _recreate_fts()
+                except Exception as e2:
+                    logger.error("FTS recreate failed: %s", e2)
+
+            # Keep the FTS index in sync automatically via triggers on `files`. This is the ONLY
+            # FTS maintenance — the app writes to `files`, triggers mirror it (correct old terms on
+            # delete, new terms on insert), so moves/edits/deletes can never leave stale terms.
+            self._create_fts_triggers(cursor)
 
             # Embeddings table for semantic search
             cursor.execute(
@@ -194,13 +210,7 @@ class FileIndex:
                     import json as _json
                     val = _json.dumps(value)
                 cursor.execute(f"UPDATE files SET {field} = ? WHERE id = ?", (val, file_id))
-                # update FTS mirror for edited fields
-                if field in {"caption", "tags", "label"}:
-                    cursor.execute(
-                        "INSERT OR REPLACE INTO files_fts (rowid, file_name, file_path, category, ocr_text, caption, tags) "
-                        "SELECT id, file_name, file_path, category, ocr_text, caption, tags FROM files WHERE id = ?",
-                        (file_id,)
-                    )
+                # FTS mirror for edited fields is maintained by the files_fts_au trigger.
                 conn.commit()
                 return True
         except Exception as e:
@@ -233,46 +243,16 @@ class FileIndex:
                 stale_deleted = cursor.rowcount
                 if stale_deleted > 0:
                     logger.info(f"Removed {stale_deleted} stale entry/entries for path: {new_path}")
-                    # Also clean up FTS entries for deleted records
-                    cursor.execute(
-                        "DELETE FROM files_fts WHERE rowid NOT IN (SELECT id FROM files)"
-                    )
-                
+                    # (The files_fts_ad trigger already removed their FTS entries.)
+
                 # Update file_path in main table
                 cursor.execute(
                     "UPDATE files SET file_path = ? WHERE id = ?",
                     (new_path, file_id)
                 )
                 rows_updated = cursor.rowcount
-                
-                # For external content FTS5 tables, we CANNOT use UPDATE directly.
-                # We must DELETE the old entry and INSERT a new one from the main table.
-                try:
-                    # Delete old FTS entry
-                    cursor.execute(
-                        "DELETE FROM files_fts WHERE rowid = ?",
-                        (file_id,)
-                    )
-                    
-                    # Re-insert updated content from main table
-                    cursor.execute(
-                        """
-                        INSERT INTO files_fts(rowid, file_name, file_path, category, ocr_text, caption, tags)
-                        SELECT id, file_name, file_path, category, ocr_text, caption, tags 
-                        FROM files WHERE id = ?
-                        """,
-                        (file_id,)
-                    )
-                except Exception as fts_err:
-                    error_str = str(fts_err).lower()
-                    # Auto-heal if FTS index is corrupted
-                    if "malformed" in error_str or "corrupt" in error_str:
-                        logger.warning(f"FTS index corrupted, triggering auto-rebuild...")
-                        conn.commit()  # Commit main table changes first
-                        self._auto_rebuild_fts()
-                    else:
-                        logger.warning(f"FTS index update failed for {file_id}: {fts_err}")
-                
+                # The files_fts_au trigger mirrors the path change into the FTS index (correct old
+                # terms removed, new terms added) — no manual FTS maintenance needed here.
                 conn.commit()
                 
                 if rows_updated > 0:
@@ -299,7 +279,6 @@ class FileIndex:
         if not updates:
             return 0
         rows_updated_total = 0
-        needs_fts_rebuild = False
         try:
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
@@ -316,10 +295,8 @@ class FileIndex:
                             "DELETE FROM files WHERE file_path = ? AND id != ?",
                             (new_path, file_id)
                         )
-                        if cursor.rowcount > 0:
-                            cursor.execute(
-                                "DELETE FROM files_fts WHERE rowid NOT IN (SELECT id FROM files)"
-                            )
+                        # (The stale DELETE above fires the files_fts_ad trigger, which removes its
+                        # FTS entry — no manual files_fts cleanup needed.)
                         # Update main table.
                         cursor.execute(
                             "UPDATE files SET file_path = ? WHERE id = ?",
@@ -327,31 +304,13 @@ class FileIndex:
                         )
                         if cursor.rowcount > 0:
                             rows_updated_total += 1
-                        # Rebuild this row's external-content FTS entry.
-                        try:
-                            cursor.execute("DELETE FROM files_fts WHERE rowid = ?", (file_id,))
-                            cursor.execute(
-                                """
-                                INSERT INTO files_fts(rowid, file_name, file_path, category, ocr_text, caption, tags)
-                                SELECT id, file_name, file_path, category, ocr_text, caption, tags
-                                FROM files WHERE id = ?
-                                """,
-                                (file_id,)
-                            )
-                        except Exception as fts_err:
-                            error_str = str(fts_err).lower()
-                            if "malformed" in error_str or "corrupt" in error_str:
-                                needs_fts_rebuild = True
-                            else:
-                                logger.warning(f"FTS update failed for {file_id}: {fts_err}")
+                        # The files_fts_au trigger mirrors each path change into the FTS index.
                     except Exception as row_err:
                         logger.warning(f"Batch path update failed for id {file_id}: {row_err}")
                         continue
                 conn.commit()
-            # Auto-heal a corrupted FTS index once, after the main-table commit.
-            if needs_fts_rebuild:
-                logger.warning("FTS index corrupted during batch update, triggering auto-rebuild...")
-                self._auto_rebuild_fts()
+            # FTS maintenance is handled by the files_fts_* triggers on `files` — no manual sync
+            # or post-commit rebuild needed here.
             logger.info(f"Batch-updated {rows_updated_total}/{len(updates)} file paths in database")
             return rows_updated_total
         except Exception as e:
@@ -396,13 +355,10 @@ class FileIndex:
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
                 
-                # Delete from main table
+                # Delete from main table (the files_fts_ad trigger removes its FTS entry)
                 cursor.execute("DELETE FROM files WHERE id = ?", (file_id,))
                 deleted = cursor.rowcount
-                
-                # Delete from FTS table
-                cursor.execute("DELETE FROM files_fts WHERE rowid = ?", (file_id,))
-                
+
                 # Delete from embeddings if exists
                 cursor.execute("DELETE FROM embeddings WHERE file_id = ?", (file_id,))
                 
@@ -439,9 +395,8 @@ class FileIndex:
                 
                 file_id = row[0]
                 
-                # Delete from all tables
+                # Delete from all tables (the files_fts_ad trigger removes the FTS entry)
                 cursor.execute("DELETE FROM files WHERE id = ?", (file_id,))
-                cursor.execute("DELETE FROM files_fts WHERE rowid = ?", (file_id,))
                 cursor.execute("DELETE FROM embeddings WHERE file_id = ?", (file_id,))
                 
                 conn.commit()
@@ -489,7 +444,7 @@ class FileIndex:
                     placeholders = ','.join('?' * len(stale_ids))
                     
                     cursor.execute(f"DELETE FROM files WHERE id IN ({placeholders})", stale_ids)
-                    cursor.execute(f"DELETE FROM files_fts WHERE rowid IN ({placeholders})", stale_ids)
+                    # (the files_fts_ad trigger removes each row's FTS entry)
                     cursor.execute(f"DELETE FROM embeddings WHERE file_id IN ({placeholders})", stale_ids)
                     
                     stats['removed'] = len(stale_ids)
@@ -624,6 +579,10 @@ class FileIndex:
                     except Exception:
                         pass
                 
+                # add_file re-inserts via INSERT OR REPLACE, which changes the row id; recursive
+                # triggers make that REPLACE fire the delete trigger so the old id's FTS entry is
+                # removed instead of orphaned. (Per-connection.)
+                cursor.execute("PRAGMA recursive_triggers=ON")
                 # Insert or update file
                 cursor.execute("""
                     INSERT OR REPLACE INTO files (
@@ -650,23 +609,7 @@ class FileIndex:
                     original_date
                 ))
                 
-                # Get the rowid for FTS update
-                rowid = cursor.lastrowid
-                if rowid == 0:  # If it was an UPDATE, get the existing rowid
-                    cursor.execute("SELECT id FROM files WHERE file_path = ?", (file_path,))
-                    rowid = cursor.fetchone()[0]
-                
-                # Update FTS index
-                cursor.execute("""
-                    INSERT OR REPLACE INTO files_fts (
-                        rowid, file_name, file_path, category, ocr_text, caption, tags
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                """, (
-                    rowid, file_name, file_path, category, ocr_text,
-                    file_data.get('caption', None),
-                    (", ".join(file_data.get('tags')) if isinstance(file_data.get('tags'), list) else file_data.get('tags'))
-                ))
-                
+                # FTS is mirrored automatically by the files_fts_* triggers on `files`.
                 conn.commit()
                 logger.debug(f"Indexed file: {file_path}")
                 return True
@@ -771,9 +714,13 @@ class FileIndex:
                 else:
                     match = None
 
-                # Base FTS query
+                # Base FTS query. Rank text matches by bm25 relevance (bm25 is negative, lower =
+                # better match) so the most relevant files come first. For a no-match browse
+                # (match is None) there is nothing to score — use a constant and keep name order.
+                # rank_expr is a fixed literal chosen by `match` (no user input) — safe to inline.
+                rank_expr = "bm25(files_fts)" if match else "0.0"
                 sql = (
-                    "SELECT f.*, 1 as rank FROM files f "
+                    f"SELECT f.*, {rank_expr} AS rank FROM files f "
                     "JOIN files_fts ON f.id = files_fts.rowid "
                 )
                 params: List[Any] = []
@@ -798,7 +745,8 @@ class FileIndex:
                         sql += " AND f.tags LIKE ?"
                         params.append(f"%{tg}%")
 
-                sql += " ORDER BY f.file_name LIMIT ?"
+                # Relevance order when we have a text match (bm25 ASC = best first); otherwise name.
+                sql += (" ORDER BY rank ASC LIMIT ?" if match else " ORDER BY f.file_name LIMIT ?")
                 params.append(limit)
 
                 try:
@@ -863,7 +811,10 @@ class FileIndex:
                             'ai_source': row['ai_source'] if 'ai_source' in row.keys() else None,
                             'vision_confidence': row['vision_confidence'] if 'vision_confidence' in row.keys() else None,
                             'metadata': json.loads(row['metadata']) if row['metadata'] else {},
-                            'rank': 0,
+                            # bm25 is negative (lower = better); flip to positive higher-is-better so
+                            # the service-layer sort (desc) and relevance_score work. The LIKE-fallback
+                            # rows (sql2) have no 'rank' column → default 0.
+                            'rank': (-row['rank']) if ('rank' in row.keys() and row['rank'] is not None) else 0,
                         })
                     except Exception:
                         # If any column missing/malformed, skip gracefully
@@ -1163,10 +1114,17 @@ class FileIndex:
         try:
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
-                # Delete from all related tables
+                # Drop the FTS sync triggers so a full wipe doesn't fire them once per row, clear
+                # every table, then recreate the triggers. ('delete-all' empties the FTS index.)
+                for _t in ("files_fts_ai", "files_fts_ad", "files_fts_au"):
+                    cursor.execute(f"DROP TRIGGER IF EXISTS {_t}")
                 cursor.execute("DELETE FROM files")
-                cursor.execute("DELETE FROM files_fts")
+                try:
+                    cursor.execute("INSERT INTO files_fts(files_fts) VALUES('delete-all')")
+                except Exception:
+                    cursor.execute("DELETE FROM files_fts")
                 cursor.execute("DELETE FROM embeddings")
+                self._create_fts_triggers(cursor)
                 conn.commit()
                 logger.info("File index cleared (files, files_fts, embeddings)")
         except Exception as e:
@@ -1249,6 +1207,75 @@ class FileIndex:
         
         return stats
     
+    def _create_fts_triggers(self, cursor):
+        """(Re)create the triggers that mirror `files` into the external-content FTS index.
+
+        They use old.* on delete (so the correct terms are removed even after the row's content has
+        changed) and new.* on insert — so a move/edit/delete can never leave stale terms behind.
+        Dropped+recreated so they always match the current column set. IMPORTANT: with these in
+        place the app must write ONLY to `files`; it must NOT write to files_fts directly (that
+        would double-apply). The one exception is bulk rebuilds (drop triggers, rebuild, recreate).
+        """
+        cols = "file_name, file_path, category, ocr_text, caption, tags"
+        newv = "new.file_name, new.file_path, new.category, new.ocr_text, new.caption, new.tags"
+        oldv = "old.file_name, old.file_path, old.category, old.ocr_text, old.caption, old.tags"
+        cursor.executescript(f"""
+            DROP TRIGGER IF EXISTS files_fts_ai;
+            DROP TRIGGER IF EXISTS files_fts_ad;
+            DROP TRIGGER IF EXISTS files_fts_au;
+            CREATE TRIGGER files_fts_ai AFTER INSERT ON files BEGIN
+              INSERT INTO files_fts(rowid, {cols}) VALUES (new.id, {newv});
+            END;
+            CREATE TRIGGER files_fts_ad AFTER DELETE ON files BEGIN
+              INSERT INTO files_fts(files_fts, rowid, {cols}) VALUES('delete', old.id, {oldv});
+            END;
+            CREATE TRIGGER files_fts_au AFTER UPDATE ON files BEGIN
+              INSERT INTO files_fts(files_fts, rowid, {cols}) VALUES('delete', old.id, {oldv});
+              INSERT INTO files_fts(rowid, {cols}) VALUES (new.id, {newv});
+            END;
+        """)
+
+    def _ensure_fts_healthy(self):
+        """Safety net for the external-content FTS5 index.
+
+        files_fts can silently desync — its content rows stay present but the inverted index goes
+        empty, so MATCH returns nothing and every search degrades to the LIKE fallback (alphabetical,
+        unranked). Detect that cheaply and rebuild via the canonical FTS5 'rebuild' command. Purely
+        best-effort: ANY failure is swallowed so app startup / indexing is never affected.
+        """
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cur = conn.cursor()
+                try:
+                    n = cur.execute("SELECT COUNT(*) FROM files").fetchone()[0]
+                except Exception:
+                    return  # files table not ready
+                if not n:
+                    return  # empty index — nothing to verify
+                # Broad common-letter prefix probe: matches filenames/paths/extensions of virtually
+                # any non-empty corpus. 0 hits while `files` has rows ⇒ the FTS index is empty/stale.
+                probe = "e* OR a* OR t* OR o* OR i* OR n* OR s* OR p* OR f*"
+                try:
+                    hit = cur.execute(
+                        "SELECT 1 FROM files_fts WHERE files_fts MATCH ? LIMIT 1", (probe,)
+                    ).fetchone()
+                except Exception:
+                    hit = None  # MATCH itself errored ⇒ treat as broken
+                if hit:
+                    return  # healthy
+                logger.warning("FTS index empty/stale (%d files, probe found nothing) — rebuilding.", n)
+                try:
+                    cur.execute("INSERT INTO files_fts(files_fts) VALUES('rebuild')")
+                    conn.commit()
+                    logger.info("FTS index rebuilt via FTS5 'rebuild'.")
+                    return
+                except Exception as e:
+                    logger.warning("FTS 'rebuild' failed (%s); trying drop+repopulate.", e)
+            # 'rebuild' failed (e.g. corrupt schema) → full drop/recreate path (own connection).
+            self._auto_rebuild_fts()
+        except Exception as e:
+            logger.error("FTS health check failed: %s", e)
+
     def _auto_rebuild_fts(self):
         """
         Automatically rebuild FTS index when corruption is detected.

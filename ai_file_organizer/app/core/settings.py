@@ -2,6 +2,7 @@
 Application settings and configuration management.
 """
 
+import copy
 import json
 import os
 from datetime import datetime
@@ -93,10 +94,15 @@ class Settings:
         self.seen_tips: List[str] = []
         
         # Load persisted config if available
+        self._loaded_cfg: Dict[str, Any] = {}
         try:
             self._load_config()
         except Exception:
             pass
+        # Snapshot (deep copy) of what we synced from disk. _save_config writes only the keys THIS
+        # process actually changed and merges the rest from disk, so two processes sharing
+        # settings.json (e.g. the app + a background helper) no longer clobber each other's writes.
+        self._loaded_cfg = copy.deepcopy(self._cfg_dict())
     
     def _load_default_categories(self) -> Dict[str, List[str]]:
         """Load default category mappings from resources."""
@@ -360,8 +366,9 @@ class Settings:
         self.onboarding_remind_count = int(data.get('onboarding_remind_count', 0))
         self.seen_tips = list(data.get('seen_tips', []))
 
-    def _save_config(self) -> None:
-        cfg = {
+    def _cfg_dict(self) -> Dict[str, Any]:
+        """The full settings as they currently stand in memory (one dict, ready to persist)."""
+        return {
             'ai_provider': self.ai_provider,
             'openai_api_key': self.openai_api_key or '',
             'openai_vision_model': self.openai_vision_model,
@@ -403,11 +410,109 @@ class Settings:
             'onboarding_remind_count': self.onboarding_remind_count,
             'seen_tips': self.seen_tips,
         }
+
+    def _config_lock(self):
+        """Cross-process exclusive lock around the read-merge-write. On Windows it uses msvcrt
+        byte-range locking; on POSIX it uses fcntl.flock. Best-effort — degrades to a no-op if
+        neither is available, so a lock problem never blocks persisting."""
+        import contextlib
+
+        @contextlib.contextmanager
+        def _lock():
+            f = None
+            locked = False
+            lockpath = str(self._config_file()) + '.lock'
+            try:
+                f = open(lockpath, 'a+')
+                try:
+                    f.seek(0, os.SEEK_END)
+                    if f.tell() == 0:
+                        f.write(' ')
+                        f.flush()
+                except Exception:
+                    pass
+                f.seek(0)
+                try:
+                    import msvcrt
+                    msvcrt.locking(f.fileno(), msvcrt.LK_LOCK, 1)
+                    locked = True
+                except ImportError:
+                    import fcntl
+                    fcntl.flock(f, fcntl.LOCK_EX)
+                    locked = True
+            except Exception:
+                locked = False
+            try:
+                yield
+            finally:
+                if f is not None:
+                    if locked:
+                        try:
+                            import msvcrt
+                            f.seek(0)
+                            msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+                        except ImportError:
+                            try:
+                                import fcntl
+                                fcntl.flock(f, fcntl.LOCK_UN)
+                            except Exception:
+                                pass
+                        except Exception:
+                            pass
+                    try:
+                        f.close()
+                    except Exception:
+                        pass
+        return _lock()
+
+    def _read_disk_cfg(self) -> Dict[str, Any]:
         try:
-            with open(self._config_file(), 'w', encoding='utf-8') as f:
-                json.dump(cfg, f)
+            with open(self._config_file(), 'r', encoding='utf-8') as f:
+                d = json.load(f)
+                return d if isinstance(d, dict) else {}
         except Exception:
-            pass
+            return {}
+
+    def _atomic_write(self, data: Dict[str, Any]) -> None:
+        import tempfile
+        path = self._config_file()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix='.settings-', suffix='.tmp')
+        try:
+            with os.fdopen(fd, 'w', encoding='utf-8') as f:
+                json.dump(data, f)
+            os.replace(tmp, path)
+        except Exception:
+            try:
+                os.unlink(tmp)
+            except Exception:
+                pass
+            raise
+
+    def _save_config(self) -> None:
+        # Write only the keys THIS process actually changed since its last sync; merge everything
+        # else from the current on-disk file. Prevents two processes sharing settings.json from
+        # clobbering each other's writes. Locked + atomic so it's race-safe.
+        mem = self._cfg_dict()
+        base = getattr(self, '_loaded_cfg', None) or {}
+        try:
+            with self._config_lock():
+                merged = dict(self._read_disk_cfg())   # start from the latest on disk
+                for k, v in mem.items():
+                    if v != base.get(k):               # changed here → our value wins
+                        merged[k] = v
+                    elif k not in merged:              # not persisted yet → seed it
+                        merged[k] = v
+                    # else: keep disk's value (may be another process's change)
+                self._atomic_write(merged)
+                self._loaded_cfg = copy.deepcopy(merged)
+        except Exception:
+            # Best-effort fallback so we never lose the ability to persist at all.
+            try:
+                self._atomic_write(mem)
+                self._loaded_cfg = copy.deepcopy(mem)
+            except Exception:
+                pass
 
     # Search rerank toggle
     def set_use_openai_search_rerank(self, use: bool) -> None:

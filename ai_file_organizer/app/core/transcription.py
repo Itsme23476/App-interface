@@ -88,16 +88,42 @@ def transcribe_audio(audio_path: str, language: Optional[str] = None,
     if not token:
         return {"ok": False, "error": "not_authenticated",
                 "message": "Please sign in to use voice dictation."}
+    # The speech provider decodes a fixed set of containers; AUDIO_EXTENSIONS is broader (it also
+    # lists .aiff/.aif/.caf/.wma). For an unsupported container, transcode to WAV first (via
+    # soundfile) so the provider can decode it — otherwise it rejects the raw bytes (format="").
+    _PROVIDER_AUDIO = {".mp3", ".wav", ".m4a", ".mp4", ".aac", ".flac",
+                       ".ogg", ".oga", ".opus", ".webm", ".mpga", ".mpeg"}
+    _send_name = os.path.basename(audio_path)
+    _tmp = None
+    if os.path.splitext(audio_path)[1].lower() not in _PROVIDER_AUDIO:
+        try:
+            import soundfile as sf
+            import tempfile
+            _data, _sr = sf.read(audio_path)
+            _fd, _tmp = tempfile.mkstemp(suffix=".wav")
+            os.close(_fd)
+            sf.write(_tmp, _data, _sr, subtype="PCM_16")
+            audio_path = _tmp
+            _send_name = os.path.splitext(_send_name)[0] + ".wav"
+        except Exception as e:
+            logger.warning(f"Audio transcode failed ({e}); sending the original bytes.")
+
     try:
         with open(audio_path, "rb") as f:
             audio_bytes = f.read()
     except Exception as e:
+        if _tmp:
+            try: os.unlink(_tmp)
+            except Exception: pass
         return {"ok": False, "error": "network", "message": f"Could not read audio: {e}"}
+    if _tmp:
+        try: os.unlink(_tmp)
+        except Exception: pass
 
     headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/octet-stream",
-        "X-Audio-Filename": os.path.basename(audio_path),
+        "X-Audio-Filename": _send_name,
     }
     if language:
         headers["X-Audio-Language"] = language

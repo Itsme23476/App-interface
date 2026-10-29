@@ -688,6 +688,13 @@ class SearchService:
                 enhanced_results.append(enhanced_result)
             
             logger.info(f"Search for '{query}' returned {len(enhanced_results)} results")
+            # Diagnostic: log the ranked order the app actually serves (top 10), so relevance
+            # ordering is verifiable from the log alone (not just the returned count).
+            _order = [
+                f"{i}. {r.get('file_name')} (rank={r.get('rank')}, rel={round(r.get('relevance_score', 0), 4)})"
+                for i, r in enumerate(enhanced_results[:10], 1)
+            ]
+            logger.info(f"[SEARCH_RESULTS] query='{query}' ranked order: {_order}")
             return enhanced_results
             
         except Exception as e:
