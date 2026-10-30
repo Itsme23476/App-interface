@@ -2393,6 +2393,9 @@ class MainWindow(QMainWindow):
         
         layout.addWidget(appearance_card)
 
+        # Connect to Claude / Codex (MCP) card — placed directly under Appearance (UI preference).
+        layout.addWidget(self._build_mcp_connect_card())
+
         # ======= HELP & ONBOARDING CARD =======
         help_card = QFrame()
         help_card.setObjectName("settingsCardHelp")
@@ -2975,7 +2978,7 @@ class MainWindow(QMainWindow):
         
         # Load account info on startup
         self._refresh_account_info()
-        
+
         layout.addStretch()
 
         # Set widget in scroll area and add to stack
@@ -2984,6 +2987,156 @@ class MainWindow(QMainWindow):
         
         # Apply correct theme styles on startup
         self._apply_settings_theme_styles(theme_manager.current_theme)
+
+    def _build_mcp_connect_card(self):
+        """Settings card: one-click connect/disconnect the Filect MCP server in Claude Desktop
+        (and Codex if installed), so the user never edits a config by hand."""
+        from PySide6.QtWidgets import QFrame, QVBoxLayout, QHBoxLayout, QLabel, QPushButton
+        from PySide6.QtCore import Qt
+        c = theme_manager.get_colors()
+        card = QFrame()
+        card.setObjectName("settingsCardMcp")
+        card.setStyleSheet(f"""
+            QFrame#settingsCardMcp {{
+                background-color: {c['surface']};
+                border: 1px solid {c['border']};
+                border-radius: 16px;
+            }}
+            QFrame#settingsCardMcp QLabel {{ border: none; background: transparent; }}
+        """)
+        lay = QVBoxLayout(card)
+        lay.setContentsMargins(20, 20, 20, 20)
+        lay.setSpacing(10)
+        title = QLabel("Connect to Claude")
+        title.setStyleSheet("font-size: 15px; font-weight: 600; color: #7C4DFF; "
+                            "background: transparent; border: none;")
+        lay.addWidget(title)
+        desc = QLabel("Let Claude use Filect to search, analyze, and organize your files — "
+                      "right from Claude Desktop.")
+        desc.setWordWrap(True)
+        desc.setStyleSheet("color: #7A7A90; font-size: 13px; background: transparent; border: none;")
+        lay.addWidget(desc)
+        self._mcp_status_label = QLabel()
+        lay.addWidget(self._mcp_status_label)
+        row = QHBoxLayout()
+        self._mcp_connect_btn = QPushButton()
+        self._mcp_connect_btn.setMinimumHeight(36)
+        self._mcp_connect_btn.setCursor(Qt.PointingHandCursor)
+        self._mcp_connect_btn.setStyleSheet(
+            "QPushButton { background-color:#7C4DFF; color:white; border:none; border-radius:10px; "
+            "padding:0 18px; font-weight:600; } QPushButton:hover { background-color:#6A3DF0; }")
+        self._mcp_connect_btn.clicked.connect(self._on_mcp_connect_clicked)
+        row.addWidget(self._mcp_connect_btn)
+        row.addStretch()
+        lay.addLayout(row)
+        hint = QLabel("Quit and reopen Claude Desktop after connecting, then ask Claude to search "
+                      "or organize your files.")
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #4A4A5A; font-size: 11px; background: transparent; border: none;")
+        lay.addWidget(hint)
+
+        # ---- Codex section (same Filect server; only shown if Codex is installed) ----
+        self._mcp_codex_btn = None
+        try:
+            from app.core import mcp_connect
+            codex_present = mcp_connect.codex_available()
+        except Exception:
+            codex_present = False
+        if codex_present:
+            sep = QFrame()
+            sep.setFrameShape(QFrame.HLine)
+            sep.setStyleSheet(f"background:{c['border']}; max-height:1px; border:none;")
+            lay.addWidget(sep)
+            ctitle = QLabel("Connect to Codex")
+            ctitle.setStyleSheet("font-size: 15px; font-weight: 600; color: #7C4DFF; "
+                                 "background: transparent; border: none;")
+            lay.addWidget(ctitle)
+            cdesc = QLabel("Also let Codex — the CLI and the ChatGPT desktop app — use Filect to "
+                           "search, analyze, and organize your files.")
+            cdesc.setWordWrap(True)
+            cdesc.setStyleSheet("color: #7A7A90; font-size: 13px; background: transparent; border: none;")
+            lay.addWidget(cdesc)
+            self._mcp_codex_status_label = QLabel()
+            lay.addWidget(self._mcp_codex_status_label)
+            crow = QHBoxLayout()
+            self._mcp_codex_btn = QPushButton()
+            self._mcp_codex_btn.setMinimumHeight(36)
+            self._mcp_codex_btn.setCursor(Qt.PointingHandCursor)
+            self._mcp_codex_btn.setStyleSheet(
+                "QPushButton { background-color:#7C4DFF; color:white; border:none; border-radius:10px; "
+                "padding:0 18px; font-weight:600; } QPushButton:hover { background-color:#6A3DF0; }")
+            self._mcp_codex_btn.clicked.connect(self._on_mcp_codex_clicked)
+            crow.addWidget(self._mcp_codex_btn)
+            crow.addStretch()
+            lay.addLayout(crow)
+            chint = QLabel("Restart the Codex / ChatGPT desktop app after connecting (or start a new "
+                           "Codex session).")
+            chint.setWordWrap(True)
+            chint.setStyleSheet("color: #4A4A5A; font-size: 11px; background: transparent; border: none;")
+            lay.addWidget(chint)
+
+        self._refresh_mcp_card()
+        return card
+
+    def _refresh_mcp_card(self):
+        try:
+            from app.core import mcp_connect
+            connected = mcp_connect.is_connected()
+        except Exception:
+            connected = False
+        if connected:
+            self._mcp_status_label.setText("●  Connected")
+            self._mcp_status_label.setStyleSheet("color:#4CAF50; font-size:13px; background:transparent; border:none;")
+            self._mcp_connect_btn.setText("Disconnect")
+        else:
+            self._mcp_status_label.setText("○  Not connected")
+            self._mcp_status_label.setStyleSheet("color:#7A7A90; font-size:13px; background:transparent; border:none;")
+            self._mcp_connect_btn.setText("Connect to Claude")
+        if getattr(self, "_mcp_codex_btn", None) is not None:
+            cconn = False
+            try:
+                from app.core import mcp_connect
+                cconn = mcp_connect.codex_is_connected()
+            except Exception:
+                pass
+            if cconn:
+                self._mcp_codex_status_label.setText("●  Connected")
+                self._mcp_codex_status_label.setStyleSheet("color:#4CAF50; font-size:13px; background:transparent; border:none;")
+                self._mcp_codex_btn.setText("Disconnect")
+            else:
+                self._mcp_codex_status_label.setText("○  Not connected")
+                self._mcp_codex_status_label.setStyleSheet("color:#7A7A90; font-size:13px; background:transparent; border:none;")
+                self._mcp_codex_btn.setText("Connect to Codex")
+
+    def _on_mcp_connect_clicked(self):
+        from app.core import mcp_connect
+        try:
+            if mcp_connect.is_connected():
+                ok, msg = mcp_connect.disconnect()
+            else:
+                ok, msg = mcp_connect.connect()
+        except Exception as e:
+            ok, msg = False, f"Error: {e}"
+        self._refresh_mcp_card()
+        try:
+            self.statusBar().showMessage(msg, 6000)
+        except Exception:
+            pass
+
+    def _on_mcp_codex_clicked(self):
+        from app.core import mcp_connect
+        try:
+            if mcp_connect.codex_is_connected():
+                ok, msg = mcp_connect.codex_disconnect()
+            else:
+                ok, msg = mcp_connect.codex_connect()
+        except Exception as e:
+            ok, msg = False, f"Error: {e}"
+        self._refresh_mcp_card()
+        try:
+            self.statusBar().showMessage(msg, 6000)
+        except Exception:
+            pass
 
     def setup_voice_page(self):
         """Voice page (index 3) — dictation sub-features as self-contained cards
@@ -3223,10 +3376,9 @@ class MainWindow(QMainWindow):
         from PySide6.QtWidgets import QFrame
         card_names = ['settingsCard', 'settingsCardHelp', 'settingsCardQS',
                       'settingsCardSearch', 'settingsCardAccount', 'settingsCardExclusions',
-                      'settingsCardSupport']
+                      'settingsCardSupport', 'settingsCardMcp']
         for name in card_names:
-            card = self.findChild(QFrame, name)
-            if card:
+            for card in self.findChildren(QFrame, name):
                 card.setStyleSheet(f"""
                     QFrame#{name} {{
                         background-color: {c['surface']};

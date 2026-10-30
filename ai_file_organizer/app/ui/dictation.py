@@ -169,7 +169,7 @@ class DictationController(QObject):
                 text = apply_sentence_case(
                     tidy_text(format_spoken(text)),
                     before,
-                    getattr(settings, "dictation_custom_terms", []) or [],
+                    settings.live_dictation_custom_terms(),
                 )
             except Exception as e:
                 logger.warning(f"[DICTATION] deterministic formatting skipped: {e}")
@@ -271,7 +271,7 @@ class DictationController(QObject):
     # ----- helpers -----
     def _custom_words(self):
         try:
-            words = getattr(settings, "dictation_custom_terms", None) or []
+            words = settings.live_dictation_custom_terms() or []
             return list(words) if words else None
         except Exception:
             return None

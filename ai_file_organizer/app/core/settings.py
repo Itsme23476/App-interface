@@ -608,6 +608,19 @@ class Settings:
         self.auth_user_email = ''
         self._save_config()
 
+    def live_dictation_custom_terms(self) -> List[str]:
+        """Dictation custom terms, read FRESH from disk so words added by another process (the MCP
+        server) — or in a different app run — take effect WITHOUT restarting the app. Keeps the
+        in-memory list in sync; falls back to it on any error."""
+        try:
+            disk = self._read_disk_cfg()
+            terms = disk.get('dictation_custom_terms')
+            if isinstance(terms, list):
+                self.dictation_custom_terms = [str(t) for t in terms]
+        except Exception:
+            pass
+        return self.dictation_custom_terms
+
     def has_stored_session(self) -> bool:
         """Check if we have stored auth tokens."""
         return bool(self.auth_access_token and self.auth_refresh_token)

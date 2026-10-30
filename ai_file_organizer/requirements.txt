@@ -38,3 +38,10 @@ odfpy>=1.4            # OpenDocument (.odt/.ods/.odp)
 # Video/audio analysis (v14.7.0 port): ffmpeg for keyframe + audio extraction. Replaces macOS
 # AVFoundation; imageio-ffmpeg bundles its own binary and survives PyInstaller.
 imageio-ffmpeg>=0.4.9
+# MCP server (experimental, Windows port of filect_mcp): exposes read-only Filect tools to
+# MCP clients (Claude Desktop/Code). mcp 2.x uses the MCPServer API.
+mcp>=2.3,<3
+# Codex connector: the Codex desktop app has no `codex` CLI, so we register Filect by writing
+# [mcp_servers.filect] into ~/.codex/config.toml directly. tomlkit edits it surgically, keeping
+# the user's other sections/comments intact. (tomllib, stdlib, handles reading.)
+tomlkit>=0.12,<1

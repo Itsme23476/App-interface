@@ -1340,6 +1340,17 @@ class AuthDialog(QDialog):
             
             if result.get('success'):
                 logger.info("Session restored successfully")
+                # restore_session may have refreshed (rotating the single-use refresh token); write
+                # the fresh pair back so settings.json never keeps a dead token (which would break
+                # the next launch and any process reading the saved session, e.g. the MCP server).
+                try:
+                    _toks = supabase_auth.get_session_tokens()
+                    if _toks and _toks.get("refresh_token"):
+                        settings.set_auth_tokens(_toks.get("access_token", ""),
+                                                 _toks.get("refresh_token", ""),
+                                                 settings.auth_user_email)
+                except Exception as _e:
+                    logger.debug(f"token persist after restore failed: {_e}")
                 self._check_subscription_silent()
             else:
                 settings.clear_auth_tokens()

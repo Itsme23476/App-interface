@@ -84,6 +84,16 @@ class SupabaseAuth:
                     headers={"apikey": SUPABASE_ANON_KEY}
                 )
                 logger.info("Supabase auth client initialized")
+                # Persist tokens whenever the session is established or auto-refreshed. gotrue
+                # rotates the single-use refresh token on every refresh; without saving the fresh
+                # pair, settings.json keeps the now-dead token and the next launch — plus any other
+                # process that reads the saved session (e.g. the MCP server) — fails to authenticate
+                # with "Invalid Refresh Token: Already Used". Guarded so a listener-API mismatch can
+                # never break auth init.
+                try:
+                    self._auth_client.on_auth_state_change(self._on_auth_state_change)
+                except Exception as _e:
+                    logger.debug(f"auth-state listener not registered: {_e}")
             except Exception as e:
                 logger.error(f"Failed to initialize Supabase auth client: {e}")
         else:
@@ -295,6 +305,41 @@ class SupabaseAuth:
                 'refresh_token': self._session.get('refresh_token', '')
             }
         return None
+
+    def _persist_tokens_to_disk(self):
+        """Write the current live session tokens to settings.json. A refresh rotates the single-use
+        refresh token, so if we don't save the fresh pair the on-disk token goes dead — breaking the
+        next launch and any other process (e.g. the MCP server) that reads the saved session.
+        Best-effort; never raises."""
+        try:
+            toks = self.get_session_tokens()
+            if not toks or not toks.get("refresh_token"):
+                return
+            from app.core.settings import settings
+            email = (self._user or {}).get("email", "") or settings.auth_user_email
+            if (toks.get("access_token") != settings.auth_access_token or
+                    toks.get("refresh_token") != settings.auth_refresh_token):
+                settings.set_auth_tokens(toks.get("access_token", ""),
+                                         toks.get("refresh_token", ""), email)
+                logger.info("Persisted refreshed session tokens to settings")
+        except Exception as e:
+            logger.debug(f"persist tokens failed: {e}")
+
+    def _on_auth_state_change(self, event, session):
+        """gotrue callback: persist tokens whenever a session is established or refreshed (any event
+        that carries a session except a sign-out). Keeps settings.json's tokens live. Best-effort."""
+        try:
+            ev = str(getattr(event, "value", event)).upper()
+            if session is None or "SIGNED_OUT" in ev:
+                return
+            try:
+                self._session = self._extract_session_dict(session)
+                self._access_token = self._session.get("access_token")
+            except Exception:
+                pass
+            self._persist_tokens_to_disk()
+        except Exception as e:
+            logger.debug(f"auth state change handler failed: {e}")
 
     def get_access_token(self) -> Optional[str]:
         """Return the current, LIVE access token for authenticated API calls.
