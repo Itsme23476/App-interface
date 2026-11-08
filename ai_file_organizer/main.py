@@ -80,11 +80,21 @@ def _setup_ipc_server(auth_dialog_holder: list, main_window_holder: list) -> QLo
             dlg = auth_dialog_holder[0]
             handle_deep_link(url, dlg)
         elif url.startswith('filect://'):
-            # Bring existing window to front
+            # Bring existing window to front — also when it's minimized. A login dialog that's up
+            # (signed out) wins, so this never shows the app to a signed-out user.
             win = main_window_holder[0]
             dlg = auth_dialog_holder[0]
-            target = win if (win and win.isVisible()) else dlg
+            modal = QApplication.activeModalWidget()
+            if modal is not None:
+                target = modal
+            elif win is not None and supabase_auth.is_authenticated:
+                target = win
+            else:
+                target = dlg
             if target:
+                if target is win and hasattr(win, '_bring_to_front'):
+                    win._bring_to_front()
+                    return
                 target.show()
                 target.raise_()
                 target.activateWindow()
@@ -211,8 +221,34 @@ def check_existing_session():
 # Entry point
 # ---------------------------------------------------------------------------
 
+def _run_mcp_server() -> None:
+    """Filect as the stdio MCP server that Claude / Codex launch ("Connect to Claude/Codex"). In the
+    installed app there's no Python or filect_mcp folder to start — the Connect button registers
+    `Filect.exe --mcp-server` (+ FILECT_MODE=mcp-server, which survives even if the args don't). Without
+    this branch that command opened the normal app and the MCP never started."""
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    # A --windowed .exe can start with sys.stdin / sys.stdout = None even though the MCP client handed it
+    # pipes — rebuild them from the inherited handles (fd 0/1): they ARE the MCP channel.
+    if sys.stdin is None:
+        sys.stdin = open(0, "r", encoding="utf-8", closefd=False)
+    if sys.stdout is None:
+        sys.stdout = open(1, "w", encoding="utf-8", closefd=False)
+    # From source, filect_mcp is the repo's sibling folder; in the installed app it's bundled.
+    repo = Path(__file__).resolve().parent.parent
+    if (repo / "filect_mcp").is_dir() and str(repo) not in sys.path:
+        sys.path.insert(0, str(repo))
+    from filect_mcp.server import server as mcp_server
+    mcp_server.run("stdio")
+
+
 def main():
     """Main application entry point."""
+    # MCP server mode first — before logging (it writes to stdout, which here IS the MCP channel) and
+    # before the single-instance check (which would hand the launch to the open window and exit).
+    if "--mcp-server" in sys.argv or os.environ.get("FILECT_MODE") == "mcp-server":
+        _run_mcp_server()
+        return
+
     setup_logging()
     register_url_scheme()
 
@@ -223,11 +259,12 @@ def main():
     app.setApplicationVersion("1.0.0")
     app.setOrganizationName("Filect")
 
-    # If there's a deep link and an instance is already running, forward and exit.
-    # This is the key fix: "Open the App" brings the EXISTING window (with pre-filled
-    # email) to front instead of opening a blank new instance.
-    if deep_link_url and _forward_to_existing_instance(deep_link_url):
-        logger.info(f"Forwarded '{deep_link_url}' to existing instance — exiting")
+    # If an instance is already running (maybe minimized), hand it the deep link — or
+    # just "open" for a plain launch (the desktop / Start-menu icon) — and exit. This is the key
+    # fix: "Open the App" brings the EXISTING window (with pre-filled email) to front instead of
+    # opening a blank new instance, and a second Filect never fights the first over the hotkeys.
+    if _forward_to_existing_instance(deep_link_url or 'filect://open'):
+        logger.info(f"Forwarded '{deep_link_url or 'filect://open'}' to existing instance — exiting")
         sys.exit(0)
 
     # We are the primary instance — set up IPC server for future launches.

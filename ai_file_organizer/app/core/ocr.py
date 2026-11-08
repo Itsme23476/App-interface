@@ -58,8 +58,21 @@ def extract_text_from_pdf(pdf_path: Path, lang: str = "eng", max_pages: int = 3)
     max_pages keeps runtime reasonable. Increase if needed.
     """
     try:
+        from .text_extract import extract_pdf_text, pdf_has_real_text
+        text = extract_pdf_text(pdf_path, max_pages=max_pages)   # the text layer: no OCR needed
+        if pdf_has_real_text(text):
+            return text
         _ensure_tesseract_path_on_windows()
-        pages = convert_from_path(str(pdf_path))
+        from .vision import render_pdf_page                        # scanned: render (no poppler)
+        try:
+            import pypdfium2 as pdfium
+            _doc = pdfium.PdfDocument(str(pdf_path))
+            n_pages = len(_doc)
+            _doc.close()
+        except Exception:
+            n_pages = 1
+        pages = [im for im in (render_pdf_page(pdf_path, i, 2000) for i in range(min(n_pages, max_pages)))
+                 if im is not None]
         extracted: List[str] = []
         for i, page_img in enumerate(pages[:max_pages]):
             text = pytesseract.image_to_string(page_img.convert("RGB"), lang=lang, config="--psm 3")

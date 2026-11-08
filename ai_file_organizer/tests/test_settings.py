@@ -8,6 +8,16 @@ import os
 from pathlib import Path
 
 
+@pytest.fixture(autouse=True)
+def _isolated_settings(tmp_path, monkeypatch):
+    """Never read or write the user's real settings.json (these tests used to load it — the "default"
+    shortcut they saw was the user's own 'shift+a')."""
+    from app.core.settings import Settings
+    monkeypatch.setattr(Settings, "get_app_data_dir", lambda self: tmp_path)
+    monkeypatch.setattr(Settings, "_save_config", lambda self: None)
+
+
+
 class TestSettings:
     """Test settings persistence and functionality."""
     

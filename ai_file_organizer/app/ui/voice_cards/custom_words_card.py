@@ -149,6 +149,13 @@ class VoiceCustomWordsCard(QFrame):
         row.addWidget(add_btn)
         root.addLayout(row)
 
+        # AI 'suggest from your field' panel (reused in onboarding too).
+        from app.ui.voice_cards.vocab_suggest import VocabSuggestPanel
+        # No manual-add in the card's panel — the card already has its own "Add" field above.
+        self._suggest = VocabSuggestPanel(self, show_manual_add=False)
+        self._suggest.terms_added.connect(lambda _t: self._refresh_chips())
+        root.addWidget(self._suggest)
+
         # Chips area.
         self._chips_host = QWidget()
         self._chips_host.setStyleSheet("background: transparent;")
@@ -169,6 +176,8 @@ class VoiceCustomWordsCard(QFrame):
         """Re-read theme colours and re-apply every themed stylesheet (chips included)."""
         self._c = get_theme_colors(theme)
         self._apply_theme_styles()
+        if hasattr(self, '_suggest'):
+            self._suggest.apply_theme(theme)
         self._refresh_chips()
 
     def _apply_theme_styles(self):

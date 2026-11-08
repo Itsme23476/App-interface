@@ -83,7 +83,10 @@ server = MCPServer(
         "MOVE files: generate_organization_plan previews, apply_organization_plan moves them, "
         "undo_last_organize reverses the most recent move; enable_auto_organize turns on background "
         "auto-sorting for a folder. Tools that change app settings (add_custom_words, "
-        "enable_auto_organize) must be confirmed with the user first. Nothing deletes files."
+        "enable_auto_organize) must be confirmed with the user first. Nothing deletes files. "
+        "A file that's ALREADY analyzed is not analyzed again or overwritten: analyze_file returns "
+        "its saved analysis, and save_to_index won't replace it. Pass reanalyze=true ONLY when the "
+        "user explicitly asks to re-analyze a file (a file that changed since is analyzed anew)."
     ),
     version="0.1.0",
 )
@@ -255,6 +258,63 @@ def _jsonsafe(d):
     return out
 
 
+# ---- "already analyzed" rule ----------------------------------------------------------------------
+# A file Filect (or an AI client) has already analyzed is NOT analyzed again or overwritten unless the
+# user explicitly asks for a re-analysis (reanalyze=true). A file that CHANGED since its analysis is a new
+# file: it's analyzed and saved as usual.
+_REANALYZE_HINT = ("It's already analyzed, so it wasn't analyzed again. Only if the user explicitly asks "
+                   "for a re-analysis: call this again with reanalyze=true (then save_to_index with "
+                   "reanalyze=true to replace the saved analysis).")
+
+
+def _file_sha256(p: Path) -> str:
+    import hashlib
+    h = hashlib.sha256()
+    with open(p, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _saved_analysis(p: Path):
+    """The analysis already saved for this file, or None: none saved yet, an empty one, or the file
+    changed since (its saved fingerprint no longer matches)."""
+    from app.core.database import file_index
+    row = file_index.get_file_by_path(str(p))
+    if not row or not (row.get("tags") or row.get("caption") or row.get("ocr_text")):
+        return None
+    if row.get("content_hash"):
+        try:
+            if _file_sha256(p) != row["content_hash"]:
+                return None
+        except Exception:
+            pass
+    return row
+
+
+def _saved_summary(p: Path, row: dict) -> dict:
+    import sqlite3
+    from app.core.database import file_index
+    source = None
+    try:
+        with sqlite3.connect(file_index.db_path) as con:
+            r = con.execute("SELECT ai_source FROM files WHERE file_path = ?", (str(p),)).fetchone()
+            source = r[0] if r else None
+    except Exception:
+        pass
+    return _jsonsafe({
+        "file": p.name,
+        "mode": "already_analyzed",
+        "type": row.get("label"),
+        "tags": row.get("tags") or [],
+        "caption": row.get("caption"),
+        "transcript_or_text": (row.get("ocr_text") or "")[:4000] or None,
+        "analyzed_by": "an AI client via MCP" if str(source or "").startswith("mcp:") else "Filect",
+        "analyzed_on": row.get("indexed_date"),
+        "note": _REANALYZE_HINT,
+    })
+
+
 @server.tool(description="Search your indexed files with a natural-language query (e.g. "
                          "'tax PDFs from last year', 'screenshots of invoices'). Returns "
                          "matching files with their path, name, type and relevance. Read-only.")
@@ -286,8 +346,10 @@ def get_file_details(path: str) -> dict:
 
 @server.tool(description="Analyze an IMAGE file (png/jpg/etc.) with the vision model and "
                          "return a label, tags and caption. Makes a paid AI call. Does NOT "
-                         "work on video. Read-only.")
-def analyze_image(path: str) -> dict:
+                         "work on video. Read-only. An image that's ALREADY analyzed returns its "
+                         "saved analysis instead — pass reanalyze=true ONLY if the user explicitly "
+                         "asks to re-analyze it.")
+def analyze_image(path: str, reanalyze: bool = False) -> dict:
     try:
         gate = _require_access()
         if gate:
@@ -296,6 +358,9 @@ def analyze_image(path: str) -> dict:
         p = Path(path)
         if not p.exists():
             return {"error": "file not found"}
+        saved = None if reanalyze else _saved_analysis(p)
+        if saved:
+            return _saved_summary(p, saved)
         cap = _LogCapture()
         logging.getLogger().addHandler(cap)
         try:
@@ -314,13 +379,20 @@ def analyze_image(path: str) -> dict:
 
 
 @server.tool(description="Transcribe an AUDIO file to text via Filect's speech backend. "
-                         "Makes a paid AI call. Read-only.")
-def transcribe_file(path: str) -> dict:
+                         "Makes a paid AI call. Read-only. A file that's ALREADY transcribed returns "
+                         "its saved transcript instead — pass reanalyze=true ONLY if the user "
+                         "explicitly asks to transcribe it again.")
+def transcribe_file(path: str, reanalyze: bool = False) -> dict:
     try:
         gate = _require_access()
         if gate:
             return gate
         from app.core.transcription import transcribe_audio
+        p = Path(path)
+        saved = None if reanalyze or not p.exists() else _saved_analysis(p)
+        if saved and saved.get("ocr_text"):
+            return {"ok": True, "text": saved["ocr_text"], "mode": "already_analyzed",
+                    "note": _REANALYZE_HINT}
         return transcribe_audio(path)
     except Exception as e:
         return {"error": f"transcribe failed: {e}"}
@@ -335,27 +407,28 @@ def add_custom_words(words: list) -> dict:
         if gate:
             return gate
         from app.core.settings import settings
-        cur = list(settings.dictation_custom_terms or [])
-        lower = {str(t).strip().lower() for t in cur}
-        added = 0
+        before = settings.live_dictation_custom_terms()      # from disk: the app may have added some
+        had = {t.lower() for t in before}
+        requested = []
         for w in (words or []):
             w = str(w).strip()
-            if not w or w.lower() in lower:
-                continue
-            if len(cur) >= 100:
-                break
-            cur.append(w)
-            lower.add(w.lower())
-            added += 1
+            if w and w.lower() not in {r.lower() for r in requested}:
+                requested.append(w)
+        settings.add_custom_terms(requested)                  # same rules as the app: dedup, ≤50 chars, cap 100
+        now = settings.dictation_custom_terms
+        added = [t for t in now if t.lower() not in had]
+        already = [w for w in requested if w.lower() in had]
+        skipped = [w for w in requested if w not in added and w not in already]
         if added:
-            settings.dictation_custom_terms = cur
-            settings._save_config()
-        return {
-            "added": added,
-            "total_now": len(settings.dictation_custom_terms),
-            "note": (f"Added {added} new custom word(s) to Filect's dictation vocabulary."
-                     if added else "Nothing added (already present, empty, or at the 100 cap)."),
-        }
+            note = f"Added {len(added)} word(s): {', '.join(added)}."
+        else:
+            note = "Nothing new was added."
+        if already:
+            note += f" Already in the list: {', '.join(already)}."
+        if skipped:
+            note += f" Not added (over 50 characters, or the 100-word list is full): {', '.join(skipped)}."
+        return {"added": len(added), "added_words": added, "already_present": already,
+                "not_added": skipped, "total_now": len(now), "note": note}
     except Exception as e:
         return {"error": f"add failed: {e}"}
 
@@ -367,8 +440,11 @@ def add_custom_words(words: list) -> dict:
                          "Filect's speech backend). You then produce the label/tags/caption "
                          "yourself. Unreadable/scanned files fall back to Filect's own analyzer. "
                          "This only READS — call save_to_index afterward with your tags to make the "
-                         "file searchable; it never moves or deletes the file.")
-def analyze_file(path: str):
+                         "file searchable; it never moves or deletes the file. A file that's ALREADY "
+                         "analyzed (and unchanged since) returns its saved analysis instead and isn't "
+                         "analyzed again — pass reanalyze=true ONLY if the user explicitly asks to "
+                         "re-analyze it.")
+def analyze_file(path: str, reanalyze: bool = False):
     try:
         gate = _require_access()
         if gate:
@@ -377,6 +453,9 @@ def analyze_file(path: str):
         p = Path(path)
         if not p.exists():
             return {"error": "file not found"}
+        saved = None if reanalyze else _saved_analysis(p)
+        if saved:
+            return _saved_summary(p, saved)
         # Readability probe — fail with a clear message instead of a silent empty analysis.
         try:
             with open(p, "rb") as _f:
@@ -401,14 +480,21 @@ def analyze_file(path: str):
 
         suffix = p.suffix.lower()
 
-        # IMAGE → hand a downscaled image to the CLIENT's vision. NO backend call.
-        if suffix in {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tiff", ".tif"}:
+        # IMAGE (or a scanned PDF's first page) → hand a downscaled image to the CLIENT's vision.
+        # NO backend call.
+        if suffix in {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tiff", ".tif", ".pdf"}:
             try:
                 import io
                 from PIL import Image as _PILImage
                 from mcp.server.mcpserver import Image as _McpImage
-                im = _PILImage.open(p)
-                im.load()
+                if suffix == ".pdf":
+                    from app.core.vision import render_pdf_page
+                    im = render_pdf_page(p, 0, 1024)
+                    if im is None:
+                        raise ValueError("couldn't render the PDF")
+                else:
+                    im = _PILImage.open(p)
+                    im.load()
                 if im.mode not in ("RGB", "RGBA"):
                     im = im.convert("RGB")
                 im.thumbnail((1024, 1024))
@@ -471,31 +557,58 @@ def analyze_file(path: str):
                          "SEARCHABLE (search_files will find it). Call AFTER analyze_file, passing "
                          "the label/tags/caption YOU produced plus any extracted text/transcript. "
                          "Writes to the local index only — never moves or changes the file. Images "
-                         "and videos count against the plan's media index limit, same as the app.")
-def save_to_index(path: str, label: str = "", tags: list = None, caption: str = "", text: str = "") -> dict:
+                         "and videos count against the plan's media index limit, same as the app. "
+                         "A file that ALREADY has an analysis (and is unchanged since) is NOT "
+                         "overwritten — pass reanalyze=true ONLY if the user explicitly asked to "
+                         "re-analyze it.")
+def save_to_index(path: str, label: str = "", tags: list = None, caption: str = "", text: str = "",
+                  reanalyze: bool = False) -> dict:
     try:
         gate = _require_access()
         if gate:
             return gate
         import mimetypes
+        from datetime import datetime
         from app.core.database import file_index
         from app.core.search import is_media_file
         p = Path(path)
         if not p.exists():
             return {"error": "file not found"}
-        if is_media_file(p):
+        saved = None if reanalyze else _saved_analysis(p)
+        if saved:
+            out = _saved_summary(p, saved)
+            out.update({"saved": False, "note": "Not saved: this file already has an analysis (shown "
+                        "here), and the user didn't ask to re-analyze it. Only if they did: call "
+                        "save_to_index again with reanalyze=true."})
+            return out
+        existing = file_index.get_file_by_path(str(p))
+        if is_media_file(p) and not existing:           # a re-analysis isn't a new media file
             from app.core.supabase_client import supabase_auth
             chk = supabase_auth.can_index_media(1) or {}
             if not chk.get("allowed"):
                 return {"error": chk.get("reason") or "media index limit reached for your plan",
                         "remaining": chk.get("remaining"), "limit": chk.get("limit")}
+        if (existing or {}).get("category"):
+            category = existing["category"]                 # keep the file's real category
+        else:
+            try:
+                from app.core.categorize import categorize_file
+                category = categorize_file(p) or "Misc"
+            except Exception:
+                category = "Misc"
+        try:
+            content_hash = _file_sha256(p)                  # so a later change is recognized
+        except Exception:
+            content_hash = None
         file_data = {
             "source_path": str(p),
             "name": p.name,
             "extension": p.suffix.lower(),
             "size": p.stat().st_size,
             "mime_type": mimetypes.guess_type(str(p))[0] or "",
-            "category": "Misc",
+            "category": category,
+            "content_hash": content_hash,
+            "last_indexed_at": datetime.utcnow().isoformat(),
             "label": (label or "").strip(),
             "tags": tags or [],
             "caption": (caption or "").strip(),
@@ -505,14 +618,19 @@ def save_to_index(path: str, label: str = "", tags: list = None, caption: str = 
             "metadata": {"is_file": True, "is_dir": False},
         }
         ok = file_index.add_file(file_data)
-        if ok and is_media_file(p):
+        if ok and is_media_file(p) and not existing:
             try:
                 from app.core.supabase_client import supabase_auth
                 supabase_auth.increment_index_usage(1)
             except Exception:
                 pass
-        return {"saved": bool(ok), "file": p.name,
-                "note": "Indexed — search_files can find it now." if ok else "could not save to index"}
+        if not ok:
+            note = "could not save to index"
+        elif reanalyze and existing:
+            note = "Re-analyzed — the new analysis replaced the old one; search_files finds it now."
+        else:
+            note = "Indexed — search_files can find it now."
+        return {"saved": bool(ok), "file": p.name, "note": note}
     except Exception as e:
         return {"error": f"save failed: {e}"}
 

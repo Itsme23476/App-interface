@@ -12,18 +12,105 @@ MOD_CONTROL = 0x0002
 MOD_SHIFT = 0x0004
 
 
-def text_before_caret(max_chars: int = 40) -> Optional[str]:
+_UIA_PASSWORD = 30019        # UIA_IsPasswordPropertyId
+_UIA_TEXT, _UIA_TEXT2 = 10014, 10024   # UIA_TextPatternId / UIA_TextPattern2Id
+
+
+def warm_text_before_caret() -> None:
+    """Load UI Automation once, off the UI thread (comtypes generates its wrappers on first use,
+    ~0.4 s), so the first dictation already reads the caret. Call from the UI thread: comtypes
+    must be imported there first (that thread is already COM-initialized by Qt)."""
+    try:
+        import threading
+        import comtypes.client
+
+        def _gen():
+            try:
+                comtypes.client.GetModule("UIAutomationCore.dll")
+            except Exception:
+                pass
+
+        threading.Thread(target=_gen, daemon=True, name="filect-uia-warm").start()
+    except Exception:
+        pass
+
+
+def _own_text_before_caret(max_chars: int) -> Optional[str]:
+    """The focused field is one of Filect's own (Qt) — read it directly."""
+    from PySide6.QtWidgets import QApplication, QLineEdit, QTextEdit, QPlainTextEdit
+    w = QApplication.focusWidget()
+    if isinstance(w, QLineEdit):
+        if w.echoMode() != QLineEdit.Normal:
+            return None
+        return w.text()[:w.cursorPosition()][-max_chars:]
+    if isinstance(w, (QTextEdit, QPlainTextEdit)):
+        c = w.textCursor()
+        return w.toPlainText()[:c.selectionStart()][-max_chars:]
+    return None
+
+
+def _uia_text_before_caret(max_chars: int) -> Optional[str]:
+    import comtypes.client
+    from comtypes.gen import UIAutomationClient as U
+    uia = comtypes.client.CreateObject(U.CUIAutomation, interface=U.IUIAutomation)
+    el = uia.GetFocusedElement()
+    if el is None or el.GetCurrentPropertyValue(_UIA_PASSWORD):
+        return None                                   # never read a password field
+    rng = None
+    try:                                              # the selection's start (= the caret if none)
+        sel = el.GetCurrentPattern(_UIA_TEXT).QueryInterface(U.IUIAutomationTextPattern).GetSelection()
+        if sel is not None and sel.Length > 0:
+            rng = sel.GetElement(0)
+            rng.MoveEndpointByRange(1, rng, 0)        # End := Start
+    except Exception:
+        rng = None
+    if rng is None:
+        try:
+            _active, rng = el.GetCurrentPattern(_UIA_TEXT2).QueryInterface(
+                U.IUIAutomationTextPattern2).GetCaretRange()
+        except Exception:
+            return None
+    rng.MoveEndpointByUnit(0, 0, -max_chars)          # Start endpoint, back max_chars characters
+    return rng.GetText(-1)
+
+
+def text_before_caret(max_chars: int = 40, timeout: float = 0.4) -> Optional[str]:
     """Return up to ``max_chars`` characters immediately before the system text
     caret in the focused control, or ``None`` if it can't be read.
 
     Dictation's sentence-case pass uses this to tell a sentence start from
-    mid-sentence. This is the safe stub: it returns ``None``, so
-    ``apply_sentence_case`` no-ops and nothing breaks. The real UI-Automation
-    implementation (TextPattern / GetSelection) lands in the context-aware
-    capitalization change (#2); until then formatting simply skips the
-    context-dependent step.
+    mid-sentence; with ``None`` it no-ops and nothing breaks. Read through UI
+    Automation (TextPattern selection / TextPattern2 caret) on a worker thread
+    with its own COM apartment, given at most ``timeout`` s — a hung target app
+    can never stall dictation. Password fields are never read.
     """
-    return None
+    try:
+        import os
+        import threading
+        user32 = ctypes.windll.user32
+        pid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(user32.GetForegroundWindow(), ctypes.byref(pid))
+        if pid.value == os.getpid():
+            return _own_text_before_caret(max_chars)
+        import comtypes                               # (UI thread first — see warm_text_before_caret)
+        box = {}
+
+        def _work():
+            try:
+                comtypes.CoInitializeEx(comtypes.COINIT_MULTITHREADED)
+            except OSError:
+                pass
+            try:
+                box["text"] = _uia_text_before_caret(max_chars)
+            except Exception:
+                pass
+
+        t = threading.Thread(target=_work, daemon=True, name="filect-caret")
+        t.start()
+        t.join(timeout)
+        return None if t.is_alive() else box.get("text")
+    except Exception:
+        return None
 
 
 class _WinHotkeyFilter(QAbstractNativeEventFilter):
@@ -81,14 +168,28 @@ def _parse_hotkey(sequence: str) -> Tuple[int, int]:
     return mods, vk
 
 
+_FIRST_HOTKEY_ID = 0xA11D
+_LAST_HOTKEY_ID = 0xBFFF     # app-defined hotkey ids must be 0x0000-0xBFFF
+_next_hotkey_id = _FIRST_HOTKEY_ID
+
+
+def _new_hotkey_id() -> int:
+    """A fresh id per registration. Every registration used to get 0xA11D, so with two global
+    shortcuts each WM_HOTKEY (wParam = the id) matched BOTH filters and pressing one ran the
+    other too — the same bug the Mac found in its Carbon hotkeys."""
+    global _next_hotkey_id
+    hotkey_id = _next_hotkey_id
+    _next_hotkey_id = _FIRST_HOTKEY_ID if hotkey_id >= _LAST_HOTKEY_ID else hotkey_id + 1
+    return hotkey_id
+
+
 def register_global_hotkey(parent: Optional[QWidget], sequence: str, on_activated: Callable[[], None]) -> Optional[Tuple[int, _WinHotkeyFilter, int]]:
     try:
         user32 = ctypes.windll.user32
         mods, vk = _parse_hotkey(sequence)
         if not vk:
             return None
-        # Pick an arbitrary id (avoid collisions). In a real app we'd track and reuse.
-        hotkey_id = 0xA11D  # arbitrary unique id
+        hotkey_id = _new_hotkey_id()
         hwnd = None
         if parent is not None:
             try:
@@ -106,12 +207,14 @@ def register_global_hotkey(parent: Optional[QWidget], sequence: str, on_activate
         return None
 
 
-def unregister_global_hotkey(hotkey_id: int, filt: _WinHotkeyFilter) -> None:
+def unregister_global_hotkey(hotkey_id: int, filt: _WinHotkeyFilter, hwnd: int = 0) -> None:
+    """hwnd: the window it was registered with (the 3rd item register_global_hotkey returns) —
+    UnregisterHotKey only frees a hotkey when given the same window."""
     try:
         app = QCoreApplication.instance()
         if app and filt:
             app.removeNativeEventFilter(filt)
-        ctypes.windll.user32.UnregisterHotKey(None, hotkey_id)
+        ctypes.windll.user32.UnregisterHotKey(hwnd or None, hotkey_id)
     except Exception:
         pass
 

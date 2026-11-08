@@ -96,17 +96,34 @@ def transcribe_audio(audio_path: str, language: Optional[str] = None,
     _send_name = os.path.basename(audio_path)
     _tmp = None
     if os.path.splitext(audio_path)[1].lower() not in _PROVIDER_AUDIO:
+        import tempfile
+        _fd, _wav = tempfile.mkstemp(suffix=".wav")
+        os.close(_fd)
         try:
             import soundfile as sf
-            import tempfile
             _data, _sr = sf.read(audio_path)
-            _fd, _tmp = tempfile.mkstemp(suffix=".wav")
-            os.close(_fd)
-            sf.write(_tmp, _data, _sr, subtype="PCM_16")
-            audio_path = _tmp
+            sf.write(_wav, _data, _sr, subtype="PCM_16")
+            audio_path, _tmp = _wav, _wav
             _send_name = os.path.splitext(_send_name)[0] + ".wav"
         except Exception as e:
-            logger.warning(f"Audio transcode failed ({e}); sending the original bytes.")
+            # soundfile (libsndfile) can't read some containers — WMA above all. The ffmpeg that
+            # ships for video analysis reads them: 16 kHz mono WAV is all transcription needs.
+            try:
+                from .video_analysis import _run_ffmpeg
+                _run_ffmpeg(["-i", str(audio_path), "-vn", "-ac", "1", "-ar", "16000",
+                             "-c:a", "pcm_s16le", "-y", _wav], timeout=180)
+                if os.path.getsize(_wav) > 44:
+                    audio_path, _tmp = _wav, _wav
+                    _send_name = os.path.splitext(_send_name)[0] + ".wav"
+                else:
+                    raise RuntimeError("ffmpeg produced no audio")
+            except Exception as e2:
+                logger.warning(f"Audio transcode failed ({e}; ffmpeg: {e2}); sending the original bytes.")
+        if _tmp is None:
+            try:
+                os.unlink(_wav)
+            except Exception:
+                pass
 
     try:
         with open(audio_path, "rb") as f:
@@ -277,6 +294,19 @@ def _set_output_muted(muted: bool):
         vol.SetMute(1 if muted else 0, None)
     except Exception as e:
         logger.debug(f"_set_output_muted failed: {e}")
+
+
+_RUNNING = []   # capture QThreads kept alive until their thread has fully finished
+
+
+def keep_until_finished(thread):
+    """Hold a reference to a capture QThread until it has FULLY finished. A caller dropping its
+    reference (a re-click mid-transcription, a closed dialog) otherwise leaves run()'s own frame as
+    the last one, and when run() returns PySide deletes the QThread from inside itself →
+    "QThread: Destroyed while thread is still running" → abort. Call from the UI thread before
+    start(); finished ones are pruned here, so a QThread is never deleted while it runs."""
+    _RUNNING[:] = [t for t in _RUNNING if not t.isFinished()]
+    _RUNNING.append(thread)
 
 
 # ---------------------------------------------------------------------------

@@ -64,7 +64,24 @@ class Settings:
         self.dictation_mute_while_recording: bool = False
         # AI Cleanup level applied to a finished transcript: 'none' | 'light' | 'polished'.
         self.dictation_polish_level: str = 'none'
-        
+        # Voice > Custom Words: the last field the user asked the suggester about (prefilled).
+        self.dictation_last_niche: str = ''
+
+        # ======= AGENTS (local Claude Code / Codex) — keys copied verbatim from the Mac app =======
+        self.assistant_bypass: bool = False         # "Full access": run without Approve/Deny ("Ask first" = False)
+        self.assistant_model: str = ''              # '' = the UI default (opus), else a value from Claude's list
+        self.assistant_effort: str = ''             # '' = the UI default (high), else low/medium/high/xhigh/max
+        self.assistant_agent: str = 'claude'        # primary agent: 'claude' or 'codex'
+        self.assistant_codex_model: str = ''        # '' = Codex's top model
+        self.assistant_codex_effort: str = 'high'
+        self.assistant_codex_close_app: bool = False
+        self.assistant_claude_open_in: str = 'app'  # "Open in …": 'app' (desktop app) or 'terminal'
+        self.assistant_codex_open_in: str = 'app'
+        self.assistant_auto_open: bool = True       # the top card opens by itself for each task + answer
+        self.assistant_router_model: str = 'opus'   # model for the voice intent router
+        self.agents_list_collapsed: bool = True     # Agents page: the chat list starts hidden for a new user
+        self.agents_tour_seen: bool = False         # Agents page: "See what it can do" stops glowing once opened
+
         # ======= AUTO-ORGANIZE WATCHER SETTINGS =======
         # List of folders with per-folder instructions: [{path: str, instruction: str}, ...]
         self.auto_organize_folders: List[Dict[str, str]] = []
@@ -341,6 +358,9 @@ class Settings:
         self.dictation_mute_while_recording = bool(data.get('dictation_mute_while_recording', self.dictation_mute_while_recording))
         _lvl = data.get('dictation_polish_level', self.dictation_polish_level)
         self.dictation_polish_level = _lvl if _lvl in ('none', 'light', 'polished') else 'none'
+        ln = data.get('dictation_last_niche')
+        if isinstance(ln, str):
+            self.dictation_last_niche = ln.strip()
 
         # Auto-organize watcher settings
         auto_folders = data.get('auto_organize_folders', [])
@@ -362,6 +382,22 @@ class Settings:
             self.pinned_paths = pinned
         
         # Onboarding
+        # Agents (same rules as the Mac loader)
+        self.assistant_bypass = bool(data.get('assistant_bypass', self.assistant_bypass))
+        for _k in ('assistant_model', 'assistant_effort', 'assistant_codex_model', 'assistant_codex_effort'):
+            if isinstance(data.get(_k), str):
+                setattr(self, _k, data[_k].strip())
+        rm = data.get('assistant_router_model')
+        if isinstance(rm, str) and rm.strip():
+            self.assistant_router_model = rm.strip()
+        if data.get('assistant_agent') in ('claude', 'codex'):
+            self.assistant_agent = data['assistant_agent']
+        for _k in ('assistant_claude_open_in', 'assistant_codex_open_in'):
+            if data.get(_k) in ('app', 'terminal'):
+                setattr(self, _k, data[_k])
+        for _k in ('assistant_codex_close_app', 'assistant_auto_open', 'agents_list_collapsed', 'agents_tour_seen'):
+            if isinstance(data.get(_k), bool):
+                setattr(self, _k, data[_k])
         self.has_completed_onboarding = bool(data.get('has_completed_onboarding', False))
         self.onboarding_remind_count = int(data.get('onboarding_remind_count', 0))
         self.seen_tips = list(data.get('seen_tips', []))
@@ -396,6 +432,21 @@ class Settings:
             'dictation_custom_terms': self.dictation_custom_terms,
             'dictation_mute_while_recording': self.dictation_mute_while_recording,
             'dictation_polish_level': self.dictation_polish_level,
+            'dictation_last_niche': self.dictation_last_niche,
+            # Agents
+            'assistant_bypass': self.assistant_bypass,
+            'assistant_model': self.assistant_model,
+            'assistant_effort': self.assistant_effort,
+            'assistant_agent': self.assistant_agent,
+            'assistant_codex_model': self.assistant_codex_model,
+            'assistant_codex_effort': self.assistant_codex_effort,
+            'assistant_codex_close_app': self.assistant_codex_close_app,
+            'assistant_claude_open_in': self.assistant_claude_open_in,
+            'assistant_codex_open_in': self.assistant_codex_open_in,
+            'assistant_auto_open': self.assistant_auto_open,
+            'assistant_router_model': self.assistant_router_model,
+            'agents_list_collapsed': self.agents_list_collapsed,
+            'agents_tour_seen': self.agents_tour_seen,
             # Auto-organize watcher settings
             'auto_organize_folders': self.auto_organize_folders,
             'auto_organize_auto_start': self.auto_organize_auto_start,
@@ -620,6 +671,26 @@ class Settings:
         except Exception:
             pass
         return self.dictation_custom_terms
+
+    def add_custom_terms(self, terms) -> int:
+        """Merge new Custom Words into dictation_custom_terms (case-insensitive dedup) and
+        persist. Capped at 100 — Grok's key-term biasing limit per request. Returns the
+        number actually added."""
+        self.live_dictation_custom_terms()    # start from what's on disk (the MCP may have added some)
+        existing = {t.lower() for t in self.dictation_custom_terms}
+        added = 0
+        for t in (terms or []):
+            t = str(t).strip()
+            if not t or len(t) > 50 or t.lower() in existing:
+                continue
+            if len(self.dictation_custom_terms) >= 100:
+                break
+            self.dictation_custom_terms.append(t)
+            existing.add(t.lower())
+            added += 1
+        if added:
+            self._save_config()
+        return added
 
     def has_stored_session(self) -> bool:
         """Check if we have stored auth tokens."""

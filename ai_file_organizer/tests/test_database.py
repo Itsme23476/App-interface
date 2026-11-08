@@ -8,6 +8,24 @@ from pathlib import Path
 from datetime import datetime
 
 
+# The index's current field names (add_file reads source_path / name / extension / size) — these tests were
+# written with the first API (file_path / file_name …) and never updated, so every row went in with an empty
+# path. Same checks, today's API (ported from the Mac fix, 2026-11-07).
+_OLD_TO_NEW = {"file_path": "source_path", "file_name": "name", "file_extension": "extension", "file_size": "size"}
+
+
+def _add(db, data):
+    return db.add_file({_OLD_TO_NEW.get(k, k): v for k, v in data.items()})
+
+
+def _all(db):
+    """Every indexed file (the old get_all_files)."""
+    import sqlite3
+    with sqlite3.connect(db.db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        return [dict(r) for r in conn.execute("SELECT * FROM files")]
+
+
 class TestFileIndex:
     """Test database operations with temporary database."""
     
@@ -38,7 +56,7 @@ class TestFileIndex:
         }
         
         # Use file_data parameter
-        result = temp_db.add_file(file_data=test_file)
+        result = _add(temp_db, test_file)
         assert result is not None
         print("✅ File added to database successfully")
     
@@ -46,7 +64,7 @@ class TestFileIndex:
         """Test retrieving a file by path."""
         # Add a file first
         test_path = 'C:/test/image.jpg'
-        temp_db.add_file(file_data={
+        _add(temp_db, {
             'file_path': test_path,
             'file_name': 'image.jpg',
             'file_extension': '.jpg',
@@ -72,7 +90,7 @@ class TestFileIndex:
     def test_remove_file(self, temp_db):
         """Test removing a file from the index."""
         test_path = 'C:/test/to_remove.txt'
-        temp_db.add_file(file_data={
+        _add(temp_db, {
             'file_path': test_path,
             'file_name': 'to_remove.txt',
             'file_extension': '.txt',
@@ -85,7 +103,7 @@ class TestFileIndex:
         assert temp_db.get_file_by_path(test_path) is not None
         
         # Remove it
-        temp_db.remove_file(test_path)
+        temp_db.delete_file_by_path(test_path)
         
         # Verify it's gone
         assert temp_db.get_file_by_path(test_path) is None
@@ -95,7 +113,7 @@ class TestFileIndex:
         """Test getting all files from index."""
         # Add multiple files
         for i in range(5):
-            temp_db.add_file(file_data={
+            _add(temp_db, {
                 'file_path': f'C:/test/file_{i}.txt',
                 'file_name': f'file_{i}.txt',
                 'file_extension': '.txt',
@@ -104,14 +122,14 @@ class TestFileIndex:
                 'has_ocr': False,
             })
         
-        all_files = temp_db.get_all_files()
+        all_files = _all(temp_db)
         assert len(all_files) == 5
         print(f"✅ Retrieved all {len(all_files)} files")
     
     def test_search_files(self, temp_db):
         """Test basic search functionality."""
         # Add files with different labels
-        temp_db.add_file(file_data={
+        _add(temp_db, {
             'file_path': 'C:/test/vacation_photo.jpg',
             'file_name': 'vacation_photo.jpg',
             'file_extension': '.jpg',
@@ -122,7 +140,7 @@ class TestFileIndex:
             'caption': 'Family at the beach',
         })
         
-        temp_db.add_file(file_data={
+        _add(temp_db, {
             'file_path': 'C:/test/tax_document.pdf',
             'file_name': 'tax_document.pdf',
             'file_extension': '.pdf',
@@ -145,7 +163,7 @@ class TestFileIndex:
         """Test clearing all files from database."""
         # Add some files
         for i in range(3):
-            temp_db.add_file(file_data={
+            _add(temp_db, {
                 'file_path': f'C:/test/clear_{i}.txt',
                 'file_name': f'clear_{i}.txt',
                 'file_extension': '.txt',
@@ -155,19 +173,19 @@ class TestFileIndex:
             })
         
         # Verify files exist
-        assert len(temp_db.get_all_files()) == 3
+        assert len(_all(temp_db)) == 3
         
         # Clear all
-        temp_db.clear_all()
+        temp_db.clear_index()
         
         # Verify empty
-        assert len(temp_db.get_all_files()) == 0
+        assert len(_all(temp_db)) == 0
         print("✅ Database cleared successfully")
     
     def test_update_file(self, temp_db):
         """Test updating an existing file."""
         test_path = 'C:/test/updateme.pdf'
-        temp_db.add_file(file_data={
+        _add(temp_db, {
             'file_path': test_path,
             'file_name': 'updateme.pdf',
             'file_extension': '.pdf',
@@ -178,7 +196,7 @@ class TestFileIndex:
         })
         
         # Update the file
-        temp_db.add_file(file_data={
+        _add(temp_db, {
             'file_path': test_path,
             'file_name': 'updateme.pdf',
             'file_extension': '.pdf',
@@ -198,7 +216,7 @@ class TestFileIndex:
         """Test counting files in database."""
         # Add files
         for i in range(7):
-            temp_db.add_file(file_data={
+            _add(temp_db, {
                 'file_path': f'C:/test/count_{i}.txt',
                 'file_name': f'count_{i}.txt',
                 'file_extension': '.txt',

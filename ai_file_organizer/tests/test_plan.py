@@ -88,19 +88,21 @@ class TestPlanCreation:
         print(f"✅ Deduplication: {len(plan)} -> {len(deduped)} items")
     
     def test_ensure_all_files_included(self):
-        """Test that all files are included in plan."""
+        """Files the AI left out of the plan are placed in a folder — none are left unorganized.
+        (Today's contract: plan = {"folders": {name: [file ids]}}, ids = the set of every file id.)"""
         from app.core.ai_organizer import ensure_all_files_included
-        
-        plan = [
-            {'source': 'C:/test/file1.pdf', 'destination': 'C:/org/file1.pdf'},
-        ]
-        
-        all_files = ['C:/test/file1.pdf', 'C:/test/file2.pdf']
-        
-        result = ensure_all_files_included(plan, all_files, 'C:/org')
-        # Should include missing file
-        assert len(result) >= len(all_files)
-        print(f"✅ All files included: {len(result)} items")
+
+        plan = {"folders": {"Invoices": [1], "Photos": [3]}}
+        files_info = [{"id": 1, "name": "invoice_jan.pdf", "category": "Documents"},
+                      {"id": 2, "name": "invoice_feb.pdf", "category": "Documents"},
+                      {"id": 3, "name": "beach.jpg", "category": "Images"}]
+        result = ensure_all_files_included(plan, {1, 2, 3}, files_info)
+        placed = [int(i) for ids in result["folders"].values() for i in ids]
+        assert sorted(placed) == [1, 2, 3], result
+        # a list of ids works too (it used to crash with "list - set")
+        result2 = ensure_all_files_included({"folders": {"A": [1]}}, [1, 2], files_info)
+        assert sorted(int(i) for ids in result2["folders"].values() for i in ids) == [1, 2]
+        print(f"✅ All files included: {result['folders']}")
 
 
 class TestPlanValidation:

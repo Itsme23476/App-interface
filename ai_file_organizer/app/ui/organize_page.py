@@ -98,58 +98,92 @@ class VoiceRecordWorker(QThread):
         self.sample_rate = sample_rate
         self.is_recording = False
         self.audio_data = []
-    
+
+    def start(self):
+        from app.core.transcription import keep_until_finished
+        keep_until_finished(self)   # a re-click mid-transcription must not delete a running QThread
+        self.is_recording = True    # here, not in run(): a Stop that lands before the thread runs must
+        super().start()             #   win — run() setting it used to undo that Stop (recorded forever)
+
+    def _capture(self, np) -> bool:
+        """Record until stop_recording(). QtMultimedia, like dictation — not sounddevice: PortAudio
+        has no working ARM64 binary (the import fails there), and opening/closing an in-process
+        PortAudio stream per recording is the pattern behind Mac's "voice stops until restart".
+        QAudioSource needs an event loop in its thread, so this thread runs one meanwhile."""
+        from PySide6.QtCore import QEventLoop, QTimer
+        from PySide6.QtMultimedia import QAudioFormat, QAudioSource, QMediaDevices
+        fmt = QAudioFormat()
+        fmt.setSampleRate(self.sample_rate)
+        fmt.setChannelCount(1)
+        fmt.setSampleFormat(QAudioFormat.Int16)
+        dev = QMediaDevices.defaultAudioInput()
+        if dev is None or dev.isNull():
+            return False
+        source = QAudioSource(dev, fmt)
+        io = source.start()
+        if io is None:
+            return False
+        rest = [b""]
+
+        def read():
+            data = rest[0] + bytes(io.readAll())
+            n = len(data) - len(data) % 2
+            rest[0] = data[n:]
+            if n:
+                self.audio_data.append(np.frombuffer(data[:n], dtype=np.int16).copy())
+
+        loop = QEventLoop()
+        io.readyRead.connect(read)
+        poll = QTimer()
+        poll.setInterval(50)
+        poll.timeout.connect(lambda: self.is_recording or loop.quit())
+        poll.start()
+        if self.is_recording:
+            loop.exec()
+        poll.stop()
+        read()                       # the tail
+        source.stop()
+        return True
+
     def run(self):
         try:
-            import sys, os
-            # On Windows with PyInstaller --onefile, add the sounddevice PortAudio
-            # binary directory to the DLL search path so its dependencies load correctly
-            if sys.platform == "win32" and hasattr(sys, "_MEIPASS"):
-                portaudio_dir = os.path.join(sys._MEIPASS, "_sounddevice_data", "portaudio-binaries")
-                if os.path.isdir(portaudio_dir):
-                    os.add_dll_directory(portaudio_dir)
-
-            import sounddevice as sd
             import numpy as np
             from scipy.io import wavfile
             import tempfile
             import os
-            from app.core.vision import transcribe_audio_proxy
-            
-            self.is_recording = True
+            from app.core.transcription import _normalize_peak, transcribe_audio
+
             self.audio_data = []
-            
-            def audio_callback(indata, frames, time, status):
-                if self.is_recording:
-                    self.audio_data.append(indata.copy())
-            
-            # Start recording
-            with sd.InputStream(samplerate=self.sample_rate, channels=1, 
-                              dtype='int16', callback=audio_callback):
-                while self.is_recording:
-                    sd.sleep(100)  # Check every 100ms
-            
+
+            if not self._capture(np):
+                self.recording_stopped.emit()
+                self.error.emit("Could not access the microphone.")
+                return
+
             self.recording_stopped.emit()
             
             if not self.audio_data:
                 self.error.emit("No audio recorded")
                 return
             
-            # Combine audio chunks
-            audio = np.concatenate(self.audio_data, axis=0)
-            
+            # Combine audio chunks (raised to an even level, like dictation — quiet Windows mics)
+            audio = _normalize_peak(np.concatenate(self.audio_data, axis=0))
+
             # Save to temporary WAV file
             with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as f:
                 temp_path = f.name
                 wavfile.write(temp_path, self.sample_rate, audio)
-            
+
             try:
-                # Transcribe via the Supabase Edge Function Whisper proxy.
-                text = transcribe_audio_proxy(temp_path)
-                if text is None:
-                    self.error.emit("Voice transcription failed — please sign in and try again.")
+                # The same engine and settings as dictation (Voice → Language, Custom Words). The old
+                # Whisper call had no language hint: accented English came back translated into
+                # Greek, and near-silent clips as invented text ("you", a Korean news sign-off).
+                result = transcribe_audio(temp_path, language=settings.dictation_language or None,
+                                          terms=settings.live_dictation_custom_terms())
+                if result.get("ok"):
+                    self.finished.emit(result.get("text", ""))
                 else:
-                    self.finished.emit(text)
+                    self.error.emit(result.get("message") or "Transcription failed — please try again.")
             finally:
                 # Clean up temp file
                 try:
@@ -158,14 +192,20 @@ class VoiceRecordWorker(QThread):
                     pass
                     
         except ImportError as e:
-            self.error.emit(f"Missing audio library: {e}\nRun: pip install sounddevice scipy")
+            self.error.emit(f"Missing audio library: {e}\nRun: pip install numpy scipy")
         except Exception as e:
             logger.error(f"Voice recording error: {e}")
             self.error.emit(str(e))
-    
+
     def stop_recording(self):
         """Stop the recording."""
         self.is_recording = False
+
+
+def _still_transcribing(worker) -> bool:
+    """The last recording is still being transcribed. Starting another now would let that one's
+    late result reset the NEW recording's button — which then never stops recording."""
+    return worker is not None and worker.isRunning() and not worker.is_recording
 
 
 class IndexBeforeOrganizeWorker(QThread):
@@ -4840,9 +4880,20 @@ class WatchConfigDialog(QDialog):
         if self.is_recording_voice:
             # Stop current recording
             self._stop_folder_voice()
+        elif _still_transcribing(self.voice_worker):
+            from PySide6.QtGui import QCursor
+            from PySide6.QtWidgets import QToolTip
+            QToolTip.showText(QCursor.pos(), "Still transcribing your last recording — one moment…")
         else:
             # Start recording for this folder
             self._start_folder_voice(folder_path)
+
+    def done(self, result):
+        """Closing the dialog (Save, Cancel, ✕ or Esc) while recording would leave the mic
+        recording until Filect quits — stop it first."""
+        if self.is_recording_voice:
+            self._stop_folder_voice()
+        super().done(result)
     
     def _start_folder_voice(self, folder_path: str):
         """Start recording voice for a folder's instruction."""
@@ -6775,6 +6826,8 @@ class OrganizePage(QWidget):
         """Toggle voice recording on/off."""
         if self.is_recording_voice:
             self._stop_voice_recording()
+        elif _still_transcribing(self.voice_worker):
+            self.status_label.setText("⏳ Still transcribing your last recording — one moment…")
         else:
             self._start_voice_recording()
     

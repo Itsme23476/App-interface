@@ -2,7 +2,9 @@ PySide6>=6.5.0
 filetype>=1.2.0
 pytest>=7.0.0
 pdf2image>=1.16.3
+pypdfium2>=4.30.0     # PDF text + page rendering with its own engine (pdf2image needs poppler, absent on Windows)
 Pillow>=10.0.0
+pillow-heif>=0.18     # iPhone photos (.heic/.heif) — registered in app/core/__init__.py
 pytesseract>=0.3.10
 requests>=2.32.0
 certifi>=2024.0.0
@@ -31,6 +33,8 @@ psutil>=5.9.0
 # Document analysis (v14.8.0 port): Word/PowerPoint/RTF/ebook/OpenDocument text extraction.
 python-docx>=1.1.0    # Word .docx
 python-pptx>=1.0.0    # PowerPoint .pptx
+openpyxl>=3.1.0       # Excel .xlsx
+xlrd>=2.0.1           # Excel .xls (97–2003)
 striprtf>=0.0.26      # RTF -> plain text (.eml uses the stdlib email module)
 ebooklib>=0.18        # .epub ebook
 beautifulsoup4>=4.12  # HTML parsing for .epub chapters
@@ -41,6 +45,11 @@ imageio-ffmpeg>=0.4.9
 # MCP server (experimental, Windows port of filect_mcp): exposes read-only Filect tools to
 # MCP clients (Claude Desktop/Code). mcp 2.x uses the MCPServer API.
 mcp>=2.3,<3
+# Agents tab: drives the user's own Claude Code (their Claude login) as saved, resumable chats. The wheel
+# bundles a `claude` CLI for dev runs; the installed app doesn't ship it (PyInstaller has no hook that
+# collects it) — the user's own Claude Code (%USERPROFILE%\.local\bin\claude.exe) is used, with a
+# one-click setup when it's missing.
+claude-agent-sdk>=0.2.179
 # Codex connector: the Codex desktop app has no `codex` CLI, so we register Filect by writing
 # [mcp_servers.filect] into ~/.codex/config.toml directly. tomlkit edits it surgically, keeping
 # the user's other sections/comments intact. (tomllib, stdlib, handles reading.)

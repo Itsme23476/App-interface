@@ -5,6 +5,7 @@ Uses individual packages (supabase-auth, postgrest) instead of full supabase pac
 
 import calendar
 import logging
+import threading
 import webbrowser
 from datetime import datetime, date
 from typing import Optional, Dict, Any
@@ -75,7 +76,11 @@ class SupabaseAuth:
         self._session: Optional[Dict[str, Any]] = None
         self._subscription: Optional[Dict[str, Any]] = None
         self._access_token: Optional[str] = None
-        
+        # Serializes get_session(): indexing and organize plans call it from several threads at
+        # once, and an expired token would otherwise be refreshed by each of them with the SAME
+        # single-use refresh token (gotrue has no lock of its own).
+        self._token_lock = threading.RLock()
+
         if SUPABASE_AVAILABLE:
             try:
                 # Initialize GoTrue client for authentication
@@ -105,9 +110,10 @@ class SupabaseAuth:
             return None
         
         headers = {"apikey": SUPABASE_ANON_KEY}
-        if self._access_token:
-            headers["Authorization"] = f"Bearer {self._access_token}"
-        
+        token = self.get_access_token() or self._access_token   # live, not the cached copy
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+
         return SyncPostgrestClient(
             base_url=f"{SUPABASE_URL}/rest/v1",
             headers=headers
@@ -346,16 +352,18 @@ class SupabaseAuth:
 
         Prefers the gotrue client's current session (which auto-refreshes the
         token near expiry) over the cached ``_access_token``, which can go
-        stale after a background token rotation and cause 401s. Used by the
-        voice transcription path (streaming + batch) which authenticates
-        every recording. Falls back to the cached token, then None.
+        stale after a background token rotation and cause 401s. Used by every
+        authenticated call: voice transcription, the OpenAI proxy (vision,
+        tagging, organize plans, rerank) and the database client (subscription,
+        telemetry). Falls back to the cached token, then None.
         """
         if not self.is_authenticated:
             return None
         # Try the live session from gotrue (auto-refreshed).
         try:
             if self._auth_client is not None and hasattr(self._auth_client, "get_session"):
-                sess = self._auth_client.get_session()
+                with self._token_lock:          # one refresh at a time; the rest reuse its token
+                    sess = self._auth_client.get_session()
                 tok = None
                 if sess is not None:
                     tok = getattr(sess, "access_token", None)

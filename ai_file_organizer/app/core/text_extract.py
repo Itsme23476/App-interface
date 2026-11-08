@@ -8,6 +8,7 @@ import logging
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 import io
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -15,6 +16,7 @@ logger = logging.getLogger(__name__)
 MAX_ROWS_TO_READ = 100
 MAX_CHARS = 8000
 MAX_CELL_LENGTH = 200
+FONT_EXTENSIONS = {'.ttf', '.otf', '.ttc', '.woff', '.woff2'}
 
 
 def extract_csv_text(file_path: Path, max_rows: int = MAX_ROWS_TO_READ) -> Optional[str]:
@@ -205,7 +207,35 @@ def extract_spreadsheet_text(file_path: Path) -> Optional[str]:
         except Exception as e:
             logger.error(f"Error reading Excel file {file_path}: {e}")
             return None
-    
+
+    if ext == '.xls':                       # the old binary Excel format (Excel 97–2003)
+        try:
+            import xlrd
+            book = xlrd.open_workbook(str(file_path), on_demand=True)
+            parts = [f"Excel File: {file_path.name}", f"Sheets: {', '.join(book.sheet_names())}", ""]
+            for sheet_name in book.sheet_names()[:3]:
+                sheet = book.sheet_by_name(sheet_name)
+                parts.append(f"Sheet: {sheet_name}")
+                rows = [[str(v)[:100] if v not in (None, "") else '' for v in sheet.row_values(r)[:15]]
+                        for r in range(min(sheet.nrows, 20))]
+                if rows:
+                    headers = rows[0]
+                    parts.append(f"  Columns: {', '.join([h for h in headers if h])}")
+                    for j, row in enumerate(rows[1:10]):
+                        pairs = [f"{h}: {v}" for h, v in zip(headers, row) if v]
+                        if pairs:
+                            parts.append(f"    Row {j+1}: {'; '.join(pairs[:6])}")
+                parts.append("")
+            book.release_resources()
+            result = '\n'.join(parts)
+            return result[:MAX_CHARS] + "\n... (truncated)" if len(result) > MAX_CHARS else result
+        except ImportError:
+            logger.warning("xlrd not installed - cannot read .xls files")
+            return None
+        except Exception as e:
+            logger.error(f"Error reading Excel file {file_path}: {e}")
+            return None
+
     return None
 
 
@@ -225,6 +255,110 @@ def extract_docx_text(file_path: Path, max_chars: int = 20000) -> Optional[str]:
     except Exception as e:
         logger.warning(f"docx extraction failed for {file_path.name}: {e}")
         return None
+
+
+def extract_pdf_text(file_path: Path, max_pages: int = 10, max_chars: int = 20000) -> Optional[str]:
+    """Extract the text layer of a PDF (the first `max_pages` pages). pypdfium2 bundles its own PDF
+    engine, so nothing external is needed (the old path needed poppler, which Windows doesn't have).
+    A scanned PDF has no text layer -> None; the indexer then looks at it as an image instead."""
+    try:
+        import pypdfium2 as pdfium
+        doc = pdfium.PdfDocument(str(file_path))
+        try:
+            parts = []
+            for i in range(min(len(doc), max_pages)):
+                page = doc[i]
+                tp = page.get_textpage()
+                t = (tp.get_text_range() or "").replace("\r\n", "\n").strip()
+                tp.close()
+                page.close()
+                if t:
+                    parts.append(t)
+                if sum(len(p) for p in parts) >= max_chars:
+                    break
+        finally:
+            doc.close()
+    except Exception as e:
+        logger.warning(f"pdf text extraction failed for {file_path.name}: {e}")
+        return None
+    text = "\n\n".join(parts).strip()
+    return text[:max_chars] if text else None
+
+
+ZIP_MAX_MEMBERS = 15              # documents read from one archive
+ZIP_MAX_MEMBER_BYTES = 25 << 20   # a single document, uncompressed
+ZIP_MAX_TOTAL_BYTES = 60 << 20    # everything read from one archive
+ZIP_MAX_RATIO = 200               # uncompressed / compressed above this (and > 1 MB) = a zip bomb
+
+
+def extract_zip_text(file_path: Path, max_chars: int = 20000) -> Optional[str]:
+    """What's IN a .zip: the list of its files plus the text of the documents inside (any type
+    extract_file_text reads, PDFs included). A compressed archive used to give only the names
+    (its contents are unreadable raw bytes). Encrypted entries, nested archives, oversized and
+    bomb-like entries are skipped; only up to ZIP_MAX_MEMBERS documents are opened."""
+    import tempfile
+    import zipfile
+    try:
+        zf = zipfile.ZipFile(file_path)
+    except Exception as e:
+        logger.warning(f"zip open failed for {file_path.name}: {e}")
+        return None
+    readable = set(get_supported_text_formats()) | {'.pdf'}
+    parts, read, total = [], 0, 0
+    with zf:
+        files = [i for i in zf.infolist() if not i.is_dir()]
+        names = [i.filename for i in files]
+        parts.append(f"ZIP archive {file_path.name} with {len(files)} file(s): " + ", ".join(names[:60])
+                     + (" …" if len(names) > 60 else ""))
+        for info in files:
+            if read >= ZIP_MAX_MEMBERS or total >= ZIP_MAX_TOTAL_BYTES:
+                break
+            ext = Path(info.filename).suffix.lower()
+            if ext not in readable or ext == '.zip' or info.flag_bits & 0x1:   # 0x1 = encrypted
+                continue
+            if info.file_size > ZIP_MAX_MEMBER_BYTES or (
+                    info.file_size > (1 << 20) and info.file_size > ZIP_MAX_RATIO * max(info.compress_size, 1)):
+                continue
+            fd, tmp = tempfile.mkstemp(suffix=ext)
+            try:
+                with os.fdopen(fd, "wb") as out, zf.open(info) as src:
+                    out.write(src.read(ZIP_MAX_MEMBER_BYTES + 1))
+                text = extract_file_text(Path(tmp))
+            except Exception as e:
+                logger.debug(f"zip member {info.filename} skipped: {e}")
+                text = None
+            finally:
+                try:
+                    os.unlink(tmp)
+                except Exception:
+                    pass
+            read += 1
+            total += info.file_size
+            if text and text.strip():
+                parts.append(f"\n--- {info.filename} ---\n{text.strip()[:4000]}")
+    result = "\n".join(parts).strip()
+    return result[:max_chars] if result else None
+
+
+def extract_font_text(file_path: Path) -> Optional[str]:
+    """A font file's real name and style ("Georgia Bold Italic") — read from the font itself.
+    Its bytes are binary tables, so reading them as text used to give junk tags (glyf, cmap…)."""
+    try:
+        from PIL import ImageFont
+        font = ImageFont.truetype(str(file_path), 24)
+        family, style = font.getname()
+    except Exception as e:
+        logger.warning(f"font read failed for {file_path.name}: {e}")
+        return None
+    kind = {'.ttf': 'TrueType', '.otf': 'OpenType', '.ttc': 'TrueType collection',
+            '.woff': 'Web (WOFF)', '.woff2': 'Web (WOFF2)'}.get(file_path.suffix.lower(), '')
+    return (f"Font file. Typeface: {family}. Style: {style}. Format: {kind} font. "
+            f"Font family name: {family} {style}.").strip()
+
+
+def pdf_has_real_text(text: Optional[str]) -> bool:
+    """Enough real words to analyze as a document (a scanned PDF can carry a few stray glyphs)."""
+    return bool(text) and sum(c.isalnum() for c in text) >= 25
 
 
 def extract_pptx_text(file_path: Path, max_chars: int = 20000) -> Optional[str]:
@@ -350,6 +484,16 @@ def extract_file_text(file_path: Path) -> Optional[str]:
     # Excel files
     if ext in {'.xlsx', '.xls'}:
         return extract_spreadsheet_text(file_path)
+
+    # PDF: its text layer (None for a scanned PDF — never its raw bytes)
+    if ext == '.pdf':
+        return extract_pdf_text(file_path)
+
+    # Archives: the documents inside. Fonts: their real name (never their binary tables).
+    if ext == '.zip':
+        return extract_zip_text(file_path)
+    if ext in FONT_EXTENSIONS:
+        return extract_font_text(file_path)
 
     # Office documents + email (reuse the same text -> analyze_text pipeline)
     if ext == '.docx':

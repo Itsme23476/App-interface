@@ -67,7 +67,9 @@ class TestThemeManager:
         
         # Check for purple in any of the color values
         all_values = ' '.join(dark_colors.values()).upper()
-        assert '7C4DFF' in all_values or '9575FF' in all_values, "Purple accent color not found"
+        # The accent (#7C4DFF = rgb 124,77,255) is applied outside this dict since the redesign (see
+        # theme_manager's note); its tints are in it as rgba(124, 77, 255, …).
+        assert '7C4DFF' in all_values or '9575FF' in all_values or 'RGBA(124, 77, 255' in all_values,             "Purple accent color not found"
         print("✅ Purple accent color present")
     
     def test_scrollbar_colors(self):

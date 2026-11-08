@@ -624,8 +624,23 @@ class MainWindow(QMainWindow):
         
         # Contextual tips manager
         self.tips_manager = ContextualTipsManager(self, settings)
-        
+
         logger.info("Main window initialized")
+
+    def _bring_to_front(self):
+        """Show the (possibly minimized) window and put it in front — opening Filect again while
+        it's running brings this window back instead of starting a second copy."""
+        if self.isMinimized():
+            self.showNormal()
+        else:
+            self.show()
+        self.raise_()
+        self.activateWindow()
+        try:
+            import ctypes
+            ctypes.windll.user32.SetForegroundWindow(int(self.winId()))
+        except Exception:
+            pass
     
     def showEvent(self, event):
         """Handle window show event - show onboarding on first launch"""
@@ -844,7 +859,8 @@ class MainWindow(QMainWindow):
         self.setup_index_page()       # Index 2
         self.setup_voice_page()       # Index 3 (Voice sits above Settings)
         self.setup_settings_page()    # Index 4
-        
+        self.setup_agents_page()      # Index 5 (Agents — shown above Settings in the sidebar)
+
         # Set default page to Search
         self.page_stack.setCurrentIndex(0)
         self.nav_buttons[0].setChecked(True)
@@ -895,14 +911,17 @@ class MainWindow(QMainWindow):
         # Line-icons (drawn, theme-agnostic) replace the old emoji glyphs.
         from app.ui.icons import line_icon as _line_icon
         from PySide6.QtCore import QSize as _QSize
+        # (screen order; idx = the page index). Agents is page 5 but sits above Settings.
         nav_items = [
             ("search", "Search", 0),
             ("folder", "Organize", 1),
             ("layers", "Analyze Files", 2),
             ("mic", "Voice", 3),
+            ("sparkle", "Agents", 5),
             ("gear", "Settings", 4),
         ]
 
+        by_index = {}
         for icon_name, text, idx in nav_items:
             btn = QPushButton(f"  {text}")
             btn.setObjectName("navButton")
@@ -912,8 +931,10 @@ class MainWindow(QMainWindow):
             btn.setIconSize(_QSize(18, 18))
             btn.clicked.connect(lambda checked, i=idx: self._on_nav_clicked(i))
             nav_layout.addWidget(btn)
-            self.nav_buttons.append(btn)
+            by_index[idx] = btn
             self.nav_button_group.addButton(btn, idx)
+        # nav_buttons[i] must stay the button of PAGE i (onboarding + dictation index it that way)
+        self.nav_buttons = [by_index[i] for i in sorted(by_index)]
         
         nav_layout.addStretch()
         sidebar_layout.addWidget(nav_container, 1)  # Takes remaining space
@@ -3353,6 +3374,20 @@ class MainWindow(QMainWindow):
             self.theme_toggle_btn.setText("☀️ Light Mode")
             self.theme_toggle_btn.setChecked(False)
     
+    def setup_agents_page(self):
+        """Agents page (index 5): a local Claude Code agent does a task you type (or say) — live steps,
+        Approve/Deny, saved chats you can continue. A failure here must never take the app down."""
+        try:
+            from app.ui.assistant_page import AssistantPage
+            self.assistant_page = AssistantPage(self)
+            self.page_stack.addWidget(self.assistant_page)   # Index 5
+        except Exception as e:
+            logger.error(f"Agents page failed to load: {e}", exc_info=True)
+            self.assistant_page = None
+            ph = QLabel("Agents couldn't load. Please restart Filect.")
+            ph.setAlignment(Qt.AlignCenter)
+            self.page_stack.addWidget(ph)                    # keep Index 5 so the other pages stay put
+
     def _on_theme_toggle(self):
         """Handle theme toggle button click."""
         new_theme = theme_manager.toggle_theme()

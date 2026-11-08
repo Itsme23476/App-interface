@@ -77,6 +77,23 @@ def count_media_files(files: list) -> int:
                 count += 1
     return count
 
+
+# Formats Filect couldn't read before (no poppler, no HEIC/Excel readers, WMA, compressed ZIPs, fonts).
+# Their old rows are unchanged on disk, so they'd be skipped forever with an empty or junk analysis.
+_NOW_READ_AS_TEXT = {'.xlsx', '.xls', '.zip', '.ttf', '.otf', '.ttc', '.woff', '.woff2'}
+_NOW_READ_AS_MEDIA = {'.pdf', '.heic', '.heif', '.wma'}
+
+
+def _analyzed_before_its_reader(existing: Dict[str, Any], ext: str) -> bool:
+    """An unchanged file whose saved analysis predates its reader: re-analyze it once.
+    Text formats: the reader always saves the text it read (ocr_text), so a row without it is the
+    old junk/empty analysis. Media: the old rows have no analysis at all."""
+    if ext in _NOW_READ_AS_TEXT:
+        return not existing.get('ocr_text')
+    if ext in _NOW_READ_AS_MEDIA:
+        return not (existing.get('tags') or existing.get('caption') or existing.get('ocr_text'))
+    return False
+
 class SearchService:
     """High-level search service for file discovery."""
     
@@ -196,7 +213,8 @@ class SearchService:
             
             # Check if file already indexed with same content hash - skip AI analysis (unless forced)
             existing = self.index.get_file_by_path(str(file_path))
-            if (not force_ai) and existing and existing.get('content_hash') == full_metadata.get('content_hash'):
+            stale = existing is not None and _analyzed_before_its_reader(existing, file_path.suffix.lower())
+            if (not force_ai) and existing and not stale and existing.get('content_hash') == full_metadata.get('content_hash'):
                 # File unchanged - skip expensive AI analysis, return existing data
                 logger.debug(f"Skipping unchanged file: {file_path.name}")
                 existing['_file_path'] = file_path
@@ -212,8 +230,19 @@ class SearchService:
             # AI Analysis - Vision for images/PDFs; Text LLM for others
             ext = file_path.suffix.lower()
             image_extensions = {'.png', '.jpg', '.jpeg', '.bmp', '.tiff', '.tif', '.gif', '.webp', '.avif', '.heic', '.heif', '.ico', '.raw', '.cr2', '.nef', '.arw', '.pdf'}
-            
-            if ext in image_extensions:
+            # A PDF with a text layer (most PDFs) is analyzed like a Word file — from its words;
+            # only a scanned PDF (no text layer) goes to vision, as its first page rendered.
+            pdf_text = extract_file_text(file_path) if ext == '.pdf' else None
+            from .text_extract import pdf_has_real_text
+
+            if ext == '.pdf' and pdf_has_real_text(pdf_text):
+                full_metadata['ocr_text'] = pdf_text[:5000]
+                full_metadata['has_ocr'] = True
+                tvision = analyze_text(pdf_text, filename=file_path.name, user_instructions=user_instructions)
+                if tvision:
+                    full_metadata.update(tvision)
+                    full_metadata['ai_source'] = 'openai:pdf-text' if settings.ai_provider == 'openai' else 'ollama:pdf-text'
+            elif ext in image_extensions:
                 # Image/PDF: Use vision model
                 if settings.ai_provider == 'openai':
                     from .vision import _file_to_b64
@@ -223,6 +252,12 @@ class SearchService:
                         if gptv:
                             full_metadata.update(gptv)
                             full_metadata['ai_source'] = f'openai:{settings.openai_vision_model}'
+                            seen = gptv.get('detected_text') if ext == '.pdf' else None
+                            seen = " ".join(map(str, seen)) if isinstance(seen, list) else str(seen or "")
+                            if seen.strip():
+                                # a scanned PDF's words, as read by the AI — searchable like a text PDF's
+                                full_metadata['ocr_text'] = seen.strip()[:5000]
+                                full_metadata['has_ocr'] = True
                 else:
                     # Local models path
                     use_detailed = os.environ.get('USE_DETAILED_VISION', '1').strip() not in {'0', 'false', 'no'}
@@ -272,12 +307,16 @@ class SearchService:
                 # Non-image: Extract text and analyze
                 snippet = ""
                 try:
+                    from .text_extract import FONT_EXTENSIONS
                     extracted = extract_file_text(file_path)
                     if extracted:
                         snippet = extracted
-                        if ext == '.csv' or ext in {'.xlsx', '.xls', '.pdf', '.docx', '.pptx', '.rtf', '.eml', '.epub', '.odt', '.ods', '.odp'}:
+                        if ext == '.csv' or ext in {'.xlsx', '.xls', '.pdf', '.docx', '.pptx', '.rtf', '.eml', '.epub',
+                                                    '.odt', '.ods', '.odp', '.zip'} | FONT_EXTENSIONS:
                             full_metadata['ocr_text'] = extracted[:5000]
                             full_metadata['has_ocr'] = True
+                    elif ext in {'.zip', '.xlsx', '.xls'} | FONT_EXTENSIONS:
+                        pass        # binary formats: their raw bytes read as text are junk — name only
                     else:
                         with open(file_path, 'r', encoding='utf-8', errors='ignore') as fh:
                             snippet = fh.read(8000)

@@ -1142,7 +1142,7 @@ def ensure_all_files_included(
                 pass
 
     # Find missing file IDs
-    missing_ids = all_file_ids - included_ids
+    missing_ids = set(all_file_ids) - included_ids     # (a list works too — it used to crash: "list - set")
 
     if not missing_ids:
         return plan  # All files are included

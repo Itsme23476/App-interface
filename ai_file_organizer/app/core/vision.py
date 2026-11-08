@@ -38,11 +38,12 @@ from .settings import settings
 
 
 def _get_auth_token() -> Optional[str]:
-    """Get the current user's Supabase access token for proxy calls."""
+    """Get the current user's Supabase access token for proxy calls (live, auto-refreshed — the
+    cached _access_token goes stale after a background rotation and the proxy then answers 401)."""
     try:
         from .supabase_client import supabase_auth
         if supabase_auth.is_authenticated:
-            return supabase_auth._access_token
+            return supabase_auth.get_access_token()
         return None
     except Exception as e:
         logger.error(f"Failed to get auth token: {e}")
@@ -105,38 +106,6 @@ def _call_openai_proxy(endpoint: str, messages: List[Dict], max_tokens: int = 50
         return None
     except Exception as e:
         logger.error(f"OpenAI proxy call failed: {e}")
-        return None
-
-
-def transcribe_audio_proxy(audio_path: str) -> Optional[str]:
-    """Transcribe an audio file using Whisper through the Supabase proxy."""
-    try:
-        auth_token = _get_auth_token()
-        if not auth_token:
-            logger.warning("No Supabase auth token; cannot call Whisper proxy.")
-            return None
-
-        with open(audio_path, "rb") as fh:
-            audio_b64 = base64.b64encode(fh.read()).decode("utf-8")
-
-        headers = {
-            "Authorization": f"Bearer {auth_token}",
-            "Content-Type": "application/json",
-        }
-        payload = {
-            "endpoint": "whisper",
-            "audio_base64": audio_b64,
-            "audio_filename": os.path.basename(audio_path),
-        }
-
-        response = requests.post(OPENAI_PROXY_URL, json=payload, headers=headers, timeout=60)
-        if response.status_code != 200:
-            logger.error(f"Whisper proxy error: {response.status_code} - {response.text[:300]}")
-            return None
-
-        return response.json().get("text", "") or None
-    except Exception as e:
-        logger.error(f"Whisper transcription failed: {e}")
         return None
 
 
@@ -247,18 +216,42 @@ def _pil_image_to_b64(img: Image.Image, fmt: str = "PNG") -> str:
     return base64.b64encode(b).decode("utf-8")
 
 
+def render_pdf_page(file_path: Path, index: int = 0, max_side: int = 1024) -> Optional[Image.Image]:
+    """One PDF page as an RGB image, at most `max_side` px. pypdfium2 (its own PDF engine — nothing
+    to install); poppler (pdf2image) only as a fallback, since Windows doesn't have it."""
+    try:
+        import pypdfium2 as pdfium
+        doc = pdfium.PdfDocument(str(file_path))
+        try:
+            page = doc[index]
+            w, h = page.get_size()                        # PDF points (1/72 in)
+            scale = max(0.2, min(4.0, max_side / max(w, h, 1)))
+            img = page.render(scale=scale).to_pil().convert("RGB")
+            page.close()
+        finally:
+            doc.close()
+        img.thumbnail((max_side, max_side))
+        return img
+    except Exception as e:
+        logger.warning(f"pdf render (pdfium) failed for {file_path.name}: {e}")
+    try:
+        pages = convert_from_path(str(file_path), first_page=index + 1, last_page=index + 1)
+        if pages:
+            img = pages[0].convert("RGB")
+            img.thumbnail((max_side, max_side))
+            return img
+    except Exception as e:
+        logger.debug(f"pdf render (poppler) failed for {file_path.name}: {e}")
+    return None
+
+
 def _file_to_b64(file_path: Path) -> Optional[str]:
     suffix = file_path.suffix.lower()
     try:
         if suffix == ".pdf":
-            # Render first page to image
-            pages = convert_from_path(str(file_path), first_page=1, last_page=1)
-            if not pages:
-                return None
-            img = pages[0].convert("RGB")
-            # downscale large pages for speed
-            img.thumbnail((1024, 1024))
-            return _pil_image_to_b64(img)
+            # Render the first page to an image (a scanned PDF has no text layer to read)
+            img = render_pdf_page(file_path, 0, 1024)
+            return _pil_image_to_b64(img) if img is not None else None
         else:
             # load via PIL to optionally downscale
             with Image.open(file_path) as img:

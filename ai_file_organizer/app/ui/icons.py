@@ -137,6 +137,59 @@ def _keyboard(p):
     p.drawLine(QLineF(8, 14, 16, 14))            # spacebar
 
 
+# -- Agents page (Mac icons.py names) --
+def _bolt(p):
+    path = QPainterPath()
+    path.moveTo(13.5, 2.5); path.lineTo(5, 13.5); path.lineTo(11.5, 13.5)
+    path.lineTo(10.5, 21.5); path.lineTo(19, 10.5); path.lineTo(12.5, 10.5); path.closeSubpath()
+    p.drawPath(path)
+
+def _file(p):
+    path = QPainterPath()
+    path.moveTo(6, 3); path.lineTo(14, 3); path.lineTo(19, 8); path.lineTo(19, 21)
+    path.lineTo(6, 21); path.closeSubpath()
+    p.drawPath(path)
+    p.drawLine(QLineF(14, 3, 14, 8)); p.drawLine(QLineF(14, 8, 19, 8))
+
+def _sidebar(p):
+    p.drawRoundedRect(QRectF(3, 4.5, 18, 15), 3, 3)
+    p.drawLine(QLineF(15, 4.5, 15, 19.5))
+
+def _arrow_up(p):
+    p.drawLine(QLineF(12, 19, 12, 5.5))
+    head = QPainterPath()
+    head.moveTo(6, 11); head.lineTo(12, 5); head.lineTo(18, 11)
+    p.drawPath(head)
+
+def _stop(p):
+    p.save()
+    p.setBrush(p.pen().color())
+    p.drawRoundedRect(QRectF(7, 7, 10, 10), 2, 2)
+    p.restore()
+
+def _plus(p):
+    p.drawLine(QLineF(12, 5, 12, 19)); p.drawLine(QLineF(5, 12, 19, 12))
+
+def _chevron(p):
+    path = QPainterPath()
+    path.moveTo(7, 10); path.lineTo(12, 15); path.lineTo(17, 10)
+    p.drawPath(path)
+
+def _external(p):
+    path = QPainterPath()
+    path.moveTo(11, 5); path.lineTo(5, 5); path.lineTo(5, 19); path.lineTo(19, 19); path.lineTo(19, 13)
+    p.drawPath(path)
+    p.drawLine(QLineF(12.5, 11.5, 19.5, 4.5))
+    head = QPainterPath()
+    head.moveTo(14, 4.5); head.lineTo(19.5, 4.5); head.lineTo(19.5, 10)
+    p.drawPath(head)
+
+def _check(p):
+    path = QPainterPath()
+    path.moveTo(5, 12.5); path.lineTo(10, 17.5); path.lineTo(19, 7)
+    p.drawPath(path)
+
+
 _DRAW = {
     "search": _search, "folder": _folder, "layers": _layers, "mic": _mic,
     "gear": _gear, "sparkle": _sparkle, "globe": _globe, "mute": _mute,
@@ -144,6 +197,8 @@ _DRAW = {
     "folder_up": _folder_up, "appearance": _appearance, "book": _book,
     "chat": _chat, "user": _user, "shield": _shield, "refresh": _refresh,
     "arrow": _arrow, "keyboard": _keyboard,
+    "bolt": _bolt, "file": _file, "sidebar": _sidebar, "arrow_up": _arrow_up, "stop": _stop,
+    "plus": _plus, "chevron": _chevron, "external": _external, "check": _check,
 }
 
 _cache = {}

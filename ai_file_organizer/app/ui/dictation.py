@@ -67,6 +67,11 @@ class DictationController(QObject):
         self.hotkey.dictate_start.connect(self._on_dictate_start)
         self.hotkey.dictate_stop.connect(self._on_dictate_stop)
         logger.info(f"[DICTATION] controller ready (trigger='{self.hotkey.trigger_name}')")
+        try:                                  # so the first dictation already reads the caret context
+            from app.ui.win_hotkey import warm_text_before_caret
+            warm_text_before_caret()
+        except Exception:
+            pass
 
     def start(self):
         self.hotkey.start()
@@ -166,6 +171,10 @@ class DictationController(QObject):
                     before = text_before_caret()
                 except Exception:
                     before = None
+                _ctx = before.rstrip(" \t") if before is not None else None
+                logger.info("[DICTATION] caret context: " + (
+                    "unreadable" if _ctx is None else
+                    "sentence start" if (not _ctx or _ctx[-1] in ".!?\n") else "mid-sentence"))
                 text = apply_sentence_case(
                     tidy_text(format_spoken(text)),
                     before,

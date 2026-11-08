@@ -6,6 +6,24 @@ import tempfile
 from pathlib import Path
 
 
+# The index's current field names (add_file reads source_path / name / extension / size) — these tests were
+# written with the first API (file_path / file_name …) and never updated, so every row went in with an empty
+# path. Same checks, today's API (ported from the Mac fix, 2026-11-07).
+_OLD_TO_NEW = {"file_path": "source_path", "file_name": "name", "file_extension": "extension", "file_size": "size"}
+
+
+def _add(db, data):
+    return db.add_file({_OLD_TO_NEW.get(k, k): v for k, v in data.items()})
+
+
+def _all(db):
+    """Every indexed file (the old get_all_files)."""
+    import sqlite3
+    with sqlite3.connect(db.db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        return [dict(r) for r in conn.execute("SELECT * FROM files")]
+
+
 class TestSearchService:
     """Test search functionality."""
     
@@ -64,7 +82,7 @@ class TestSearchService:
         ]
         
         for f in test_files:
-            db.add_file(file_data=f)
+            _add(db, f)
         
         return db
     
@@ -90,7 +108,7 @@ class TestSearchService:
         db = search_db_with_data
         
         # Get all documents
-        all_files = db.get_all_files()
+        all_files = _all(db)
         documents = [f for f in all_files if f.get('category') == 'Documents']
         assert len(documents) >= 2
         print(f"✅ Category filter: found {len(documents)} documents")
@@ -136,7 +154,7 @@ class TestSearchService:
         """Test getting all indexed files."""
         db = search_db_with_data
         
-        all_files = db.get_all_files()
+        all_files = _all(db)
         assert len(all_files) == 4  # We added 4 test files
         print(f"✅ Get all files: {len(all_files)} files")
 

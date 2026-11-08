@@ -95,8 +95,10 @@ class OnboardingAnimation(QWidget):
         elif self._step == 6:
             self._draw_cleanup(painter)
         elif self._step == 7:
-            self._draw_settings(painter)
+            self._draw_voice(painter)   # Custom Words step (its live panel replaces this)
         elif self._step == 8:
+            self._draw_settings(painter)
+        elif self._step == 9:
             self._draw_ready(painter)
         
         painter.end()
@@ -839,6 +841,15 @@ class OnboardingOverlay(QDialog):
                 "highlight": "voice_cleanup_card"
             },
             {
+                "title": "🗣️ Teach Filect your words",
+                "description": "Tell us your field and we'll suggest words to spell right.",
+                "nav_index": None,
+                "button_text": "Next",
+                "show_try_it": False,
+                "interactive": "vocab",
+                "highlight": "__full_dim__"
+            },
+            {
                 "title": "⚙️ Settings",
                 "description": "• Protect files from being moved\n• Add exclusion patterns (.json, .py)\n• Configure app behavior",
                 "nav_index": 4,
@@ -934,7 +945,15 @@ class OnboardingOverlay(QDialog):
         self.desc_label.setWordWrap(True)
         self.desc_label.setAlignment(Qt.AlignTop | Qt.AlignLeft)
         layout.addWidget(self.desc_label, 1)
-        
+
+        # Interactive vocabulary panel — shown ONLY on the custom-words step so the user
+        # types their field and picks suggested terms right here, instead of a spotlight
+        # behind the dialog that covers the card. Hidden on every other step.
+        from app.ui.voice_cards.vocab_suggest import VocabSuggestPanel
+        self.vocab_panel = VocabSuggestPanel(self.container)
+        self.vocab_panel.setVisible(False)
+        layout.addWidget(self.vocab_panel)
+
         # Keyboard hint
         self.keyboard_hint = QLabel("💡 Use ← → arrow keys  •  Esc to skip")
         self.keyboard_hint.setObjectName("keyboardHint")
@@ -1099,7 +1118,7 @@ class OnboardingOverlay(QDialog):
     # ``onboarding_step_viewed`` / ``onboarding_dismissed`` events.
     _STEP_SLUGS = [
         "welcome", "smart_search", "organize_files",
-        "auto_organize", "index_files", "voice", "cleanup", "settings", "ready",
+        "auto_organize", "index_files", "voice", "cleanup", "custom_words", "settings", "ready",
     ]
 
     def _update_step(self):
@@ -1145,7 +1164,14 @@ class OnboardingOverlay(QDialog):
         
         # Update animation
         self.anim_widget.set_step(self.current_step)
-        
+
+        # Interactive vocab step: swap the animation + description for the live suggest panel.
+        is_vocab = step.get("interactive") == "vocab"
+        self.vocab_panel.setVisible(is_vocab)
+        self.anim_widget.setVisible(not is_vocab)
+        self.desc_label.setVisible(not is_vocab)
+        self.keyboard_hint.setVisible(not is_vocab)
+
         # Navigate to the appropriate page in the app
         nav_index = step["nav_index"]
         if nav_index is not None:
