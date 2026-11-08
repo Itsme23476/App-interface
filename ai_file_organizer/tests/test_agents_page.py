@@ -193,7 +193,7 @@ def test_chat_list_groups_search_and_reuse(view):
     assert shown == ["r:a"], shown
     lst.search_box.setText("billing")                 # reaches the user's other Claude Code chats
     app.processEvents()
-    assert any(isinstance(w, QLabel) and w.text() == "Other Claude Code chats" for w in lst._order)
+    assert any(isinstance(w, QLabel) and w.text() == "Other Claude Code & Codex chats" for w in lst._order)
     assert [w.rid for w in lst._order if isinstance(w, av._ChatRow)] == ["r:z"]
     picked = []
     view.chat_picked.connect(picked.append)

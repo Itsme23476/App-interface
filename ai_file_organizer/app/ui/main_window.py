@@ -3381,6 +3381,16 @@ class MainWindow(QMainWindow):
             from app.ui.assistant_page import AssistantPage
             self.assistant_page = AssistantPage(self)
             self.page_stack.addWidget(self.assistant_page)   # Index 5
+            # Hold the agent chord (test: Shift+Z) anywhere → speak → a task for the agent; Space draws on the
+            # screen / snapshots it, Esc cancels. Its own guard: a failure here never costs the Agents page.
+            try:
+                from app.ui.agent_voice import AgentVoiceController
+                self.agent_voice = AgentVoiceController(self)
+                self.agent_voice.start()
+                QApplication.instance().aboutToQuit.connect(self.agent_voice.stop)
+            except Exception as e:
+                self.agent_voice = None
+                logger.error(f"[AGENTS] voice shortcut unavailable: {e}", exc_info=True)
         except Exception as e:
             logger.error(f"Agents page failed to load: {e}", exc_info=True)
             self.assistant_page = None

@@ -121,6 +121,11 @@ class TipIndicator(QLabel):
     
     def _pulse_step(self):
         """Animate the pulse - subtle opacity change"""
+        try:
+            if not self.isVisible() or self.window().isMinimized():
+                return          # off screen: a restyle 12×/s here cost ~3% CPU for nothing (2026-11-08)
+        except RuntimeError:
+            return
         self._opacity += self.pulse_direction * 0.03
         if self._opacity <= 0.7:
             self.pulse_direction = 1

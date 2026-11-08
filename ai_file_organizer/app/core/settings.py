@@ -81,6 +81,9 @@ class Settings:
         self.assistant_router_model: str = 'opus'   # model for the voice intent router
         self.agents_list_collapsed: bool = True     # Agents page: the chat list starts hidden for a new user
         self.agents_tour_seen: bool = False         # Agents page: "See what it can do" stops glowing once opened
+        # Hold to talk to the agent from anywhere. TEST keybind for the Parallels dev box — swap for the real
+        # one before release (see the project's test-keybind list).
+        self.assistant_voice_shortcut: str = 'shift+z'
 
         # ======= AUTO-ORGANIZE WATCHER SETTINGS =======
         # List of folders with per-folder instructions: [{path: str, instruction: str}, ...]
@@ -387,6 +390,9 @@ class Settings:
         for _k in ('assistant_model', 'assistant_effort', 'assistant_codex_model', 'assistant_codex_effort'):
             if isinstance(data.get(_k), str):
                 setattr(self, _k, data[_k].strip())
+        vs = data.get('assistant_voice_shortcut')
+        if isinstance(vs, str) and vs.strip():
+            self.assistant_voice_shortcut = vs.strip().lower()
         rm = data.get('assistant_router_model')
         if isinstance(rm, str) and rm.strip():
             self.assistant_router_model = rm.strip()
@@ -447,6 +453,7 @@ class Settings:
             'assistant_router_model': self.assistant_router_model,
             'agents_list_collapsed': self.agents_list_collapsed,
             'agents_tour_seen': self.agents_tour_seen,
+            'assistant_voice_shortcut': self.assistant_voice_shortcut,
             # Auto-organize watcher settings
             'auto_organize_folders': self.auto_organize_folders,
             'auto_organize_auto_start': self.auto_organize_auto_start,

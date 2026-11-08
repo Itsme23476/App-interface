@@ -264,6 +264,22 @@ def _pick_text(ev: dict) -> str:
     return ""
 
 
+def _assemble(utterances, cur) -> str:
+    """The transcript so far: finalized utterances + the trailing in-progress one (if the last
+    utterance didn't get speech_final before we stopped waiting). Guards against a cumulative
+    trailing interim that restates everything already committed, which would otherwise duplicate
+    earlier utterances. (Mac, verbatim.)"""
+    parts = list(utterances)
+    tail = cur["t"].strip()
+    if tail:
+        joined = " ".join(parts).strip()
+        if joined and tail.startswith(joined):
+            parts = [tail]                       # cumulative → it already contains all of it
+        elif not parts or tail != parts[-1]:     # skip an exact-duplicate restatement
+            parts.append(tail)
+    return " ".join(parts).strip()
+
+
 # ---------------------------------------------------------------------------
 # System-output mute while recording (Windows: pycaw)
 # ---------------------------------------------------------------------------
@@ -294,6 +310,19 @@ def _set_output_muted(muted: bool):
         vol.SetMute(1 if muted else 0, None)
     except Exception as e:
         logger.debug(f"_set_output_muted failed: {e}")
+
+
+_LIVE_STREAMS = []   # StreamingTranscribers kept alive until their worker thread has ended (see _keep_stream)
+
+
+def _keep_stream(t):
+    """Hold a StreamingTranscriber until its worker thread has ENDED, and let go of finished ones here — on
+    the GUI thread. Otherwise a caller that drops its reference first (Esc / cancel while it's still writing
+    down your words) leaves the worker thread holding the LAST one: when that thread ends it frees the
+    QObject (and its QAudioSource) on the wrong thread → access violation, the whole app gone without a
+    trace. (2026-11-08: Esc right after letting go of Shift+Z closed Filect ~2 s later, as the text arrived.)"""
+    _LIVE_STREAMS[:] = [s for s in _LIVE_STREAMS if s._ws_thread is not None and s._ws_thread.is_alive()]
+    _LIVE_STREAMS.append(t)
 
 
 _RUNNING = []   # capture QThreads kept alive until their thread has fully finished
@@ -365,10 +394,17 @@ class StreamingTranscriber(QObject):
         self._run_peak = _PEAK_FLOOR
         self._start_capture()
         self._ws_thread = threading.Thread(target=self._run_stream, daemon=True)
+        _keep_stream(self)              # (on the GUI thread) — never freed by its own worker thread
         self._ws_thread.start()
 
     def stop_recording(self):
         self.is_recording = False
+
+    def words_so_far(self) -> int:
+        """Words heard so far (finished sentences + the one in progress) — a screenshot taken
+        mid-message records this so it can be placed at that point in the final transcript. (Mac.)"""
+        live = getattr(self, "_live", None)
+        return len(_assemble(*live).split()) if live else 0
 
     # ----- capture (runs on the GUI thread) -----
     def _start_capture(self):
@@ -551,6 +587,7 @@ class StreamingTranscriber(QObject):
         cur = {"t": ""}
         done_flag = {"v": False}
         n_part = {"v": 0}
+        self._live = (utterances, cur)  # read by words_so_far() from the UI thread
 
         async def receiver():
             try:
@@ -657,15 +694,7 @@ class StreamingTranscriber(QObject):
 
         # Assemble: finalized utterances + any trailing in-progress one. Guard a
         # cumulative trailing interim that restates everything already committed.
-        parts = list(utterances)
-        tail = cur["t"].strip()
-        if tail:
-            joined = " ".join(parts).strip()
-            if joined and tail.startswith(joined):
-                parts = [tail]
-            elif not parts or tail != parts[-1]:
-                parts.append(tail)
-        final = " ".join(parts).strip()
+        final = _assemble(utterances, cur)
         logger.info(f"[STREAM] FINAL: utterances={len(utterances)}, partials={n_part['v']}, "
                     f"done={done_flag['v']}, chars={len(final)}")
         if _DEV:

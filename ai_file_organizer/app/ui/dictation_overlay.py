@@ -93,6 +93,8 @@ class DictationOverlay(QWidget):
             ex = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
             user32.SetWindowLongW(hwnd, GWL_EXSTYLE,
                                   ex | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW)
+            # Agents screenshots (Shift+Z + Space) must show what's BENEATH the pill, not the pill.
+            user32.SetWindowDisplayAffinity(ctypes.c_void_p(hwnd), 0x11)   # WDA_EXCLUDEFROMCAPTURE
         except Exception as e:
             logger.debug(f"[OVERLAY] ex-style apply failed: {e}")
 
@@ -107,7 +109,7 @@ class DictationOverlay(QWidget):
     # ----- public API driven by the controller -----
     def show_listening(self, mode: str = "dictate"):
         self._mode = mode
-        self._set_glyph({"search": "search", "organize": "folder"}.get(mode, ""))
+        self._set_glyph({"search": "search", "organize": "folder", "assistant": "sparkle"}.get(mode, ""))
         self._dots.setVisible(False)
         self._bars.setVisible(True)
         self._position_bottom_center()

@@ -24,6 +24,7 @@ import json
 import logging
 import os
 import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Awaitable, Callable, Optional, Set
@@ -31,6 +32,7 @@ from typing import Awaitable, Callable, Optional, Set
 logger = logging.getLogger(__name__)
 
 IS_WIN = sys.platform.startswith("win")
+LIVE_EVERY = 0.2      # the live reply ("partial" steps) goes to the UI at most 5×/s — smooth, and cheap to paint
 
 # Read-only / safe tools run without interrupting the user. Everything else (Write, Edit, Bash,
 # deletes, network side effects, MCP tools) raises an Approve/Deny card. Tunable per the product's
@@ -115,7 +117,7 @@ _PLATFORM = "Windows PC" if IS_WIN else "Mac"
 
 
 def _codex_available() -> bool:
-    """Codex as Filect's second agent isn't ported to Windows yet — don't point users at it."""
+    """Codex as Filect's second agent (codex_runner) — tell the agent about it only when that's there."""
     try:
         import importlib.util
         return importlib.util.find_spec("app.core.codex_runner") is not None
@@ -250,8 +252,8 @@ def find_claude() -> Optional[str]:
 @dataclass
 class Step:
     """One live update to show in the task's tile."""
-    kind: str            # "text" | "tool" | "result"
-    text: str = ""       # assistant text (kind="text") / the tool's output (kind="result")
+    kind: str            # "text" | "tool" | "result" | "partial" (the reply so far, while Claude writes it)
+    text: str = ""       # assistant text (kind="text"/"partial") / the tool's output (kind="result")
     tool: str = ""       # tool name (kind="tool")
     detail: str = ""     # the tool's key target — file path, command, url — for a readable line
     input: dict = field(default_factory=dict)   # the tool call's full input (file content, edit, todos…)
@@ -584,6 +586,13 @@ def open_in_claude(session_id: str, cwd: str, where: str = "app") -> str:
                           f"exec claude --resume {shlex.quote(session_id)}"], ("CLAUDE_CONFIG_DIR",))
 
 
+def claude_setup_state() -> str:
+    """"ready" (installed AND signed in), "install" or "signin" — for picking the agent a new chat uses."""
+    if not find_claude():
+        return "install"
+    return "ready" if claude_ready() else "signin"
+
+
 def claude_ready() -> bool:
     """Claude Code installed AND signed in (`claude auth status`, ~0.2s) — so a task waiting on its setup
     can run by itself the moment you finish (see AssistantPage._check_setup)."""
@@ -700,6 +709,30 @@ class AgentRunner:
         self.session_id: Optional[str] = None
         self.allow_all = False
         self._client = None          # live ClaudeSDKClient (set during run) — for interrupt()
+        self._live = None            # the text block Claude is writing right now (from stream events)
+        self._live_at = 0.0          # when the last "partial" step went out (they're throttled)
+
+    def _on_stream_event(self, se) -> None:
+        """Claude's reply word by word (include_partial_messages): every LIVE_EVERY seconds at most, a
+        "partial" step with the text block so far — the page and the card show it growing. The finished block
+        still arrives as a normal "text" step, which replaces it. Thinking, tool inputs and subagents' words
+        are left out. (Windows 2026-11-08: a long answer showed nothing until it was done — or until Stop.)"""
+        if getattr(se, "parent_tool_use_id", None):
+            return
+        ev = getattr(se, "event", None) or {}
+        t = ev.get("type")
+        if t == "content_block_start":
+            self._live = "" if (ev.get("content_block") or {}).get("type") == "text" else None
+        elif t == "content_block_delta":
+            d = ev.get("delta") or {}
+            if d.get("type") == "text_delta" and self._live is not None:
+                self._live += d.get("text") or ""
+                now = time.monotonic()
+                if self._live.strip() and now - self._live_at >= LIVE_EVERY:
+                    self._live_at = now
+                    self.on_step(Step("partial", text=self._live))
+        elif t in ("content_block_stop", "message_stop"):
+            self._live = None
 
     async def _can_use_tool(self, tool_name, tool_input, context):
         from claude_agent_sdk import PermissionResultAllow, PermissionResultDeny
@@ -721,10 +754,17 @@ class AgentRunner:
         """
         from claude_agent_sdk import (ClaudeSDKClient, ClaudeAgentOptions, ResultMessage,
                                       AssistantMessage, CLINotFoundError)
+        try:
+            from claude_agent_sdk import StreamEvent
+        except ImportError:                      # (an SDK without stream events: replies arrive whole)
+            StreamEvent = None
         use_login_path()
         # setting_sources=[] isolates from the user's global ~/.claude permissions in both modes.
         common = dict(cwd=self.cwd, setting_sources=[], resume=resume, max_turns=max_turns,
                       system_prompt=tools_note("claude", self.cwd))
+        if StreamEvent is not None:
+            common["include_partial_messages"] = True    # the reply streams in live (see _on_stream_event)
+        self._live, self._live_at = None, 0.0
         if claude_cli_override():
             common["cli_path"] = claude_cli_override()
         servers = claude_mcp_servers(self.cwd)      # your MCP tools (+ claude.ai connectors) — not your hooks
@@ -758,6 +798,9 @@ class AgentRunner:
                 else:
                     await client.query(prompt)
                 async for msg in client.receive_response():
+                    if StreamEvent is not None and isinstance(msg, StreamEvent):
+                        self._on_stream_event(msg)
+                        continue
                     if getattr(msg, "subtype", None) == "init" and isinstance(getattr(msg, "data", None), dict):
                         mcp = msg.data.get("mcp_servers") or []
                         if mcp:                          # which of your tools this task got (diagnostics)

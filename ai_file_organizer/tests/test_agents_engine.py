@@ -257,6 +257,7 @@ def test_setup_error_is_plain_words():
     s = ap.AgentSession("s1", "C:\\a", "hi", "Hi", False, "opus", "high")
     page._sessions = {"s1": s}
     page._focused_key = "s1"
+    page._agents_state = {"claude": "ready", "codex": "install"}   # (else a signed-out Claude hands over to Codex)
     page._on_error("s1", ar.SETUP_SIGNIN)
     assert s.status == "error" and page._setup_kind(s.error) == "signin"
     page._on_error("s1", ar.SETUP_INSTALL)

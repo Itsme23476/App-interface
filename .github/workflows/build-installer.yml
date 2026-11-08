@@ -143,6 +143,14 @@ jobs:
             "--hidden-import", "app.ui.details_view",
             "--hidden-import", "app.core.agent_runner",
             "--hidden-import", "app.core.agent_sessions",
+            "--hidden-import", "app.core.intent_router",
+            "--hidden-import", "app.core.codex_runner",
+            "--hidden-import", "app.ui.agent_voice",
+            "--hidden-import", "app.ui.agent_hotkey",
+            "--hidden-import", "app.ui.claude_overlay",
+            "--hidden-import", "app.ui.conversation_rail",
+            "--hidden-import", "app.ui.screen_ink",
+            "--hidden-import", "app.ui.win_panel",
             "--noconfirm"
           )
           if (Test-Path "resources/iconnn.ico") {

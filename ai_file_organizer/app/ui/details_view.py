@@ -65,6 +65,11 @@ def add_step(entries, kind, text="", tool="", input=None, tool_id="", is_error=F
                 e["result"] = {"text": text or "", "error": bool(is_error)}
                 break
         return
+    if kind == "text" and entries and entries[-1].get("live"):
+        entries[-1]["text"] = text or ""           # the finished reply replaces the live one (same row)
+        entries[-1].pop("live", None)
+        return
+    end_live(entries)                              # (a tool call etc. after a live reply: it's final as is)
     e = {"id": str(len(entries)), "kind": kind}
     if kind == "tool":
         e.update(tool=tool, input=dict(input or {}), tool_id=tool_id, result=None)
@@ -73,6 +78,101 @@ def add_step(entries, kind, text="", tool="", input=None, tool_id="", is_error=F
         if images:
             e["images"] = list(images)
     entries.append(e)
+
+
+def set_live_text(entries, text) -> None:
+    """The reply Claude is writing right now (a "partial" step): one live text row at the end, updated in
+    place as it grows; the finished text replaces it (add_step)."""
+    if entries and entries[-1].get("live"):
+        entries[-1]["text"] = text or ""
+    else:
+        entries.append({"id": str(len(entries)), "kind": "text", "text": text or "", "live": True})
+
+
+def end_live(entries) -> None:
+    """The turn ended mid-reply (Stop): keep what was written, as a normal row."""
+    if entries and entries[-1].get("live"):
+        entries[-1].pop("live", None)
+
+
+CHUNK_CHARS = 2500   # a long reply is laid out as pieces of about this size (Qt's layout cost grows faster than size)
+
+
+def reply_chunks(text: str, target: int = CHUNK_CHARS) -> list:
+    """A long reply → markdown pieces of ~`target` chars, cut only where markdown allows: blank lines outside
+    code fences; a huge code block is cut into several fenced blocks; a huge paragraph at line breaks / spaces.
+    Earlier pieces stay identical as the text grows (only the last one changes), so a reply streaming in only
+    re-lays-out its last piece — every update costs the same however long it gets (2026-11-08: one update of
+    an 80 KB reply froze the page ~1 s). Short replies are one piece, exactly as before."""
+    if len(text) <= target:
+        return [text]
+    blocks, cur, fence = [], [], None
+    for line in text.split("\n"):
+        st = line.lstrip()
+        if fence is None and st.startswith(("```", "~~~")):
+            fence = st[:3]
+        elif fence is not None and st.startswith(fence):
+            fence = None
+            cur.append(line)
+            blocks.append("\n".join(cur))
+            cur = []
+            continue
+        if fence is None and not line.strip():
+            if cur:
+                blocks.append("\n".join(cur))
+                cur = []
+            continue
+        cur.append(line)
+    if cur:
+        blocks.append("\n".join(cur))
+    pieces = []
+    for b in blocks:                                  # cut any single block bigger than the target
+        if len(b) <= target:
+            pieces.append(b)
+            continue
+        lines = b.split("\n")
+        head = lines[0].lstrip()
+        if head.startswith(("```", "~~~")):           # a code block → several fenced blocks
+            mark = head[:3]
+            body = lines[1:-1] if lines[-1].lstrip().startswith(mark) else lines[1:]
+            part = []
+            for ln in body:
+                if part and sum(len(x) + 1 for x in part) + len(ln) > target:
+                    pieces.append("\n".join([head] + part + [mark]))
+                    part = []
+                part.append(ln)
+            pieces.append("\n".join([head] + part + ([mark] if lines[-1].lstrip().startswith(mark) else [])))
+            continue
+        part = ""                                     # a paragraph → at line breaks, else at spaces
+        for ln in lines:
+            while len(ln) > target:
+                cut = ln.rfind(" ", 0, target)
+                cut = cut if cut > target // 2 else target
+                if part:
+                    pieces.append(part)
+                    part = ""
+                pieces.append(ln[:cut])
+                ln = ln[cut:].lstrip()
+            if part and len(part) + len(ln) + 1 > target:
+                pieces.append(part)
+                part = ""
+            part = f"{part}\n{ln}" if part else ln
+        if part:
+            pieces.append(part)
+    chunks, cur = [], ""
+    for p in pieces:                                  # group small blocks back into ~target pieces
+        if cur and len(cur) + len(p) + 2 > target:
+            chunks.append(cur)
+            cur = ""
+        cur = f"{cur}\n\n{p}" if cur else p
+    if cur:
+        chunks.append(cur)
+    return chunks
+
+
+def live_len(entries) -> int:
+    """Length of the live reply row (-1: none) — part of a view's "did anything change" signature."""
+    return len(entries[-1].get("text") or "") if entries and entries[-1].get("live") else -1
 
 
 def _last_turn(entries):

@@ -22,6 +22,7 @@ before deleteLater; nothing re-styles unless its state changed.
 """
 from __future__ import annotations
 
+import math
 import os
 import time
 from pathlib import Path
@@ -70,7 +71,11 @@ def colors(theme: str) -> dict:
 STATUS_COLOR = {"working": "accent", "needs_you": "amber", "done": "green", "error": "red", "stopped": "faint"}
 STATUS_WORDS = {"working": "Working", "needs_you": "Needs your OK", "done": "Done", "error": "Failed",
                 "stopped": "Stopped"}
-EFFORT_NAMES = {"": "Auto", "low": "Low", "medium": "Medium", "high": "High", "xhigh": "Extra high", "max": "Max"}
+EFFORT_NAMES = {"": "Auto", "low": "Low", "medium": "Medium", "high": "High", "xhigh": "Extra high", "max": "Max",
+                "ultra": "Ultra"}
+AGENT_NAMES = {"claude": "Claude Code", "codex": "Codex"}
+APP_NAMES = {"claude": "Claude", "codex": "Codex"}           # "Open in Claude" / "Open in Codex"
+AGENT_SUBS = {"claude": "Uses your Claude subscription", "codex": "Uses your ChatGPT subscription"}
 
 IDEAS = (
     "Find my 10 biggest downloads",
@@ -87,17 +92,17 @@ IDEA_PROMPTS = {
 # they're ported). Each step: (title, body).
 TOUR = [
     ("Just say what you want",
-     "Type a task in the box at the bottom — or tap the mic and say it. Claude Code does the work on "
+     "Type a task in the box at the bottom — or tap the mic and say it. Claude Code (or Codex) does the work on "
      "your PC, in the “Filect Assistant” folder in your user folder, and every chat is saved."),
     ("Several things at once",
      "Start a new chat while another one is still working. Each keeps going on its own — the list on "
      "the right shows which are working, done, or waiting for you."),
-    ("Pick the model + access",
-     "Under the box: the model pill picks the Claude model and how hard it thinks. The access pill decides "
+    ("Pick the agent, model + access",
+     "Under the box: the model pill picks the agent (Claude Code or Codex), its model and how hard it thinks. ""If one isn't set up or runs out, Filect switches to the other on its own. The access pill decides "
      "whether it asks you first before it changes files or runs commands, or just does the work."),
     ("Your chats",
      "Open the list (the sidebar button, top right) to pick up any chat again — type in an open chat to "
-     "continue it. Search also finds your other Claude Code chats. “Open in Claude” opens it in the Claude app."),
+     "continue it. Search also finds your other Claude Code and Codex chats. “Open in Claude / Codex” opens it in ""that app."),
 ]
 
 
@@ -459,11 +464,19 @@ class _Turn(QWidget):
                     br.setHtml(details_view.render_html(steps, frozenset(view._expanded)))
                 bl.addWidget(br)
                 col.addWidget(box)
+        self.reply_browser = None     # the reply's column (pieces of a long reply; one for a normal one)
+        self._c = c
+        self._on_link = view._on_detail_link
+        self._pieces, self._piece_src = [], []
         if reply:
-            txt = "\n\n".join(e["text"] for e in reply)
-            rb = _AutoBrowser(c, on_link=view._on_detail_link)
-            rb.setHtml(f'<div style="color:{c["text"]};">{details_view._md(txt)}</div>')
-            col.addWidget(rb)
+            box = QWidget()
+            box.setStyleSheet("background: transparent;")
+            self._reply_col = QVBoxLayout(box)
+            self._reply_col.setContentsMargins(0, 0, 0, 0)
+            self._reply_col.setSpacing(8)
+            self.reply_browser = box
+            self.set_reply(reply)
+            col.addWidget(box)
         files = written_files(turn["items"])
         if files:
             chips = QHBoxLayout()
@@ -485,6 +498,34 @@ class _Turn(QWidget):
         agent_row.addLayout(col, 1)
         lay.addLayout(agent_row)
 
+    def set_reply(self, reply) -> None:
+        """The answer text — also to update a reply that's still streaming in, in place. Laid out in pieces
+        (details_view.reply_chunks) and only the pieces that changed are redone: while it streams that's just
+        the last one, so an update costs the same at 2 KB or 80 KB."""
+        txt = "\n\n".join(e["text"] for e in reply)
+        chunks = details_view.reply_chunks(txt)
+        for i, src in enumerate(chunks):
+            if i < len(self._pieces):
+                if self._piece_src[i] == src:
+                    continue
+                b = self._pieces[i]
+            else:
+                b = _AutoBrowser(self._c, on_link=self._on_link)
+                self._reply_col.addWidget(b)
+                self._pieces.append(b)
+                self._piece_src.append(None)
+            b.setHtml(f'<div style="color:{self._c["text"]};">{details_view._md(src)}</div>')
+            self._piece_src[i] = src
+        for b in self._pieces[len(chunks):]:
+            self._reply_col.removeWidget(b)
+            b.hide()
+            b.deleteLater()
+        del self._pieces[len(chunks):], self._piece_src[len(chunks):]
+
+    def reply_text(self) -> str:
+        """(tests) the reply as shown, all pieces."""
+        return "\n".join(b.toPlainText() for b in self._pieces)
+
 
 class ChatView(QScrollArea):
     """The open conversation. render(state) rebuilds only the turns whose signature changed."""
@@ -504,6 +545,8 @@ class ChatView(QScrollArea):
         self._col.addStretch(1)
         self.setWidget(self._inner)
         self._sig = None
+        self._live_len = -1           # length of the reply streaming in, as last shown
+        self._live_hold = 0.0         # no live repaint before this (monotonic) — set after a slow one
         self._turn_sigs = []          # per shown turn: its signature
         self._turn_widgets = []
         self._tail = None
@@ -528,6 +571,17 @@ class ChatView(QScrollArea):
         sb = self.verticalScrollBar()
         return sb.value() >= sb.maximum() - 40
 
+    def _turn_sig(self, t, i, opened, expanded):
+        """A turn's "did it change" signature (it's rebuilt when this differs)."""
+        tid = (t.get("user") or {}).get("id") or f"t{i}"
+        items = t["items"]
+        return (tid, len(items), sum(1 for e in items if e.get("kind") == "tool" and e.get("result") is not None),
+                tid in opened, frozenset(e for e in expanded), id(self.c),
+                tuple(len(e.get("text") or "") for e in items if e.get("kind") == "text"),   # (a reply that
+                # finished streaming changes its text, not the row count)
+                tuple(os.path.exists((e.get("input") or {}).get("file_path") or "") for e in items
+                      if e.get("kind") == "tool" and e.get("tool") == "Write"))
+
     def render(self, st: dict, opened: set, expanded: set):
         """st: key, entries, status, running, approval, last_action, queued, bypass, error, setup_kind,
         agent. Cheap when nothing changed."""
@@ -537,8 +591,35 @@ class ChatView(QScrollArea):
         sig = (st.get("key"), len(entries), n_res, st.get("status"), bool(st.get("running")),
                st.get("approval") is not None, st.get("last_action"), st.get("queued"), bool(st.get("bypass")),
                frozenset(opened), frozenset(expanded), self._shown_limit, st.get("error"), id(c))
+        live = details_view.live_len(entries)
         if sig == self._sig:
-            return
+            if live == self._live_len:
+                return                            # nothing changed
+            # Same structure — only the reply streaming in grew (or just finished): update its text in place
+            # (no rebuild, no flicker), and keep following the bottom if you were there.
+            if live >= 0 and time.monotonic() < self._live_hold:
+                return                            # (backing off: the last live repaint was slow — see below)
+            w = self._turn_widgets[-1] if self._turn_widgets else None
+            turns = split_turns(entries)
+            reply = split_reply(turns[-1]["items"])[1] if turns else []
+            if w is not None and getattr(w, "reply_browser", None) is not None and reply:
+                follow = self._at_bottom()
+                t0 = time.monotonic()
+                w.set_reply(reply)
+                cost = time.monotonic() - t0
+                # Safety net: never let live repaints take more than ~1/4 of the UI thread — a slow one (a huge
+                # code block in one piece) spaces the next ones out. The finished text always paints (live < 0).
+                self._live_hold = time.monotonic() + (3 * cost if cost > 0.04 else 0)
+                self._live_len = live
+                if self._turn_sigs:               # this turn is up to date now — don't rebuild it later
+                    self._turn_sigs[-1] = self._turn_sig(turns[-1], len(turns) - 1, opened, expanded)
+                if follow:
+                    QTimer.singleShot(0, lambda: self.verticalScrollBar().setValue(
+                        self.verticalScrollBar().maximum()))
+                return
+            self._sig = None                      # (no reply box yet: rebuild the last turn below)
+            self._turn_sigs = self._turn_sigs[:-1]
+        self._live_len = live
         new_chat = st.get("key") != self._key
         if new_chat:
             self._key = st.get("key")
@@ -565,15 +646,7 @@ class ChatView(QScrollArea):
             self._col.insertWidget(0, self._more, 0, Qt.AlignHCenter)
         base = 1 if hidden else 0
         agent = st.get("agent") or "claude"
-        new_sigs = []
-        for i, t in enumerate(shown):
-            tid = (t.get("user") or {}).get("id") or f"t{i}"
-            items = t["items"]
-            ts = (tid, len(items), sum(1 for e in items if e.get("kind") == "tool" and e.get("result") is not None),
-                  tid in opened, frozenset(e for e in expanded), id(c),
-                  tuple(os.path.exists((e.get("input") or {}).get("file_path") or "") for e in items
-                        if e.get("kind") == "tool" and e.get("tool") == "Write"))
-            new_sigs.append(ts)
+        new_sigs = [self._turn_sig(t, i, opened, expanded) for i, t in enumerate(shown)]
         # rebuild from the first turn that differs (usually only the last one)
         first = next((i for i, (a, b) in enumerate(zip(self._turn_sigs, new_sigs)) if a != b),
                      min(len(self._turn_sigs), len(new_sigs)))
@@ -627,9 +700,126 @@ class ChatView(QScrollArea):
         self._turn_widgets = []
 
 
+SETUP_WORDS = {"install": "Set up", "signin": "Sign in to"}
+
+
+def needs_setup(state) -> bool:
+    """Neither Claude Code nor Codex is ready (installed AND signed in) — `state` from AssistantPage; None = not
+    checked yet (show nothing rather than flash the card)."""
+    return bool(state) and state.get("claude") != "ready" and state.get("codex") != "ready"
+
+
+_SETUP_LINE1 = "Filect's agents run on Claude Code (your Claude plan) or Codex (your ChatGPT plan)."
+_SETUP_LINE2 = "Set up either one — it takes about a minute."
+
+
+class SetupCard(QFrame):
+    """"Connect Claude Code or Codex" (Mac §8v): shown on the Agents tab ONLY when neither agent is ready. One click
+    opens a PowerShell window with the official installer / sign-in (the same as a task's setup card); the page
+    updates by itself when it's done. `state`: {"claude"/"codex": ready|install|signin, "waiting": agent|None}."""
+    setup = Signal(str)                      # "claude" | "codex"
+
+    def __init__(self, c, parent=None):
+        super().__init__(parent)
+        self.setObjectName("agentSetupCard")
+        self.setMaximumWidth(620)
+        self._c, self._state = c, None
+        self._lay = QVBoxLayout(self)
+        self.apply_theme(c)
+
+    def set_state(self, state):
+        self._state = state
+        self.apply_theme(self._c)
+
+    def _fit_desc(self):
+        """Like the Mac: the first sentence on its own line, the second under it — when the first fits. In a
+        narrower window the two just flow (a forced break there left a third, one-word-ish line)."""
+        d = getattr(self, "desc", None)
+        if d is None:
+            return
+        room = self.width() - 56 - 8
+        fits = room > 0 and d.fontMetrics().horizontalAdvance(_SETUP_LINE1) <= room
+        text = f"{_SETUP_LINE1}\n{_SETUP_LINE2}" if fits else f"{_SETUP_LINE1} {_SETUP_LINE2}"
+        if d.text() != text:
+            d.setText(text)
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self._fit_desc()
+
+    def apply_theme(self, c):
+        self._c = c
+        _clear(self._lay)
+        st = self._state or {}
+        waiting = st.get("waiting")
+        self._lay.setContentsMargins(28, 24, 28, 22)
+        self._lay.setSpacing(10)
+        self.setStyleSheet(f"QFrame#agentSetupCard {{ background:{c['surface']}; border:1px solid {c['border']};"
+                           f" border-radius:16px; }} QFrame#agentSetupCard QLabel {{ background:transparent; border:none; }}")
+        logos = QHBoxLayout()
+        logos.setSpacing(12)
+        logos.addStretch(1)
+        for agent in ("claude", "codex"):
+            lg = QLabel()
+            lg.setPixmap(agent_logo(agent, 40))
+            logos.addWidget(lg)
+        logos.addStretch(1)
+        self._lay.addLayout(logos)
+        self._lay.addSpacing(2)
+        t = QLabel("Connect Claude Code or Codex")
+        t.setAlignment(Qt.AlignCenter)
+        t.setStyleSheet(f"color:{c['text']}; font-size:19px; font-weight:700;")
+        self._lay.addWidget(t)
+        d = QLabel(f"{_SETUP_LINE1} {_SETUP_LINE2}")
+        d.setWordWrap(True)
+        d.setAlignment(Qt.AlignCenter)
+        d.setStyleSheet(f"color:{c['muted']}; font-size:13px;")
+        self._lay.addWidget(d)
+        self.desc = d
+        self._fit_desc()
+        self._lay.addSpacing(4)
+        row = QHBoxLayout()
+        row.setSpacing(10)
+        row.addStretch(1)
+        self.buttons = {}
+        for agent, primary in (("claude", True), ("codex", False)):
+            kind = st.get(agent) or "install"
+            label = ("Finish in PowerShell…" if waiting == agent
+                     else f"{SETUP_WORDS.get(kind, 'Set up')} {AGENT_NAMES[agent]}")
+            b = _btn(f"  {label}", f"setup_{agent}")
+            b.setIcon(QIcon(agent_logo(agent, 16)))
+            b.setIconSize(QSize(16, 16))
+            b.setFixedHeight(38)
+            if primary:
+                css = (f"QPushButton#setup_{agent} {{ background:{c['accent']}; color:{c['on_accent']}; border:1px solid {c['accent']};"
+                       f" border-radius:10px; padding:0 16px 0 12px; font-size:13px; font-weight:600; }}"
+                       f" QPushButton#setup_{agent}:hover {{ background:{c['accent']}; color:{c['on_accent']}; border-color:{c['text']}; }}")
+            else:
+                css = (f"QPushButton#setup_{agent} {{ background:{c['page']}; color:{c['text']}; border:1px solid {c['border']};"
+                       f" border-radius:10px; padding:0 16px 0 12px; font-size:13px; font-weight:600; }}"
+                       f" QPushButton#setup_{agent}:hover {{ background:{c['hover']}; color:{c['text']}; border-color:{c['accent']}; }}")
+            b.setStyleSheet(css)
+            b.setAccessibleName(label)
+            b.clicked.connect(lambda _=False, a=agent: self.setup.emit(a))
+            self.buttons[agent] = b
+            row.addWidget(b)
+        row.addStretch(1)
+        self._lay.addLayout(row)
+        n = QLabel("Waiting for you to finish in the PowerShell window — this updates by itself." if waiting else
+                   "Opens a PowerShell window with the official installer and sign-in. This updates by itself "
+                   "when you're done.")
+        n.setWordWrap(True)
+        n.setAlignment(Qt.AlignCenter)
+        n.setStyleSheet(f"color:{c['accent'] if waiting else c['muted']}; font-size:12px;")
+        self._lay.addWidget(n)
+        self.note = n
+
+
 class EmptyState(QWidget):
-    """New chat: "What should I do?", one line, three small idea chips. Nothing else."""
+    """New chat: "What should I do?", one line, three small idea chips. Nothing else — unless neither agent can run:
+    then the "Connect Claude Code or Codex" card instead (the ideas would only fail)."""
     idea = Signal(str)
+    setup = Signal(str)                      # the setup card's buttons: "claude" | "codex"
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -660,10 +850,45 @@ class EmptyState(QWidget):
             row.addWidget(b)
             self.chips.append(b)
         row.addStretch(1)
+        self._chips_row = row
         lay.addLayout(row)
+        self._setup_state = None
+        self._c = None
+        self.card = None                     # the setup card (built when it's needed)
+        self._card_row = QHBoxLayout()
+        self._card_row.setContentsMargins(0, 0, 0, 0)
+        lay.addLayout(self._card_row)
         lay.addStretch(4)
 
+    def set_setup(self, state):
+        """Neither agent ready → the setup card instead of the greeting + ideas; one ready → the normal screen."""
+        if state == self._setup_state:
+            return
+        self._setup_state = dict(state) if state else state
+        show = needs_setup(state)
+        for w in [self.logo, self.title, self.line] + self.chips:
+            w.setVisible(not show)
+        if show:
+            if self.card is None:
+                self.card = SetupCard(self._c or colors("light"))
+                self.card.setup.connect(self.setup.emit)
+                self._card_row.addStretch(1)
+                self._card_row.addWidget(self.card, 10)
+                self._card_row.addStretch(1)
+            self.card.set_state(state)
+            self.card.show()
+        elif self.card is not None:
+            self.card.hide()
+
+    def set_agent(self, agent: str):
+        if getattr(self, "_agent", "claude") != agent:
+            self._agent = agent
+            self.logo.setPixmap(agent_logo(agent, 34))
+
     def restyle(self, c):
+        self._c = c
+        if self.card is not None:
+            self.card.apply_theme(c)
         self.setStyleSheet(f"QWidget#emptyState {{ background:{c['page']}; }}")
         self.title.setStyleSheet(f"color:{c['text']}; font-size:22px; font-weight:700; background:transparent; border:none;")
         self.line.setStyleSheet(f"color:{c['muted']}; font-size:13px; background:transparent; border:none;")
@@ -795,7 +1020,7 @@ class Composer(QWidget):
             f" QPushButton#tourBtn:hover {{ color:{c['accent']}; background:{c['surface']}; border-color:{c['accent']}; }}")
         self.new_badge.setStyleSheet(f"QLabel#newBadge {{ background:{c['accent_soft']}; color:{c['accent']};"
                                      f" border-radius:8px; padding:1px 7px; font-size:10.5px; font-weight:700; }}")
-        self.hint.setStyleSheet(f"QLabel#composerHint {{ color:{c['faint']}; font-size:11px; background:transparent; }}")
+        self.hint.setStyleSheet(f"QLabel#composerHint {{ color:{c['muted']}; font-size:11.5px; background:transparent; }}")
 
     def _style_access(self, full: bool):
         c = self.c
@@ -851,13 +1076,20 @@ class Composer(QWidget):
             self.tour_btn.setGraphicsEffect(eff)
             base = QColor(self.c["accent"])
             eff.setBlurRadius(18)
-            anim = QVariantAnimation(self)
-            anim.setStartValue(0.0)
-            anim.setKeyValueAt(0.5, 170.0)
-            anim.setEndValue(0.0)
-            anim.setDuration(2400)
-            anim.setLoopCount(-1)
-            anim.valueChanged.connect(lambda v: eff.setColor(QColor(base.red(), base.green(), base.blue(), int(v))))
+            # A slow breathe (2.4 s), drawn ~10×/s and ONLY while the button is on screen. (2026-11-08: a 60 fps
+            # QVariantAnimation re-blurred the shadow non-stop — ~17% of a core while visible, ~3% minimized —
+            # part of the "everything lags" the user saw.)
+            anim = QTimer(self)
+            anim.setInterval(100)
+            t0 = time.monotonic()
+
+            def _breathe():
+                b = self.tour_btn
+                if not b.isVisible() or b.window().isMinimized():
+                    return
+                a = 170.0 * (0.5 - 0.5 * math.cos(2 * math.pi * ((time.monotonic() - t0) % 2.4) / 2.4))
+                eff.setColor(QColor(base.red(), base.green(), base.blue(), int(a)))
+            anim.timeout.connect(_breathe)
             anim.start()
             self._glow = (eff, anim)
         elif not on and self._glow is not None:
@@ -1092,7 +1324,7 @@ class ChatList(QFrame):
             others = [r for r in self._other if r["id"] not in mine
                       and matches(q, r.get("title"), r.get("preview"), r.get("sub"))][:30]
             if others:
-                order.append((self._header("Other Claude Code chats"), None))
+                order.append((self._header("Other Claude Code & Codex chats"), None))
                 order += [(self._row(r["id"]), r) for r in others]
             self.empty.setText("No matching chats")
         else:
@@ -1299,6 +1531,9 @@ class AgentsView(QWidget):
     tour_opened = Signal()
     setup_requested = Signal(str, str)   # agent, kind
     search_changed = Signal(str)
+    agent_changed = Signal(str)          # the agent new chats use ("claude" | "codex")
+    agent_setup_requested = Signal(str)  # the "Connect Claude Code or Codex" card: set up "claude" | "codex"
+    codex_choice = Signal(str, bool)     # a chat the Codex app holds: ("close" | "new", always close Codex)
 
     def __init__(self, theme="light", parent=None):
         super().__init__(parent)
@@ -1308,7 +1543,9 @@ class AgentsView(QWidget):
         self._model = ""
         self._effort = ""
         self._full = False
-        self._agent = "claude"
+        self._agent = "claude"           # the agent the composer shows (the open chat's, else new chats')
+        self._primary = "claude"         # the agent new chats use
+        self._chat_agent = None          # the open chat's agent (None = a new chat)
         self._open_default = "app"
         self._open_has_app = True
         self._open_enabled = False
@@ -1369,6 +1606,7 @@ class AgentsView(QWidget):
         self.chat = ChatView(self)
         self.empty = EmptyState()
         self.empty.idea.connect(self._use_idea)
+        self.empty.setup.connect(self.agent_setup_requested.emit)
         self.stack.addWidget(self.empty)
         self.stack.addWidget(self.chat)
         ml.addWidget(self.stack, 1)
@@ -1437,7 +1675,7 @@ class AgentsView(QWidget):
         self._state = None
         self.chat.reset()
         self.stack.setCurrentWidget(self.empty)
-        self.composer.input.setPlaceholderText("Ask Claude Code to do something…")
+        self.composer.input.setPlaceholderText(f"Ask {AGENT_NAMES.get(self._agent, 'Claude Code')} to do something…")
 
     def show_chat(self, state: dict):
         self._state = state
@@ -1474,6 +1712,28 @@ class AgentsView(QWidget):
         self._effort = effort if (effort and m and effort in (m.get("efforts") or [])) else ""
         self._sync_pills()
 
+    def set_setup(self, state):
+        """The agents' readiness ({"claude", "codex", "waiting"}; None = not checked yet): the new-chat screen
+        shows "Connect Claude Code or Codex" when neither can run."""
+        self.empty.set_setup(state)
+
+    def set_agent(self, agent: str, primary: str = None, chat_agent=None):
+        """The agent the composer shows (`agent`: the open chat's, else new chats'), the one new chats use
+        (`primary`) and the open chat's (`chat_agent`, None = a new chat). Call set_models after, with its list."""
+        agent = agent if agent in AGENT_NAMES else "claude"
+        sig = (agent, primary or self._primary, chat_agent)
+        if sig == getattr(self, "_agent_sig", None):
+            return
+        self._agent_sig = sig
+        self._agent, self._primary, self._chat_agent = sig
+        self.empty.set_agent(self._primary)
+        self.composer.input.setAccessibleName(f"Message {AGENT_NAMES[agent]}")
+        if self._state is None:
+            self.composer.input.setPlaceholderText(f"Ask {AGENT_NAMES[agent]} to do something…")
+        self._open_sig = None
+        self.set_open_state(self._open_enabled, self._open_default, self._open_has_app)
+        self._sync_pills()
+
     def set_access(self, full: bool):
         self._full = bool(full)
         self.composer._style_access(self._full)
@@ -1484,9 +1744,10 @@ class AgentsView(QWidget):
         self._open_sig = (enabled, default, has_app)
         self._open_enabled, self._open_default, self._open_has_app = enabled, default, has_app
         where = default if has_app else "terminal"
-        self.open_btn.setText("Open in Claude" if where == "app" else "Open in Terminal")
-        self.open_btn.setToolTip("Open this chat in the Claude app" if where == "app"
-                                 else "Open this chat in Claude Code, in a terminal window")
+        app = APP_NAMES.get(self._agent, "Claude")
+        self.open_btn.setText(f"Open in {app}" if where == "app" else "Open in Terminal")
+        self.open_btn.setToolTip(f"Open this chat in the {app} app" if where == "app"
+                                 else f"Open this chat in {AGENT_NAMES.get(self._agent, 'Claude Code')}, in a terminal window")
         self.open_btn.setEnabled(enabled)
         self.open_more.setEnabled(enabled and has_app)
         self.open_btn.setVisible(True)
@@ -1518,8 +1779,11 @@ class AgentsView(QWidget):
         req = st.get("approval")
         if req is not None:
             return self._approval_card(req, c, bool(st.get("bypass")))
+        if st.get("codex_choice") and not running:
+            return self._codex_choice_card(st["codex_choice"], c)
         if status == "error" and not running:
-            return self._error_card(st.get("error") or "Something went wrong.", st.get("setup_kind") or "", c)
+            return self._error_card(st.get("error") or "Something went wrong.", st.get("setup_kind") or "", c,
+                                    st.get("setup_agent") or st.get("agent") or "claude")
         if status == "stopped" and not running:
             return self._note("◼  Stopped by you", c["muted"], c)
         if running:
@@ -1626,7 +1890,64 @@ class AgentsView(QWidget):
         wl2.addWidget(card)
         return wrap
 
-    def _error_card(self, msg, kind, c):
+    def _codex_choice_card(self, choice, c):
+        """A chat the Codex app (or Codex in a terminal) holds: close it and continue the SAME chat here, or carry
+        on as a new chat with a recap. `choice`: {msg, busy}."""
+        card = QFrame()
+        card.setObjectName("choiceCard")
+        card.setStyleSheet(f"QFrame#choiceCard {{ background:{c['surface']}; border:1px solid {c['amber']};"
+                           f" border-radius:14px; }} QLabel {{ background:transparent; border:none; }}"
+                           f" QCheckBox {{ color:{c['muted']}; font-size:12px; background:transparent; }}")
+        v = QVBoxLayout(card)
+        v.setContentsMargins(16, 12, 16, 12)
+        v.setSpacing(6)
+        hd = QLabel("●  OPEN IN CODEX")
+        hd.setStyleSheet(f"color:{c['amber']}; font-size:11px; font-weight:700;")
+        v.addWidget(hd)
+        busy = choice.get("busy") or ""
+        msg = choice.get("msg") or "This chat is open in the Codex app."
+        if busy:
+            msg += f" Codex is working on “{busy}” right now — closing it will stop that."
+        else:
+            msg += " Close Codex to continue it here — your Codex chats are saved."
+        ml = QLabel(msg)
+        ml.setWordWrap(True)
+        ml.setStyleSheet(f"color:{c['text']}; font-size:13px;")
+        v.addWidget(ml)
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        go = _btn("Close Codex anyway  →" if busy else "Close Codex and continue here  →", "closeCodexBtn")
+        go.setFixedHeight(32)
+        go.setStyleSheet(
+            f"QPushButton#closeCodexBtn {{ background:{c['accent']}; border:none; border-radius:15px; padding:6px 16px;"
+            f" color:{c['on_accent']}; font-size:12.5px; font-weight:600; }}"
+            f" QPushButton#closeCodexBtn:hover {{ background:{c['accent']}; color:{c['on_accent']}; border:none; }}")
+        new = _btn("Continue as a new chat", "newChatBtn")
+        new.setFixedHeight(32)
+        new.setStyleSheet(
+            f"QPushButton#newChatBtn {{ background:transparent; border:1px solid {c['border']}; border-radius:15px;"
+            f" padding:6px 16px; color:{c['text']}; font-size:12.5px; font-weight:600; }}"
+            f" QPushButton#newChatBtn:hover {{ background:{c['hover']}; color:{c['text']}; border-color:{c['border_strong']}; }}")
+        always = None
+        if not busy:
+            from PySide6.QtWidgets import QCheckBox
+            always = QCheckBox("Always close Codex for this")
+        go.clicked.connect(lambda: self.codex_choice.emit("close", bool(always is not None and always.isChecked())))
+        new.clicked.connect(lambda: self.codex_choice.emit("new", False))
+        row.addWidget(go)
+        row.addWidget(new)
+        row.addStretch(1)
+        v.addLayout(row)
+        if always is not None:
+            v.addWidget(always)
+        wrap = QWidget()
+        wrap.setStyleSheet("background:transparent;")
+        wl = QHBoxLayout(wrap)
+        wl.setContentsMargins(36, 0, 0, 0)
+        wl.addWidget(card)
+        return wrap
+
+    def _error_card(self, msg, kind, c, agent="claude"):
         card = QFrame()
         card.setObjectName("errorCard")
         setup = kind in ("install", "signin")
@@ -1647,13 +1968,14 @@ class AgentsView(QWidget):
         v.addWidget(ml)
         if setup:
             row = QHBoxLayout()
-            b = _btn("Set up Claude Code →" if kind == "install" else "Sign in to Claude Code →", "setupBtn")
+            name = AGENT_NAMES.get(agent, "Claude Code")
+            b = _btn(f"Set up {name} →" if kind == "install" else f"Sign in to {name} →", "setupBtn")
             b.setFixedHeight(32)
             b.setStyleSheet(
                 f"QPushButton#setupBtn {{ background:{c['accent']}; border:none; border-radius:15px; padding:6px 16px;"
                 f" color:{c['on_accent']}; font-size:12.5px; font-weight:600; }}"
                 f" QPushButton#setupBtn:hover {{ background:{c['accent']}; color:{c['on_accent']}; border:none; }}")
-            b.clicked.connect(lambda: self.setup_requested.emit("claude", kind))
+            b.clicked.connect(lambda: self.setup_requested.emit(agent, kind))
             row.addWidget(b)
             row.addStretch(1)
             v.addLayout(row)
@@ -1696,7 +2018,7 @@ class AgentsView(QWidget):
         txt = f"  {name}" + (f" · {eff}" if self._effort else "")
         self.composer.agent_pill.setText(txt)
         self.composer.agent_pill.setIcon(QIcon(agent_logo(self._agent, 15)))
-        self.chip.setText(f"Claude Code · {name}")
+        self.chip.setText(f"{AGENT_NAMES.get(self._agent, 'Claude Code')} · {name}")
 
     def _menu_css(self):
         c = self.c
@@ -1716,42 +2038,59 @@ class AgentsView(QWidget):
         act.setEnabled(False)
         menu.addAction(act)
 
-    def _agent_row(self, menu):
+    def _agent_row(self, menu, agent):
         c = self.c
-        w = QWidget()
-        w.setStyleSheet("background:transparent;")
+        sel = agent == self._primary
+        w = _ClickRow(menu, lambda a=agent: self._pick_agent(a))
+        w.setObjectName("agentRow")
+        w.setStyleSheet(f"QWidget#agentRow {{ background:{c['hover'] if sel else 'transparent'}; border-radius:8px; }}"
+                        f" QLabel {{ background:transparent; }}")
         h = QHBoxLayout(w)
         h.setContentsMargins(12, 6, 14, 6)
         h.setSpacing(10)
         lg = QLabel()
-        lg.setPixmap(agent_logo("claude", 20))
+        lg.setPixmap(agent_logo(agent, 20))
         h.addWidget(lg)
         col = QVBoxLayout()
         col.setSpacing(0)
-        a = QLabel("Claude Code")
+        a = QLabel(AGENT_NAMES[agent])
         a.setStyleSheet(f"color:{c['text']}; font-size:12.5px; font-weight:600; background:transparent;")
-        b = QLabel("Uses your Claude subscription")
+        b = QLabel(AGENT_SUBS[agent])
         b.setStyleSheet(f"color:{c['muted']}; font-size:11px; background:transparent;")
         col.addWidget(a)
         col.addWidget(b)
         h.addLayout(col, 1)
         ck = QLabel()
-        ck.setPixmap(line_pixmap("check", 14, c["accent"]))
+        ck.setFixedSize(14, 14)
+        if sel:
+            ck.setPixmap(line_pixmap("check", 14, c["accent"]))
         h.addWidget(ck)
         act = QWidgetAction(menu)
         act.setDefaultWidget(w)
-        act.setText("Claude Code — uses your Claude subscription")
+        act.setText(f"{AGENT_NAMES[agent]} — {AGENT_SUBS[agent].lower()}")   # (screen readers / UI Automation)
+        act.triggered.connect(lambda _=False, a=agent: self._pick_agent(a))     # keyboard: arrows + Enter
         menu.addAction(act)
+
+    def _pick_agent(self, agent):
+        """The agent row in the menu: it becomes the agent NEW chats use (an open chat keeps its own)."""
+        for m in self.findChildren(QMenu):
+            if m.isVisible():
+                m.close()
+        if agent != self._primary:
+            self.agent_changed.emit(agent)
 
     def _agent_menu(self, anchor):
         menu = QMenu(self)
         menu.setStyleSheet(self._menu_css())
-        self._menu_header(menu, "AGENT")
-        self._agent_row(menu)
+        self._menu_header(menu, "AGENT" if self._chat_agent is None else "AGENT FOR NEW CHATS")
+        for agent in ("claude", "codex"):
+            self._agent_row(menu, agent)
         menu.addSeparator()
-        self._menu_header(menu, "MODEL")
-        current = [m for m in self._models if not str(m.get("value", "")).startswith("claude-")]
-        older = [m for m in self._models if str(m.get("value", "")).startswith("claude-")]
+        self._menu_header(menu, "MODEL" if self._chat_agent is None
+                          else f"MODEL — {AGENT_NAMES.get(self._agent, 'Claude Code').upper()}")
+        claude = self._agent != "codex"
+        current = [m for m in self._models if not (claude and str(m.get("value", "")).startswith("claude-"))]
+        older = [m for m in self._models if claude and str(m.get("value", "")).startswith("claude-")]
         for m in current:
             a = menu.addAction(m["name"])
             a.setCheckable(True)
@@ -1775,6 +2114,16 @@ class AgentsView(QWidget):
                 a.setCheckable(True)
                 a.setChecked(k == self._effort)
                 a.triggered.connect(lambda _=False, e=k: self._pick_effort(e))
+        menu.addSeparator()
+        foot = QLabel("If one isn't set up or runs out of usage, Filect switches to the other on its own."
+                      + (" A chat keeps the agent it started with." if self._chat_agent else ""))
+        foot.setWordWrap(True)
+        foot.setFixedWidth(280)
+        foot.setStyleSheet(f"color:{self.c['muted']}; font-size:11px; padding:4px 12px 6px 12px; background:transparent;")
+        fa = QWidgetAction(menu)
+        fa.setDefaultWidget(foot)
+        fa.setEnabled(False)
+        menu.addAction(fa)
         menu.exec(anchor.mapToGlobal(QPoint(0, -menu.sizeHint().height() - 6)))
 
     def _pick_model(self, value):
@@ -1827,7 +2176,8 @@ class AgentsView(QWidget):
     def _access_menu(self, anchor):
         menu = QMenu(self)
         menu.setStyleSheet(self._menu_css())
-        self._access_row(menu, False, "Ask first", "Asks you before it changes files or runs commands.")
+        self._access_row(menu, False, "Ask first", "Asks you before it changes files or runs commands. Codex "
+                                                   "can't ask — it works only in the chat's folder, without internet.")
         self._access_row(menu, True, "Full access", "Does the work without asking — like Claude's bypass mode. "
                                                     "Your MCP tools included.")
         menu.exec(anchor.mapToGlobal(QPoint(0, -menu.sizeHint().height() - 6)))
@@ -1841,7 +2191,7 @@ class AgentsView(QWidget):
         menu = QMenu(self)
         menu.setStyleSheet(self._menu_css())
         other = "terminal" if self._open_default == "app" else "app"
-        a = menu.addAction("Open in Terminal" if other == "terminal" else "Open in Claude app")
+        a = menu.addAction("Open in Terminal" if other == "terminal" else f"Open in {APP_NAMES.get(self._agent, 'Claude')} app")
         a.triggered.connect(lambda: self.open_in.emit(other))
         menu.exec(self.open_more.mapToGlobal(QPoint(self.open_more.width() - menu.sizeHint().width(),
                                                     self.open_more.height() + 4)))

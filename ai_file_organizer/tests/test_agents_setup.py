@@ -127,6 +127,7 @@ def test_waiting_task_runs_by_itself_after_sign_in(_iso, monkeypatch):
     ready = {"v": False}
     monkeypatch.setattr(ar, "claude_ready", lambda: ready["v"])
     page = ap.AssistantPage(_MW())
+    page._agents_state = {"claude": "ready", "codex": "install"}   # (else the signed-out Claude hands over to Codex)
     try:
         page._on_send("make me a list")
         key = page._focused_key
