@@ -28,6 +28,34 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+_tls = threading.local()
+
+
+def _ssl_context_for_this_thread():
+    """httpx's own default certificate setup (certifi — the same one every new client made for itself), built ONCE
+    per thread. Each new client used to read and parse certifi's 230 KB certificate file again: ~0.6 s every
+    request on the dev PC, on the UI thread at startup (subscription, usage and update checks; measured 2026-11-10).
+    Per THREAD, never shared across threads: httpcore re-sets ALPN on the context for every new connection, and
+    Filect makes these requests from several threads at once (photo indexing)."""
+    ctx = getattr(_tls, "ctx", None)
+    if ctx is None:
+        import httpx
+        ctx = _tls.ctx = httpx.create_ssl_context()
+    return ctx
+
+
+def _postgrest_client(headers: Dict[str, str]):
+    """A PostgREST client exactly like SyncPostgrestClient(base_url, headers=headers) builds for itself (a fresh
+    connection with these headers, same timeout / redirects / HTTP2 / proxy settings), except that its
+    certificates come from _ssl_context_for_this_thread()."""
+    import httpx
+    base_url = f"{SUPABASE_URL}/rest/v1"
+    session = httpx.Client(base_url=base_url, timeout=None, verify=_ssl_context_for_this_thread(),
+                           proxy=None, follow_redirects=True, http2=True)
+    client = SyncPostgrestClient(base_url=base_url, headers=headers, http_client=session)
+    session.headers.update(client.headers)   # (what it gives its own session: its full headers)
+    return client
+
 # Supabase configuration
 SUPABASE_URL = "https://gsvccxhdgcshiwgjvgfi.supabase.co"
 SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImdzdmNjeGhkZ2NzaGl3Z2p2Z2ZpIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjczOTY2NTIsImV4cCI6MjA4Mjk3MjY1Mn0.Sbb6YJjlQ_ig2LCcs9zz_Be1kU-iIHBx4Vu4nzCPyTM"
@@ -114,10 +142,7 @@ class SupabaseAuth:
         if token:
             headers["Authorization"] = f"Bearer {token}"
 
-        return SyncPostgrestClient(
-            base_url=f"{SUPABASE_URL}/rest/v1",
-            headers=headers
-        )
+        return _postgrest_client(headers)
     
     @property
     def is_available(self) -> bool:
@@ -874,10 +899,7 @@ def get_latest_app_version() -> Optional[Dict[str, Any]]:
     
     try:
         # Create anonymous client (no auth needed due to RLS policy)
-        client = SyncPostgrestClient(
-            base_url=f"{SUPABASE_URL}/rest/v1",
-            headers={"apikey": SUPABASE_ANON_KEY}
-        )
+        client = _postgrest_client({"apikey": SUPABASE_ANON_KEY})
         
         # Query latest version for this platform (order by published_at desc, limit 1)
         response = (
