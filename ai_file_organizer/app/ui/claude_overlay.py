@@ -610,6 +610,7 @@ class ClaudeOverlay(QWidget):
     model_changed = Signal(str, str)   # (model, effort) picked on the card's model pill
     stop_clicked = Signal()            # "Stop" pressed while a task is running
     submit_text = Signal(str)          # a typed task submitted from the bottom input field
+    typing_started = Signal()          # something typed in the card's field or the hover bar (the app warms up)
     collapsed = Signal()               # the open card tucked back into the notch
     setup_requested = Signal(str, str)  # (agent, "install"/"signin") → open that agent's setup in Terminal
     update_requested = Signal()        # "Update Codex" in the model panel (a newer Codex has newer models)
@@ -672,6 +673,7 @@ class ClaudeOverlay(QWidget):
 
         self._build_ui()
         self._hover_bar = _HoverBar(self._key_for_typing, self)
+        self._hover_bar.field.textChanged.connect(lambda t: t.strip() and self.typing_started.emit())
         self._hover_bar.hide()
         self._hover_bar.submitted.connect(self._on_hover_submit)
         self._hover_bar.close_requested.connect(self._hide_hover_bar)
@@ -948,6 +950,7 @@ class ClaudeOverlay(QWidget):
         # Type a task instead of speaking (VoiceOS-style). Enter routes it through the SAME intent
         # router as voice (new / follow-up / resume). Precise fallback when the mic mishears.
         self._type_field = _TypeField(self._key_for_typing)
+        self._type_field.textChanged.connect(lambda t: t.strip() and self.typing_started.emit())
         self._type_field.setObjectName("typeField")
         self._type_field.setFixedHeight(TYPEFIELD_H - 8)
         self._type_field.setStyleSheet(

@@ -860,6 +860,7 @@ class MainWindow(QMainWindow):
         self.setup_voice_page()       # Index 3 (Voice sits above Settings)
         self.setup_settings_page()    # Index 4
         self.setup_agents_page()      # Index 5 (Agents — shown above Settings in the sidebar)
+        self.setup_live_page()        # Index 6 (Assistant — hands-free; shown between Voice and Agents)
 
         # Set default page to Search
         self.page_stack.setCurrentIndex(0)
@@ -911,12 +912,14 @@ class MainWindow(QMainWindow):
         # Line-icons (drawn, theme-agnostic) replace the old emoji glyphs.
         from app.ui.icons import line_icon as _line_icon
         from PySide6.QtCore import QSize as _QSize
-        # (screen order; idx = the page index). Agents is page 5 but sits above Settings.
+        # (screen order; idx = the page index). Agents is page 5 but sits above Settings; Assistant (hands-free,
+        # page 6) sits between Voice and Agents — as on the Mac.
         nav_items = [
             ("search", "Search", 0),
             ("folder", "Organize", 1),
             ("layers", "Analyze Files", 2),
             ("mic", "Voice", 3),
+            ("waveform", "Assistant", 6),
             ("sparkle", "Agents", 5),
             ("gear", "Settings", 4),
         ]
@@ -3397,6 +3400,18 @@ class MainWindow(QMainWindow):
             ph = QLabel("Agents couldn't load. Please restart Filect.")
             ph.setAlignment(Qt.AlignCenter)
             self.page_stack.addWidget(ph)                    # keep Index 5 so the other pages stay put
+
+    def setup_live_page(self):
+        """Assistant page (index 6): Filect Assistant — Start, then just talk (hands-free). Like the Agents page, a
+        failure here must never take the app down (a placeholder keeps index 6)."""
+        try:
+            from app.ui.live_page import LivePage
+            self.live_page = LivePage(self)
+        except Exception as e:
+            logger.error(f"Filect Assistant page failed to load: {e}", exc_info=True)
+            self.live_page = QLabel("Filect Assistant couldn't load. Please restart Filect.")
+            self.live_page.setAlignment(Qt.AlignCenter)
+        self.page_stack.addWidget(self.live_page)        # Index 6
 
     def _on_theme_toggle(self):
         """Handle theme toggle button click."""

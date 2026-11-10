@@ -1,48 +1,146 @@
 """
-Voice Organize overlay — the floating card that slides down from the top when
-you voice-organize. Ported to match the macOS pack pixel-for-pixel (464-wide
-card, persistent "+ Organize" header, arc spinner, gradient waveform):
+Voice Organize overlay — the floating card that slides down from the top when you voice-organize, or when the
+voice assistant organizes a folder / sets up auto-organize. Ported to match the macOS pack pixel-for-pixel
+(464-wide card, persistent "+ Organize" header, arc spinner, gradient waveform):
 
   thinking  → spinner + message ("Finding the folder…")
   listening → 11-bar waveform + "Listening… tap Stop when you're done" + Stop
-  plan      → "Move N files into M folders" + target (+ Change) + folder groups
-              + "Change by voice" mic + Cancel / ✓ Organize  (≥30 → two-click)
+  plan      → "Move N files into M folders" + target (~ for home, middle shortened; + Change) + folder groups
+              + "Change by voice" mic  (hands-free: "Say “yes”, “no”, or what to change" instead)
+              + Cancel / ✓ Organize  (≥30 → two-click; `action` renames it: "Turn on and organize 12 files")
   applying  → spinner + "Organizing…"
-  done      → ✓ + "Organized N files. Revert anytime in History." (auto-dismiss)
-  error     → ⚠ + message + full-width "Choose folder…" fallback
+  done      → ✓ + message (auto-dismiss; with Undo: "↩  Undo" and 20 s to reach for it)
+  error     → ⚠ (an accent "?" when it's asking, not failing) + message + full-width "Choose folder…" / Close
+  confirm   → a question + Cancel / one main button                     (voice assistant: "ask first")
+  choice    → a question + [a text box] + full-width answers + Cancel    (voice assistant: "which way?")
 
-Non-activating (WS_EX_NOACTIVATE) so it floats over other apps and takes mouse
-clicks WITHOUT stealing keyboard focus. Anchored top-centre of the work area.
-Pure-Qt painting; no AppKit/Spaces code.
+Every page is sized from its text: a wrapping label gets the height its text needs at the width it's given, so
+a long question or message is never cut off (Windows has no notch inset; the Mac's fixed heights don't apply).
+
+Non-activating (WS_EX_NOACTIVATE) so it floats over other apps and takes mouse clicks WITHOUT stealing keyboard
+focus. The one exception is the choice page's text box: a click there takes the keyboard (like the Agents card's
+type field, via win_panel.allow_typing), and it's handed back to your app when the page changes, the panel tucks
+or it closes. Anchored top-centre of the work area. Pure-Qt painting; no AppKit/Spaces code.
+
+A click on the card body tucks it into the small pill at the top edge (it never cancels: a stray click during
+the voice assistant's long "Reading…" must not stop the job). ✕ / Cancel / Esc close it.
 
 Signals (consumed by VoiceOrganizeController):
-  refine_requested, organize_clicked, change_folder_requested, dismissed
+  refine_requested, organize_clicked, change_folder_requested, dismissed,
+  undo_clicked, confirm_clicked, choice_made(key), text_submitted(text)
 """
 import logging
+import os
+import sys
+from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal, QTimer
+from PySide6.QtCore import Qt, Signal, QTimer, QSize
+from PySide6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QFrame,
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QFrame, QLineEdit,
     QScrollArea, QGraphicsDropShadowEffect,
 )
-from PySide6.QtCore import QSize
-from PySide6.QtGui import QColor, QIcon
 
 from app.ui.icons import AnimatedWaveform, Spinner, line_pixmap, ACCENT
 
 logger = logging.getLogger(__name__)
 
+IS_WIN = sys.platform.startswith("win")
+
 _CARD_W = 464
+_INNER_W = _CARD_W - 44          # the card's 22 px side margins: the width every full-width row gets
+_GLYPH_W = 22                    # the ✓ / ⚠ / ? column on the done and error pages
+_GLYPH_GAP = 10
+_ROW_TEXT_W = _INNER_W - _GLYPH_W - _GLYPH_GAP   # the message beside that glyph
 
 # palette (macOS pack)
 _BG        = "#0D0D13"
 _BORDER    = "#23232E"
-_CARD2     = "#16161E"   # inset rows / folder cards
+_CARD2     = "#16161E"   # inset rows / folder cards / answers
 _CARD2_BRD = "#24242F"
 _TITLE     = "#F2F2F7"
+_TEXT      = "#D6D6E0"   # messages
+_QUESTION  = "#E8E8F0"   # the confirm / choice question
 _MUTED     = "#9A9AA8"
+_WARN      = "#F2A33C"
 _ACCENT    = ACCENT
-_ACCENT_HD = "#8B6FFF"   # "+ Organize" header
+_ACCENT_HD = "#8B6FFF"   # "+ Organize" header; the "?" of a question
+
+
+def display_path(path: str, home: str = None) -> str:
+    """The folder as the preview shows it: the home folder as ~ (C:\\Users\\you\\Downloads → ~\\Downloads).
+    Windows paths are case-insensitive, so the home prefix is compared with normcase."""
+    p = str(path or "").strip()
+    if not p:
+        return "—"
+    home = str(home if home is not None else Path.home())
+    norm_p, norm_h = os.path.normpath(p), os.path.normpath(home).rstrip("\\/")
+    if not norm_h:
+        return p
+    if os.path.normcase(norm_p) == os.path.normcase(norm_h):
+        return "~"
+    if os.path.normcase(norm_p).startswith(os.path.normcase(norm_h) + os.sep):
+        return "~" + norm_p[len(norm_h):]
+    return p
+
+
+def _undo_pixmap(color: str, size: int = 16) -> QPixmap:
+    """A painted ↩ for the Undo button (the font's ↩ came out tiny), in the icons.line_pixmap style."""
+    ratio = 2
+    pm = QPixmap(size * ratio, size * ratio)
+    pm.fill(Qt.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.Antialiasing, True)
+    p.scale(size * ratio / 24.0, size * ratio / 24.0)
+    pen = QPen(QColor(color))
+    pen.setWidthF(2.2)
+    pen.setCapStyle(Qt.RoundCap)
+    pen.setJoinStyle(Qt.RoundJoin)
+    p.setPen(pen)
+    path = QPainterPath()
+    path.moveTo(9, 5)
+    path.lineTo(4, 10)
+    path.lineTo(9, 15)
+    path.moveTo(4, 10)
+    path.lineTo(14.5, 10)
+    path.cubicTo(17.8, 10, 20, 12.3, 20, 15)
+    path.cubicTo(20, 17.7, 17.8, 20, 14.5, 20)
+    path.lineTo(11, 20)
+    p.drawPath(path)
+    p.end()
+    pm.setDevicePixelRatio(ratio)
+    return pm
+
+
+def short_path(text: str, fm, room: int) -> str:
+    """Fit a path into `room` px by shortening its MIDDLE. The folder's own name (the last part) stays whole when it
+    can: "~\\Documents\\Cli…\\Archive\\Second Thoughts"."""
+    room = max(40, int(room))
+    if fm.horizontalAdvance(text) <= room:
+        return text
+    head, sep, tail = text.rpartition(os.sep) if os.sep in text else text.rpartition("/")
+    if sep and head:
+        head_room = room - fm.horizontalAdvance(sep + tail)
+        if head_room >= fm.horizontalAdvance("~…") + 4:
+            return fm.elidedText(head, Qt.ElideMiddle, head_room) + sep + tail
+    return fm.elidedText(text, Qt.ElideMiddle, room)
+
+
+class _TypeBox(QLineEdit):
+    """The choice page's text box. The panel never takes the keyboard by itself, so a click asks it to (the Agents
+    card's _TypeField does the same), then focuses the box."""
+
+    def __init__(self, on_click, parent=None):
+        super().__init__(parent)
+        self._on_click = on_click
+
+    def mousePressEvent(self, e):
+        try:
+            self._on_click()
+        except Exception:
+            pass
+        self.setFocus(Qt.MouseFocusReason)
+        super().mousePressEvent(e)
 
 
 class OrganizeOverlay(QWidget):
@@ -50,24 +148,37 @@ class OrganizeOverlay(QWidget):
     organize_clicked = Signal()
     change_folder_requested = Signal()
     dismissed = Signal()
+    undo_clicked = Signal()          # the done page's ↩ Undo
+    confirm_clicked = Signal()       # the confirm page's main button
+    choice_made = Signal(str)        # one of the choice page's answers (its key)
+    text_submitted = Signal(str)     # typed into the choice page's box, Return pressed
+
+    _BIG_PLAN = 30                   # moving this many files needs a 2nd click
+    _MAX_NAMES = 200                 # file names listed per folder in the preview
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowFlags(
-            Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool
-            | Qt.WindowDoesNotAcceptFocus
-        )
+        # (No Qt.WindowDoesNotAcceptFocus: Qt then refuses to activate the window even for the text box. Not taking
+        # focus is WS_EX_NOACTIVATE's job (showEvent) + WA_ShowWithoutActivating — the Agents card works the same.)
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
         self.setAttribute(Qt.WA_ShowWithoutActivating, True)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
         self.setFixedWidth(_CARD_W + 28)   # +room for the glow
 
+        self._state = "idle"     # idle|listening|thinking|plan|applying|done|error|confirm|choice
+        self._hands_free = False # voice assistant: you just talk (no mic button on the plan)
         self._refining = False
-        self._armed = False
-        self._waveform = None
+        self._organize_armed = False
         self._collapsed = False
         self._tab = None
         self._dismiss_timer = None
-        self._thinking_lbl = None
+        self._current = None     # the page in the card now
+        self._page_plan = None   # rebuilt per plan; kept while another page shows (show_plan_page)
+        self._organize_btn = None
+        self._refine_btn = None
+        self.choice_field = None
+        self.plan_field = None
+        self.choice_buttons = {}
 
         outer = QVBoxLayout(self)
         # Small top margin so the card sits flush against the top of the screen
@@ -116,11 +227,18 @@ class OrganizeOverlay(QWidget):
         header.addWidget(close)
         card_lay.addLayout(header)
 
-        # ---- body (rebuilt per state) ----
+        # ---- body: holds exactly one page at a time ----
         self._body = QVBoxLayout()
         self._body.setContentsMargins(0, 0, 0, 0)
-        self._body.setSpacing(10)
+        self._body.setSpacing(0)
         card_lay.addLayout(self._body)
+
+        self._page_thinking = self._make_thinking_page()
+        self._page_listening = self._make_listening_page()
+        self._page_done = self._make_done_page()
+        self._page_error = self._make_error_page()
+        self._page_confirm = self._make_confirm_page()
+        self._page_choice = self._new_page(spacing=8)      # refilled per question
 
     # ----- Win32 non-activation -----
     def showEvent(self, e):
@@ -143,11 +261,53 @@ class OrganizeOverlay(QWidget):
         else:
             super().keyPressEvent(e)
 
+    # ----- typing (the choice page's box) -----
+    def _key_for_typing(self):
+        """You clicked the text box: let this non-activating panel take the keyboard, on THIS click only (Windows:
+        win_panel.allow_typing, exactly like the Agents card). Given back by _end_typing."""
+        if not IS_WIN:
+            return
+        try:
+            from app.ui import win_panel
+            self._win_panel_capture = False     # (only the typing bit: don't hide this panel from screenshots)
+            win_panel.allow_typing(self, True)
+        except Exception as e:
+            logger.debug(f"[organize overlay] allow typing failed: {e}")
+
+    def _end_typing(self):
+        """Back to never taking the keyboard: it returns to the app you were in. Called BEFORE hiding, or Windows
+        hands the focus to Filect's main window instead."""
+        if not getattr(self, "_win_typing", False):
+            return
+        try:
+            from app.ui import win_panel
+            win_panel.allow_typing(self, False)
+        except Exception:
+            self._win_typing = False
+
     # ----- lifecycle -----
-    def present(self):
-        # A fresh request: drop any leftover collapsed tab and cancel a pending
-        # auto-dismiss from a previous 'done' so it can't close the new flow.
+    def set_hands_free(self, on: bool):
+        """Voice assistant: the mic is already listening, so the plan says what to say instead of a mic button.
+        It also follows the Mac's rule for opening: new pages don't pop a tucked panel open by themselves (the
+        controller calls ensure_open() when a page needs you)."""
+        self._hands_free = bool(on)
+
+    def ensure_open(self):
+        """It needs you now: open it, whether it was closed or tucked into the pill."""
+        if self._collapsed:
+            self._expand()
+        elif not self.isVisible():
+            self.present()
+
+    def present(self, tucked: bool = False):
+        """Open the card. `tucked`: start as the small pill at the top edge instead ("Open answers
+        automatically" off); a click on the pill, or ensure_open(), brings the card down."""
+        # A fresh request: cancel a pending auto-dismiss from a previous 'done' so it can't close the new flow.
         self._cancel_dismiss_timer()
+        if tucked:
+            self._position_top_center()
+            self._collapse()
+            return
         self._collapsed = False
         if self._tab is not None:
             self._tab.hide()
@@ -157,24 +317,41 @@ class OrganizeOverlay(QWidget):
 
     def dismiss(self):
         self._cancel_dismiss_timer()
+        self._end_typing()
         self.hide()
         if self._tab is not None:
             self._tab.hide()
         self._collapsed = False
         self.dismissed.emit()
 
+    def _on_dismiss(self):
+        """✕ / Cancel (the Mac name: the controller's cancel() calls it). Same as dismiss(): emits `dismissed`."""
+        self.dismiss()
+
     def _cancel_dismiss_timer(self):
         if self._dismiss_timer is not None:
             self._dismiss_timer.stop()
             self._dismiss_timer = None
 
+    def _start_dismiss_timer(self, ms):
+        self._cancel_dismiss_timer()
+        self._dismiss_timer = QTimer(self)
+        self._dismiss_timer.setSingleShot(True)
+        self._dismiss_timer.timeout.connect(self.dismiss)
+        self._dismiss_timer.start(int(ms))
+
     # ----- collapse / expand (tuck up to the top edge, like the Mac notch) -----
     def mousePressEvent(self, e):
-        # A click on the card body (not a button/child that handled it) tucks
-        # the overlay back up to the top of the screen.
+        # A click on the card body (not a button/child that handled it) tucks the overlay back up to the top of
+        # the screen. It never closes or cancels: a stray click while the voice assistant reads a big folder
+        # mustn't stop the job (✕ / Cancel do that).
         if not self._collapsed:
             self._collapse()
         super().mousePressEvent(e)
+
+    @property
+    def _minimized(self) -> bool:          # (the Mac's name for tucked)
+        return self._collapsed
 
     def _ensure_tab(self):
         if self._tab is None:
@@ -182,6 +359,7 @@ class OrganizeOverlay(QWidget):
             self._tab.clicked.connect(self._expand)
 
     def _collapse(self):
+        self._end_typing()
         self._collapsed = True
         self._ensure_tab()
         self._tab.present()
@@ -196,9 +374,10 @@ class OrganizeOverlay(QWidget):
         self.raise_()
 
     def _ensure_expanded(self):
-        """Surface the card if the user had it collapsed (used when a new plan
-        or result arrives, so important updates pop back down)."""
-        if self._collapsed:
+        """Surface the card if the user had it collapsed (used when a new plan or result arrives, so important
+        updates pop back down). Not for the voice assistant: there the controller decides (ensure_open), so with
+        "Open answers automatically" off its work stays tucked."""
+        if self._collapsed and not self._hands_free:
             self._expand()
 
     def set_level(self, level: float):
@@ -209,11 +388,30 @@ class OrganizeOverlay(QWidget):
         self._refining = on
 
     # ----- layout helpers -----
-    def _clear(self):
+    def _new_page(self, spacing=10):
+        pg = QWidget(self._card)
+        pg.setObjectName("ovPage")
+        pg.setStyleSheet("QWidget#ovPage{background:transparent;}")
+        lay = QVBoxLayout(pg)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(spacing)
+        pg.hide()
+        return pg
+
+    def _show_page(self, page, state):
+        """Put `page` in the card (the one before is hidden, and kept: the plan comes back with show_plan_page)."""
         self._cancel_dismiss_timer()
-        self._waveform = None
-        self._thinking_lbl = None
-        self._clear_layout(self._body)
+        self._end_typing()
+        cur = self._current
+        if cur is not page:
+            if cur is not None:
+                self._body.removeWidget(cur)
+                cur.hide()
+            self._body.addWidget(page)
+            self._current = page
+        page.show()
+        self._state = state
+        self._resize()
 
     def _clear_layout(self, lay):
         while lay.count():
@@ -228,18 +426,72 @@ class OrganizeOverlay(QWidget):
     def _label(self, text, color=_TITLE, size=15, weight=400, wrap=True):
         lbl = QLabel(text)
         lbl.setWordWrap(wrap)
+        if wrap:
+            lbl.setAlignment(Qt.AlignLeft | Qt.AlignTop)
         lbl.setStyleSheet(
             f"color:{color}; font-size:{size}px; font-weight:{weight}; background:transparent;")
         return lbl
 
+    @staticmethod
+    def _fit_text(label, width):
+        """Give a wrapping label the height its text needs at `width` (the width the layout gives it), so the page
+        — and the panel — grow with a long message instead of cutting it off."""
+        label.ensurePolished()
+        label.setMinimumHeight(0)        # (QLabel.heightForWidth never answers less than the minimum height)
+        h = label.heightForWidth(int(width))
+        if h <= 0:
+            h = label.sizeHint().height()
+        label.setMinimumHeight(h)
+        return h
+
     def _resize(self):
-        self.adjustSize()
         self._position_top_center()
+
+    def _relayout(self):
+        """Drop every layout's cached size before measuring. A nested layout keeps its height-for-width until Qt's
+        queued LayoutRequest runs, so measuring right after a page or text change got the OLD page's height (a
+        one-line question in a panel sized for three, the gap spread above and below it)."""
+        try:
+            self._invalidate_tree(self.layout())
+        except RuntimeError:
+            pass
+
+    @classmethod
+    def _invalidate_tree(cls, lay):
+        """invalidate() clears a layout's own cache; a container widget's cached size in its parent layout needs
+        updateGeometry()."""
+        for i in range(lay.count()):
+            it = lay.itemAt(i)
+            w = it.widget()
+            if w is not None:
+                if w.isHidden():
+                    continue
+                w.updateGeometry()
+                if isinstance(w, QScrollArea) and w.widget() is not None:
+                    w = w.widget()
+                    w.updateGeometry()
+                if w.layout() is not None:
+                    cls._invalidate_tree(w.layout())
+            elif it.layout() is not None:
+                cls._invalidate_tree(it.layout())
+        lay.invalidate()
+
+    _LIST_MAX_H = 300
+
+    def _fit_list(self, scroll):
+        """The folder list is as tall as its groups (open or closed), up to 300 px, then it scrolls. Set here, not
+        left to QScrollArea: it caches its content's size, so opening a group never grew the list."""
+        inner = scroll.widget()
+        inner.ensurePolished()               # (the groups' styled borders count toward their height)
+        self._invalidate_tree(inner.layout())
+        inner.updateGeometry()
+        scroll.setFixedHeight(min(self._LIST_MAX_H, max(0, inner.sizeHint().height())))
 
     def _position_top_center(self):
         try:
             from PySide6.QtGui import QGuiApplication
             scr = QGuiApplication.primaryScreen().availableGeometry()
+            self._relayout()
             self.adjustSize()
             x = scr.center().x() - self.width() // 2
             y = scr.top()   # flush with the very top of the screen
@@ -247,274 +499,502 @@ class OrganizeOverlay(QWidget):
         except Exception:
             pass
 
-    # ================= STATES =================
-    def show_thinking(self, msg="Analyzing your files…"):
-        # If a thinking view is already up (status updates fire rapidly during
-        # indexing), just update the TEXT — don't rebuild. Recreating the Spinner
-        # each time left ghost spinners overlapping (the "double" artifact) and
-        # reset the animation every frame.
-        lbl = getattr(self, "_thinking_lbl", None)
-        if lbl is not None:
-            try:
-                lbl.setText(msg)
-                self._resize()
-                return
-            except RuntimeError:
-                self._thinking_lbl = None
-        self._clear()
+    # ----- persistent pages -----
+    def _make_thinking_page(self):
+        pg = self._new_page()
         row = QHBoxLayout()
+        row.setContentsMargins(0, 18, 0, 18)
         row.setSpacing(12)
         row.addStretch()
-        row.addWidget(Spinner(color=_ACCENT, size=22))
-        self._thinking_lbl = self._label(msg, color="#D6D6E0", size=15, wrap=False)
-        row.addWidget(self._thinking_lbl)
+        self._spinner = Spinner(color=_ACCENT, size=22)
+        row.addWidget(self._spinner, 0, Qt.AlignVCenter)
+        self._thinking_lbl = self._label("", color=_TEXT, size=15)
+        row.addWidget(self._thinking_lbl, 0, Qt.AlignVCenter)
         row.addStretch()
-        self._pad(row, 18)
-        self._resize()
+        pg.layout().addLayout(row)
+        return pg
 
-    def show_applying(self):
-        self.show_thinking("Organizing…")
+    def _fit_thinking(self):
+        """One line, centred beside the spinner; a long one ("Reading <a long folder name>, 120 of 300") wraps
+        instead of running off the card."""
+        lbl = self._thinking_lbl
+        lbl.ensurePolished()
+        widest = _INNER_W - 22 - 12            # minus the spinner and the gap
+        w = min(widest, lbl.fontMetrics().horizontalAdvance(lbl.text()) + 4)
+        lbl.setFixedWidth(max(20, w))
+        self._fit_text(lbl, lbl.width())
 
-    def show_listening(self, prompt="Listening… tap Stop when you're done"):
-        self._clear()
+    def _make_listening_page(self):
+        pg = self._new_page()
+        lay = pg.layout()
         self._waveform = AnimatedWaveform(color=_ACCENT, bars=11, width=_CARD_W - 120,
                                           height=56, bar_width=5.0)
         wrow = QHBoxLayout()
         wrow.addStretch()
         wrow.addWidget(self._waveform)
         wrow.addStretch()
-        self._body.addLayout(wrow)
+        lay.addLayout(wrow)
 
-        cap = self._label(prompt, color=_MUTED, size=13, wrap=False)
-        cap.setAlignment(Qt.AlignCenter)
-        self._body.addWidget(cap)
+        self._listen_caption = self._label("", color=_MUTED, size=13)
+        self._listen_caption.setAlignment(Qt.AlignCenter)
+        lay.addWidget(self._listen_caption)
 
         stop = QPushButton("■  Stop")
         stop.setCursor(Qt.PointingHandCursor)
         stop.setMinimumHeight(46)
         stop.setStyleSheet(self._primary_btn())
         stop.clicked.connect(self.refine_requested)
-        self._body.addWidget(stop)
-        self._resize()
+        lay.addWidget(stop)
+        return pg
+
+    def _glyph_row(self, lay):
+        """[glyph | wrapping message] — the glyph column is fixed, so the message's width (and so its height) is
+        known before the page is laid out. The glyph is one text line tall, centred on the message's first line."""
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(_GLYPH_GAP)
+        msg = self._label("", color=_TEXT, size=14)
+        msg.ensurePolished()
+        glyph = QLabel()
+        glyph.setFixedSize(_GLYPH_W, max(20, msg.fontMetrics().lineSpacing()))
+        glyph.setAlignment(Qt.AlignCenter)
+        row.addWidget(glyph, 0, Qt.AlignTop)
+        row.addWidget(msg, 1)
+        lay.addLayout(row)
+        return glyph, msg
+
+    @staticmethod
+    def _set_glyph(glyph, kind):
+        """✓ (painted: the font's ✓ came out as a thin √), ⚠ (Segoe UI Symbol: a flat glyph, not the colour
+        emoji), or an accent "?" (it's asking, not failing)."""
+        if kind == "check":
+            glyph.setText("")
+            glyph.setPixmap(line_pixmap("check", 18, _ACCENT_HD))
+            glyph.setStyleSheet("background:transparent;")
+            return
+        glyph.setPixmap(QPixmap())
+        if kind == "question":
+            glyph.setText("?")
+            glyph.setStyleSheet(f"color:{_ACCENT_HD}; font-size:17px; font-weight:800; background:transparent;")
+        else:
+            glyph.setText("⚠")
+            glyph.setStyleSheet(f"color:{_WARN}; font-size:16px; background:transparent; "
+                                "font-family:'Segoe UI Symbol','Segoe UI';")
+
+    def _make_done_page(self):
+        pg = self._new_page(spacing=14)
+        lay = pg.layout()
+        self._done_glyph, self._done_label = self._glyph_row(lay)
+        self._set_glyph(self._done_glyph, "check")
+        self._done_undo_btn = QPushButton("  Undo")
+        self._done_undo_btn.setIcon(QIcon(_undo_pixmap("#C3C3CE")))
+        self._done_undo_btn.setIconSize(QSize(16, 16))
+        self._done_undo_btn.setObjectName("ovUndoBtn")
+        self._done_undo_btn.setCursor(Qt.PointingHandCursor)
+        self._done_undo_btn.setFixedHeight(42)
+        self._done_undo_btn.setStyleSheet(self._ghost_btn("ovUndoBtn"))
+        self._done_undo_btn.clicked.connect(self.undo_clicked.emit)
+        self._done_undo_btn.setVisible(False)
+        lay.addWidget(self._done_undo_btn)
+        return pg
+
+    def _make_error_page(self):
+        pg = self._new_page(spacing=14)
+        lay = pg.layout()
+        self._error_glyph, self._error_label = self._glyph_row(lay)
+        self._set_glyph(self._error_glyph, "warn")
+        self._error_pick_btn = QPushButton("📁  Choose folder…")
+        self._error_pick_btn.setCursor(Qt.PointingHandCursor)
+        self._error_pick_btn.setMinimumHeight(46)
+        self._error_pick_btn.setStyleSheet(self._primary_btn())
+        self._error_pick_btn.clicked.connect(self.change_folder_requested)
+        lay.addWidget(self._error_pick_btn)
+        self._error_close_btn = QPushButton("Close")
+        self._error_close_btn.setObjectName("ovErrClose")
+        self._error_close_btn.setCursor(Qt.PointingHandCursor)
+        self._error_close_btn.setMinimumHeight(44)
+        self._error_close_btn.setStyleSheet(self._ghost_btn("ovErrClose"))
+        self._error_close_btn.clicked.connect(self.dismiss)
+        lay.addWidget(self._error_close_btn)
+        return pg
+
+    def _make_confirm_page(self):
+        """Ask before something big: a question, Cancel, and one main button."""
+        pg = self._new_page(spacing=16)
+        lay = pg.layout()
+        self._confirm_label = self._label("", color=_QUESTION, size=14)
+        lay.addWidget(self._confirm_label)
+        row = QHBoxLayout()
+        row.setSpacing(10)
+        cancel = QPushButton("Cancel")
+        cancel.setObjectName("ovConfirmCancel")
+        cancel.setCursor(Qt.PointingHandCursor)
+        cancel.setFixedHeight(44)
+        cancel.setMinimumWidth(104)
+        cancel.setStyleSheet(self._ghost_btn("ovConfirmCancel"))
+        cancel.clicked.connect(self._on_dismiss)
+        row.addWidget(cancel, 0)
+        self._confirm_cancel_btn = cancel
+        self._confirm_btn = QPushButton("Continue")
+        self._confirm_btn.setCursor(Qt.PointingHandCursor)
+        self._confirm_btn.setFixedHeight(44)
+        self._confirm_btn.setStyleSheet(self._primary_btn())
+        self._confirm_btn.clicked.connect(self.confirm_clicked.emit)
+        row.addWidget(self._confirm_btn, 1)
+        lay.addLayout(row)
+        return pg
+
+    # ================= STATES =================
+    def show_thinking(self, msg="Analyzing your files…"):
+        # One persistent spinner page: rapid status updates just change the TEXT (recreating the Spinner each
+        # time left ghost spinners overlapping and reset the animation every frame).
+        self._thinking_lbl.setText(msg or "")
+        self._fit_thinking()
+        self._show_page(self._page_thinking, "thinking")
+
+    def show_applying(self):
+        self.show_thinking("Organizing…")
+        self._state = "applying"
+
+    def show_listening(self, prompt="Listening… tap Stop when you're done"):
+        self._listen_caption.setText(prompt or "")
+        self._fit_text(self._listen_caption, _INNER_W)
+        self._show_page(self._page_listening, "listening")
 
     def show_plan(self, summary, folders, target_folder, file_count, folder_count,
-                  move_count=None):
+                  move_count=None, action="Organize"):
+        """`folders`: {name: [(filename, is_moving), ...]} (bare names count as moving). `move_count`: how many
+        actually move (defaults to file_count). `action`: the main button's verb — "Turn on and organize"."""
         self._ensure_expanded()
-        self._clear()
-        self._armed = False
+        self._organize_armed = False
         if move_count is None:
             move_count = file_count
+        old = self._page_plan
+        self._plan_action = action or "Organize"
+        self._page_plan = self._build_plan_page(summary, folders or {}, target_folder, int(move_count or 0),
+                                                self._plan_action)
+        self._show_page(self._page_plan, "plan")
+        if old is not None:
+            old.hide()
+            old.deleteLater()
 
-        self._body.addWidget(self._label(summary, color=_TITLE, size=19, weight=700))
+    def show_plan_page(self):
+        """Re-show the plan already built, without rebuilding it — e.g. after a refine recording that caught
+        nothing, so the panel doesn't get stuck on 'Listening…'."""
+        if self._page_plan is None:
+            return
+        self._ensure_expanded()
+        self._show_page(self._page_plan, "plan")
+
+    def _build_plan_page(self, summary, folders, target_folder, move_count, action):
+        pg = self._new_page(spacing=10)
+        lay = pg.layout()
+
+        title = self._label(summary, color=_TITLE, size=19, weight=700)
+        self._fit_text(title, _INNER_W)
+        lay.addWidget(title)
 
         # Target folder card: glyph + path + Change (purple text link)
         tcard = QFrame()
+        tcard.setObjectName("ovTarget")
         tcard.setStyleSheet(
-            f"background:{_CARD2}; border:1px solid {_CARD2_BRD}; border-radius:10px;")
+            f"QFrame#ovTarget{{background:{_CARD2}; border:1px solid {_CARD2_BRD}; border-radius:10px;}}")
         tl = QHBoxLayout(tcard)
         tl.setContentsMargins(14, 11, 12, 11)
         tl.setSpacing(10)
         gl = QLabel()
         gl.setPixmap(line_pixmap("folder", 17, "#C9C9D4"))
         gl.setFixedWidth(20)
+        gl.setStyleSheet("background:transparent;")
         tl.addWidget(gl)
-        tpath = QLabel(target_folder)
-        tpath.setStyleSheet(f"color:#C9C9D4; font-size:13px; background:transparent;")
-        tpath.setToolTip(target_folder)
-        tl.addWidget(tpath, 1)
+        tpath = QLabel()
+        tpath.setStyleSheet("color:#C9C9D4; font-size:13px; background:transparent;")
         change = QPushButton("Change")
         change.setCursor(Qt.PointingHandCursor)
         change.setStyleSheet(
             f"QPushButton{{background:transparent; color:{_ACCENT}; border:none; "
-            f"font-size:13px; font-weight:600;}} QPushButton:hover{{color:#A58BFF;}}")
+            f"font-size:13px; font-weight:600; padding:0 2px;}} QPushButton:hover{{color:#A58BFF;}}")
         change.clicked.connect(self.change_folder_requested)
+        # A long path used to lose its END — the part that says which folder. ~ for home, shorten the middle.
+        tpath.ensurePolished()
+        change.ensurePolished()
+        room = _INNER_W - 2 - 14 - 12 - 20 - 2 * 10 - change.sizeHint().width()
+        tpath.setText(short_path(display_path(target_folder), tpath.fontMetrics(), room))
+        tpath.setToolTip(target_folder or "")
+        self._target_label = tpath
+        tl.addWidget(tpath, 1)
         tl.addWidget(change)
-        self._body.addWidget(tcard)
+        lay.addWidget(tcard)
 
         # Collapsible folder groups (scroll if many)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        scroll.setMaximumHeight(300)
         scroll.setStyleSheet("QScrollArea{border:none; background:transparent;}")
         inner = QWidget()
-        inner.setStyleSheet("background:transparent;")
+        inner.setObjectName("ovGroups")
+        inner.setStyleSheet("QWidget#ovGroups{background:transparent;}")
         ilay = QVBoxLayout(inner)
         ilay.setContentsMargins(0, 0, 0, 0)
         ilay.setSpacing(8)
         for name, filenames in folders.items():
-            ilay.addWidget(self._folder_group(name, filenames))
+            ilay.addWidget(self._folder_group(name, filenames or [], scroll))
         ilay.addStretch()
         scroll.setWidget(inner)
-        self._body.addWidget(scroll)
+        self._plan_list = scroll
+        self._fit_list(scroll)
+        lay.addWidget(scroll)
 
-        # "Change by voice" mic row
+        # "Change by voice": the mic (hotkey), or what to say (voice assistant — its mic is already on)
         hint = QHBoxLayout()
-        mic = QPushButton()
-        mic.setCursor(Qt.PointingHandCursor)
-        mic.setFixedSize(34, 34)
-        mic.setIcon(QIcon(line_pixmap("mic", 16, "#FFFFFF")))
-        mic.setIconSize(QSize(16, 16))
-        mic.setStyleSheet(
+        hint.setSpacing(10)
+        self._refine_btn = QPushButton(pg)
+        self._refine_btn.setCursor(Qt.PointingHandCursor)
+        self._refine_btn.setFixedSize(34, 34)
+        self._refine_btn.setIcon(QIcon(line_pixmap("mic", 16, "#FFFFFF")))
+        self._refine_btn.setIconSize(QSize(16, 16))
+        self._refine_btn.setStyleSheet(
             f"QPushButton{{background:{_ACCENT}; border:none; border-radius:17px;}}"
             f"QPushButton:hover{{background:#8F63FF;}}")
-        mic.clicked.connect(self.refine_requested)
-        hint.addWidget(mic)
-        hint.addWidget(self._label("Change by voice — tap the mic", color=_MUTED,
-                                    size=13, wrap=False))
+        self._refine_btn.clicked.connect(self.refine_requested)
+        if self._hands_free:
+            self._refine_btn.setVisible(False)
+            text = "Say “yes”, “no”, or what to change"
+        else:
+            hint.addWidget(self._refine_btn)
+            text = "Change by voice — tap the mic"
+        self._refine_hint = self._label(text, color=_MUTED, size=13, wrap=False)
+        hint.addWidget(self._refine_hint)
         hint.addStretch()
-        self._body.addLayout(hint)
+        lay.addLayout(hint)
+        self.plan_field = None
+        if self._hands_free:                 # (speech mishears names: you can type the change too)
+            self.plan_field = self._typing_box("Or type what to change and press Enter")
+            lay.addWidget(self.plan_field)
 
-        # Cancel / Organize — the button reflects the ACTUAL number of files
-        # that will move (not the total shown above), and the big-batch two-click
-        # confirm triggers on the real move count.
-        big = move_count >= 30
+        # Cancel / Organize — the button reflects the ACTUAL number of files that will move (not the total shown
+        # above), and the big-batch two-click confirm triggers on the real move count.
+        big = move_count >= self._BIG_PLAN
         footer = QHBoxLayout()
         footer.setSpacing(10)
         cancel = QPushButton("Cancel")
+        cancel.setObjectName("ovPlanCancel")
         cancel.setCursor(Qt.PointingHandCursor)
         cancel.setMinimumHeight(46)
-        cancel.setStyleSheet(self._ghost_btn())
+        cancel.setStyleSheet(self._ghost_btn("ovPlanCancel"))
         cancel.clicked.connect(self.dismiss)
         footer.addWidget(cancel)
 
         self._organize_btn = QPushButton()
         self._organize_btn.setMinimumHeight(46)
         if move_count == 0:
-            # Already arranged this way — not a dead-end. The user organized on
-            # purpose, so invite a new arrangement via the refine mic above.
-            self._organize_btn.setText("Already arranged — tap the mic to change")
+            # Already arranged this way — not a dead-end. The user organized on purpose, so invite a new
+            # arrangement (by the refine mic, or just by saying it).
+            self._organize_btn.setText("Already arranged — say what to change" if self._hands_free
+                                       else "Already arranged — tap the mic to change")
             self._organize_btn.setEnabled(False)
             self._organize_btn.setStyleSheet(
                 "QPushButton{background:#1E1E28; color:#7E7E8C; border:1px solid #2C2C38; "
                 "border-radius:12px; font-size:14px; font-weight:600;}")
         else:
-            self._organize_btn.setText(f"✓  Organize — {move_count} moving")
+            if action == "Organize":
+                self._organize_btn.setText(f"✓  Organize — {move_count} moving")
+            else:
+                self._organize_btn.setText(f"✓  {action} {move_count} file{'s' if move_count != 1 else ''}")
             self._organize_btn.setCursor(Qt.PointingHandCursor)
             self._organize_btn.setStyleSheet(self._primary_btn())
             self._organize_btn.clicked.connect(lambda: self._on_organize(big, move_count))
         footer.addWidget(self._organize_btn, 1)
-        self._body.addLayout(footer)
-        self._resize()
+        lay.addLayout(footer)
+        return pg
 
     def _on_organize(self, big, move_count):
-        if big and not self._armed:
-            self._armed = True
+        if big and not self._organize_armed:
+            self._organize_armed = True
             self._organize_btn.setText(f"Move {move_count} files? Click to confirm")
             self._organize_btn.setStyleSheet(self._primary_btn(confirm=True))
             return
         self.organize_clicked.emit()
 
-    def show_done(self, revert_hint="Revert anytime in History."):
+    def show_done(self, revert_hint="Revert anytime in History.", undo=False):
+        """`undo`: an "↩ Undo" button (emits undo_clicked), and 20 s before it closes by itself."""
         self._ensure_expanded()
-        self._clear()
         msg = revert_hint or "Done."
-        # One wrapping label (check inline as rich text) added straight to the
-        # vertical body — a QHBoxLayout of [check | wrapping label] does NOT
-        # propagate heightForWidth, so the 2nd line was getting clipped.
-        from PySide6.QtCore import Qt as _Qt
-        lbl = QLabel(f'<span style="color:{_ACCENT}; font-weight:800;">✓</span>&nbsp;&nbsp;{msg}')
-        lbl.setTextFormat(_Qt.RichText)
-        lbl.setWordWrap(True)
-        lbl.setStyleSheet("color:#D6D6E0; font-size:14px; background:transparent;")
-        self._body.addWidget(lbl)
-        self._resize()
-        # Auto-dismiss, but keep it up long enough to READ a long message (it was
-        # getting cut off by the old fixed 3s). Scale with length; cancellable so
-        # a new request within the window isn't closed by this stale timer.
-        ms = max(4000, min(9000, 2500 + len(msg) * 55))
-        self._cancel_dismiss_timer()
-        self._dismiss_timer = QTimer(self)
-        self._dismiss_timer.setSingleShot(True)
-        self._dismiss_timer.timeout.connect(self.dismiss)
-        self._dismiss_timer.start(ms)
+        self._done_label.setText(msg)
+        self._fit_text(self._done_label, _ROW_TEXT_W)
+        self._done_undo_btn.setVisible(bool(undo))
+        self._show_page(self._page_done, "done")
+        # Auto-dismiss, but keep it up long enough to READ a long message (scaled with length) — or to reach
+        # for Undo. Cancellable so a new request within the window isn't closed by this stale timer.
+        self._start_dismiss_timer(20000 if undo else max(4000, min(9000, 2500 + len(msg) * 55)))
 
-    def show_error(self, msg, allow_pick_folder=False):
+    def show_error(self, msg, allow_pick_folder=False, question=False):
+        """`question`: it's asking you something (an accent "?"), not failing (the ⚠)."""
         self._ensure_expanded()
-        self._clear()
-        row = QHBoxLayout()
-        warn = QLabel("⚠")
-        warn.setStyleSheet("color:#F2A33C; font-size:18px; background:transparent;")
-        warn.setFixedWidth(24)
-        warn.setAlignment(Qt.AlignTop)
-        row.addWidget(warn)
-        row.addWidget(self._label(msg, color="#D6D6E0", size=14), 1)
-        self._body.addLayout(row)
-        if allow_pick_folder:
-            pick = QPushButton("📁  Choose folder…")
-            pick.setCursor(Qt.PointingHandCursor)
-            pick.setMinimumHeight(46)
-            pick.setStyleSheet(self._primary_btn())
-            pick.clicked.connect(self.change_folder_requested)
-            self._body.addWidget(pick)
-        else:
-            close = QPushButton("Close")
-            close.setCursor(Qt.PointingHandCursor)
-            close.setMinimumHeight(44)
-            close.setStyleSheet(self._ghost_btn())
-            close.clicked.connect(self.dismiss)
-            self._body.addWidget(close)
-        self._resize()
+        self._set_glyph(self._error_glyph, "question" if question else "warn")
+        self._error_label.setText(msg or "Something went wrong.")
+        self._fit_text(self._error_label, _ROW_TEXT_W)
+        self._error_pick_btn.setVisible(bool(allow_pick_folder))
+        self._error_close_btn.setVisible(not allow_pick_folder)
+        self._error_close_btn.setText("Cancel" if question else "Close")
+        self._show_page(self._page_error, "error")
+
+    def show_confirm(self, message, button):
+        """A question, Cancel (closes it, like ✕) and one main button (emits confirm_clicked)."""
+        self._ensure_expanded()
+        self._confirm_label.setText(message or "")
+        self._fit_text(self._confirm_label, _INNER_W)
+        self._confirm_btn.setText(button or "Continue")
+        self._show_page(self._page_confirm, "confirm")
+
+    def show_choice(self, question, options, field=""):
+        """A question with a few answers: options = [(key, label), ...], each a full-width button emitting
+        choice_made(key). `field`: a text box with that placeholder above them; Return emits text_submitted.
+        A Cancel link closes it."""
+        self._ensure_expanded()
+        self._end_typing()
+        pg = self._page_choice
+        lay = pg.layout()
+        self._clear_layout(lay)
+        q = self._label(question or "", color=_QUESTION, size=14)
+        self._fit_text(q, _INNER_W)
+        lay.addWidget(q)
+        lay.addSpacing(6)
+        self._choice_question = q
+        self.choice_field = None
+        if field:
+            self.choice_field = self._typing_box(field)
+            lay.addWidget(self.choice_field)
+        self.choice_buttons = {}
+        for key, label in options or []:
+            b = QPushButton(label)
+            b.setObjectName("ovChoiceBtn")
+            b.setCursor(Qt.PointingHandCursor)
+            b.setFixedHeight(44)
+            b.setStyleSheet(
+                f"QPushButton#ovChoiceBtn{{text-align:left; padding:0 16px; background:{_CARD2}; color:{_QUESTION}; "
+                f"border:1px solid {_CARD2_BRD}; border-radius:10px; font-size:14px; font-weight:600;}}"
+                f"QPushButton#ovChoiceBtn:hover{{border-color:{_ACCENT}; color:#FFFFFF;}}")
+            b.clicked.connect(lambda _=False, k=key: self.choice_made.emit(str(k)))
+            lay.addWidget(b)
+            self.choice_buttons[key] = b
+        cancel = QPushButton("Cancel")
+        cancel.setObjectName("ovChoiceCancel")
+        cancel.setCursor(Qt.PointingHandCursor)
+        cancel.setFixedHeight(34)
+        cancel.setStyleSheet(
+            f"QPushButton#ovChoiceCancel{{background:transparent; border:none; color:{_MUTED}; "
+            f"font-size:13px; font-weight:600; padding:0 16px;}}"
+            f"QPushButton#ovChoiceCancel:hover{{color:#FFFFFF;}}")
+        cancel.clicked.connect(self._on_dismiss)
+        lay.addWidget(cancel, 0, Qt.AlignHCenter)
+        self._choice_cancel_btn = cancel
+        self._show_page(pg, "choice")
+
+    def _typing_box(self, placeholder):
+        """For anything it asks in your own words, in case your voice wasn't understood (Mac bug 46). Enter sends
+        it (text_submitted)."""
+        f = _TypeBox(self._key_for_typing)
+        f.setObjectName("ovChoiceField")
+        f.setPlaceholderText(placeholder)
+        f.setFixedHeight(44)
+        f.setStyleSheet(
+            f"QLineEdit#ovChoiceField{{background:{_CARD2}; color:{_TITLE}; border:1px solid {_CARD2_BRD}; "
+            f"border-radius:10px; padding:0 14px; font-size:14px; "
+            f"selection-background-color:{_ACCENT};}}"
+            f"QLineEdit#ovChoiceField:focus{{border-color:{_ACCENT};}}")
+        f.returnPressed.connect(lambda f=f: self._on_field_submit(f))
+        return f
+
+    def _on_field_submit(self, f):
+        text = (f.text() or "").strip()
+        f.clear()                            # (before sending: pressing Enter twice mustn't send it twice)
+        if not text:
+            return
+        self._end_typing()
+        self.text_submitted.emit(text)
 
     # ----- pieces -----
-    def _pad(self, inner_layout, v):
-        wrap = QVBoxLayout()
-        wrap.setContentsMargins(0, v, 0, v)
-        wrap.addLayout(inner_layout)
-        self._body.addLayout(wrap)
-
-    def _folder_group(self, name, entries):
-        # Each entry is (filename, is_moving); accept bare strings too (treated
-        # as moving) for backward compatibility.
+    def _folder_group(self, name, entries, scroll=None):
+        # Each entry is (filename, is_moving); accept bare strings too (treated as moving), as the Mac sends.
         norm = [(e if isinstance(e, (tuple, list)) else (e, True)) for e in entries]
         total = len(norm)
         wrap = QFrame()
+        wrap.setObjectName("ovGroup")
         wrap.setStyleSheet(
-            f"background:{_CARD2}; border:1px solid {_CARD2_BRD}; border-radius:10px;")
+            f"QFrame#ovGroup{{background:{_CARD2}; border:1px solid {_CARD2_BRD}; border-radius:10px;}}")
         lay = QVBoxLayout(wrap)
         lay.setContentsMargins(14, 10, 14, 10)
         lay.setSpacing(2)
-        header = QPushButton(f"▸  {name}  ({total})")
+        header = QPushButton()
+        header.setObjectName("ovGroupHeader")
         header.setCursor(Qt.PointingHandCursor)
         header.setStyleSheet(
-            "QPushButton{background:transparent; color:#E8E8F0; border:none; "
+            "QPushButton#ovGroupHeader{background:transparent; color:#E8E8F0; border:none; "
             "font-size:14px; font-weight:600; text-align:left; padding:0;}")
+        # A long folder name made the header wider than the list, which then cut off the right edge of EVERY
+        # group card: shorten the name to fit (the full name is the tooltip).
+        header.ensurePolished()
+        hfm = header.fontMetrics()
+        room = _INNER_W - 2 - 28 - 12 - hfm.horizontalAdvance(f"▾    ({total})")   # border, margins, scrollbar
+        shown = hfm.elidedText(str(name), Qt.ElideMiddle, max(60, room))
+        header.setText(f"▸  {shown}  ({total})")
+        if shown != str(name):
+            header.setToolTip(str(name))
         body = QWidget()
+        body.setObjectName("ovGroupBody")
         body.setVisible(False)
-        body.setStyleSheet("background:transparent;")
+        body.setStyleSheet("QWidget#ovGroupBody{background:transparent;}")
         blay = QVBoxLayout(body)
         blay.setContentsMargins(14, 4, 0, 2)
         blay.setSpacing(1)
-        for fn, moving in norm[:50]:
-            if moving:
-                fl = QLabel("• " + str(fn))
-                fl.setStyleSheet("color:#9A9AA8; font-size:12px; background:transparent;")
-            else:
-                # Already in this folder — dimmed, tagged, so you see the full
-                # end-state but know it won't move.
-                fl = QLabel(f"• {fn}   · already here")
-                fl.setStyleSheet("color:#5E5E6B; font-size:12px; background:transparent;")
-            blay.addWidget(fl)
-        if total > 50:
-            more = QLabel(f"…and {total - 50} more")
-            more.setStyleSheet("color:#7A7A90; font-size:12px; background:transparent;")
-            blay.addWidget(more)
+        built = []
+
+        def build():
+            # (Built on first open: a big plan has thousands of names, and most groups are never opened.)
+            room = _INNER_W - 2 - 28 - 14 - 12            # card border, group margins, indent, scrollbar
+            for fn, moving in norm[:self._MAX_NAMES]:
+                fl = QLabel()
+                fl.setToolTip(str(fn))
+                if moving:
+                    fl.setStyleSheet("color:#9A9AA8; font-size:12px; background:transparent;")
+                    tail = ""
+                else:
+                    # Already in this folder — dimmed, tagged, so you see the full end-state but know it
+                    # won't move.
+                    fl.setStyleSheet("color:#5E5E6B; font-size:12px; background:transparent;")
+                    tail = "   · already here"
+                fl.ensurePolished()
+                fm = fl.fontMetrics()
+                fl.setText("• " + fm.elidedText(str(fn), Qt.ElideMiddle,
+                                                 room - fm.horizontalAdvance("• " + tail)) + tail)
+                blay.addWidget(fl)
+            if total > self._MAX_NAMES:
+                more = QLabel(f"… and {total - self._MAX_NAMES} more")
+                more.setStyleSheet("color:#7A7A90; font-size:12px; background:transparent;")
+                blay.addWidget(more)
+            built.append(True)
 
         def toggle():
+            if not built:
+                build()
             vis = not body.isVisible()
             body.setVisible(vis)
-            header.setText(f"{'▾' if vis else '▸'}  {name}  ({total})")
+            header.setText(f"{'▾' if vis else '▸'}  {shown}  ({total})")
+            if scroll is not None:
+                self._fit_list(scroll)
             self._resize()
         header.clicked.connect(toggle)
         lay.addWidget(header)
         lay.addWidget(body)
         return wrap
 
-    def _ghost_btn(self):
-        return ("QPushButton{background:transparent; color:#C3C3CE; border:1px solid #33333F; "
+    def _ghost_btn(self, name=None):
+        sel = f"QPushButton#{name}" if name else "QPushButton"
+        return (f"{sel}{{background:transparent; color:#C3C3CE; border:1px solid #33333F; "
                 "border-radius:11px; font-size:14px; font-weight:600; padding:0 22px;}"
-                "QPushButton:hover{border-color:#7C4DFF; color:#FFFFFF;}")
+                f"{sel}:hover{{border-color:#7C4DFF; color:#FFFFFF;}}")
 
     def _primary_btn(self, confirm=False):
         c0, c1 = ("#6E3BEF", "#8257FF") if confirm else ("#7C4DFF", "#9165FF")

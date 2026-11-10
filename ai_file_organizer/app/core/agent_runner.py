@@ -745,12 +745,17 @@ class AgentRunner:
 
     async def run(self, prompt: str, resume: Optional[str] = None, max_turns: int = 40,
                   bypass: bool = False, model: Optional[str] = None,
-                  effort: Optional[str] = None, images: Optional[list] = None) -> Optional[str]:
+                  effort: Optional[str] = None, images: Optional[list] = None,
+                  wait_for=None) -> Optional[str]:
         """Run (or resume) a task to completion, streaming steps and gating tools. Returns the
         session id (for resuming later).
 
         bypass=True runs without any Approve/Deny cards — like Claude Code's bypass-permissions
         mode, the agent edits files and runs commands on its own. Use only for trusted tasks.
+
+        wait_for (a warm spare — Filect Assistant): start Claude Code — and your MCP tools — NOW, then await
+        wait_for() for the request: (prompt, images), or None = not needed after all. (Mac, measured: a request
+        then answers in ~1.7 s instead of ~6 s — the start-up is already done.)
         """
         from claude_agent_sdk import (ClaudeSDKClient, ClaudeAgentOptions, ResultMessage,
                                       AssistantMessage, CLINotFoundError)
@@ -760,8 +765,12 @@ class AgentRunner:
             StreamEvent = None
         use_login_path()
         # setting_sources=[] isolates from the user's global ~/.claude permissions in both modes.
+        # Tool search: your MCP tools' full descriptions load only when one is needed (Mac, measured 2026-11-08:
+        # plain answers ~0.5 s faster, tool requests 1–2 s faster, the same tools picked, no extra approval cards).
+        # Your own ENABLE_TOOL_SEARCH, if you set one, wins.
         common = dict(cwd=self.cwd, setting_sources=[], resume=resume, max_turns=max_turns,
-                      system_prompt=tools_note("claude", self.cwd))
+                      system_prompt=tools_note("claude", self.cwd),
+                      env={"ENABLE_TOOL_SEARCH": os.environ.get("ENABLE_TOOL_SEARCH") or "true"})
         if StreamEvent is not None:
             common["include_partial_messages"] = True    # the reply streams in live (see _on_stream_event)
         self._live, self._live_at = None, 0.0
@@ -780,14 +789,22 @@ class AgentRunner:
         else:
             # Our Approve/Deny cards are the gate (read-only tools auto-allowed).
             opts = ClaudeAgentOptions(permission_mode="default", can_use_tool=self._can_use_tool, **common)
-        logger.info("[agent] starting: model=%s effort=%s bypass=%s resume=%s",
+        logger.info("[agent] starting%s: model=%s effort=%s bypass=%s resume=%s",
+                    " (warm spare — waits for a request)" if wait_for else "",
                     model or "(default)", effort or "(default)", bypass, bool(resume))
         # Screenshots go in the message itself — built BEFORE connecting, since it may briefly wait for a
         # screenshot that's still being written.
-        msg = user_message(prompt, images) if images else None
+        msg = user_message(prompt, images) if images and wait_for is None else None
         try:
             async with ClaudeSDKClient(options=opts) as client:
                 self._client = client            # exposed so stop() can interrupt the running turn
+                if wait_for is not None:         # a warm spare: running, waiting for its request
+                    got = await wait_for()
+                    if got is None:
+                        return None              # not needed after all — closes Claude Code
+                    prompt, images = got
+                    msg = user_message(prompt, images) if images else None
+                    logger.info("[agent] warm start — Claude Code was already running")
                 if msg is not None:
                     logger.info("[agent] sending %d screenshot(s)",
                                 sum(b["type"] == "image" for b in msg["message"]["content"]))

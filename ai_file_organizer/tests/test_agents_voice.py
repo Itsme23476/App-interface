@@ -256,9 +256,14 @@ def test_esc_cancels_and_a_chord_tap_is_dropped(voice):
     _pump(0.1)
     assert mw.sent == [], "Esc must drop everything"
     hk.pressed.emit()                          # a quick accidental tap
+    rec = vc._recorder
+    cancelled = []
+    rec.cancel = lambda: cancelled.append(1)   # (the real transcriber's cancel(): no batch re-upload)
     hk.released.emit()
     _pump(0.1)
     assert mw.sent == [] and vc._state == "idle"
+    assert cancelled == [1] and not rec.stopped, \
+        "a dropped tap CANCELS the recording (an empty stream is never re-uploaded for transcription)"
 
 
 def test_right_click_toggles_drawing_and_esc_undoes_only_it(voice):

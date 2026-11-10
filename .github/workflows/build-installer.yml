@@ -151,6 +151,12 @@ jobs:
             "--hidden-import", "app.ui.conversation_rail",
             "--hidden-import", "app.ui.screen_ink",
             "--hidden-import", "app.ui.win_panel",
+            "--hidden-import", "app.ui.live_page",
+            "--hidden-import", "app.core.live_listener",
+            "--hidden-import", "app.core.speech_out",
+            "--hidden-import", "app.core.mic_helper",
+            "--hidden-import", "app.core.organize_reader",
+            "--hidden-import", "webrtcvad",
             "--noconfirm"
           )
           if (Test-Path "resources/iconnn.ico") {

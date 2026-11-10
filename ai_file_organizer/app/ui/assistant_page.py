@@ -109,6 +109,84 @@ def _agent_name(agent: str) -> str:
     return {"claude": "Claude Code", "codex": "Codex"}.get(agent, agent)
 
 
+# Filect Assistant (hands-free): a spoken yes / no to an agent that's waiting for your approval.
+_YES = {"yes", "yeah", "yep", "yup", "sure", "ok", "okay", "go ahead", "do it", "approve", "approved",
+        "sounds good", "go for it", "please do", "yes please", "alright", "all right", "of course",
+        "absolutely", "correct", "right", "go"}
+_NO = {"no", "nope", "don't", "do not", "deny", "denied", "cancel", "stop", "no thanks", "not now",
+       "don't do it", "wait", "hold on", "no way"}
+
+
+_ORGANIZE_YES = {"yes", "yes please", "yep", "sure", "go ahead", "do it", "approve"}
+_ORGANIZE_NO = {"no", "nope", "no thanks", "no actually", "actually no", "cancel", "stop", "deny",
+                "no don't", "no do not", "please don't", "don't do it"}   # (Codex read "no don't" as noise)
+
+
+def _plain_answer(text: str):
+    """A bare yes / no to what the organize panel is asking: instant. Anything longer the decider reads, and so
+    do "okay" and "yeah", which an always-on mic hears as filler (moving files shouldn't hang on those)."""
+    import re
+    t = " ".join(re.sub(r"[^a-z' ]", " ", (text or "").lower()).split())
+    return True if t in _ORGANIZE_YES else False if t in _ORGANIZE_NO else None
+
+
+def _yes_no(text: str):
+    """True / False for a clear spoken yes / no ("Yes, go ahead." / "No, don't."), else None."""
+    import re
+    t = " ".join(re.sub(r"[^a-z' ]", " ", (text or "").lower()).split())
+    for lead in ("hey ", "uh ", "um ", "oh ", "well "):
+        if t.startswith(lead):
+            t = t[len(lead):]
+    words = t.split()
+    if not words or len(words) > 5:
+        return None
+    if t in _YES or (words[0] in ("yes", "yeah", "yep", "sure", "okay", "ok") and not set(words) & {"no", "not", "don't"}):
+        return True
+    if t in _NO or words[0] in ("no", "nope"):
+        return False
+    return None
+
+
+_SCREEN_WORDS = None
+
+
+def _mentions_screen(text: str) -> bool:
+    """Backstop for the router's "screen" flag: the request plainly refers to what's on your screen."""
+    global _SCREEN_WORDS
+    import re
+    if _SCREEN_WORDS is None:
+        _SCREEN_WORDS = re.compile(
+            r"\b(?:(?:my|the|this|your)\s+screen|on[- ]screen|screenshot|look\s+at\s+(?:this|that|it|what)|"
+            r"see\s+(?:this|that|what)|what(?:'s|\s+is)\s+(?:this|that)|what\s+am\s+i\s+(?:looking|seeing)|"
+            r"(?:this|that)\s+(?:error|page|window|button|message|popup|pop-up|dialog))\b", re.I)
+    return bool(_SCREEN_WORDS.search(text or ""))
+
+
+def _last_question(text: str) -> str:
+    """The question an agent's answer ends with, else "". Also when ONE short sentence or tag trails it —
+    agents do that all the time: "…Should I create it? I'll wait for your answer before creating it."
+    (Codex), "…Should I create it? (yes/no)", or a last line "Let me know."."""
+    import re
+    lines = [ln.strip(" \t*_`>\"'”“") for ln in (text or "").strip().splitlines() if ln.strip(" \t*_`>\"'”“")]
+    for ln in reversed(lines[-2:]):
+        i = ln.rfind("?")
+        if i < 0:
+            continue
+        after = ln[i + 1:].strip()
+        if len(after) <= 150 and len(re.findall(r"[.!]\s+\S", after)) == 0:    # at most one short sentence after it
+            return re.split(r"(?<=[.!])\s+", ln[:i + 1])[-1][:300]
+    return ""
+
+
+def _track(event: str, **props) -> None:
+    """Analytics (counts / slugs only — never the words)."""
+    try:
+        from app.core.supabase_client import track
+        track(event, **props)
+    except Exception:
+        pass
+
+
 class AgentWorker(QObject):
     """Runs one AgentRunner turn inside an asyncio loop on a worker thread, and relays everything to the
     UI via Qt signals. Approvals: the agent's async permission callback emits `approvalRequested` and
@@ -126,9 +204,13 @@ class AgentWorker(QObject):
 
     def __init__(self, key: str, cwd: str, prompt: str, resume: str | None = None, bypass: bool = False,
                  model: str | None = None, effort: str | None = None, images: list | None = None,
-                 agent: str = "claude"):
+                 agent: str = "claude", parked: bool = False):
         super().__init__()
         self.key = key
+        self._parked = parked                 # a warm spare: starts Claude Code now, gets its request later
+        self._give_lock = threading.Lock()
+        self._given = None                    # (value,) once deliver() / discard() was called
+        self._given_fut = None
         self._agent = agent
         self._cwd = cwd
         self._prompt = prompt
@@ -206,6 +288,29 @@ class AgentWorker(QObject):
         if self._runner is not None:
             self._runner.allow_all = bool(on)
 
+    def deliver(self, key: str, prompt: str, images=None):
+        """(UI thread) The warm spare's request: it becomes `key`'s turn — Claude Code is already running."""
+        self.key = key
+        self._give((prompt, list(images or [])))
+
+    def discard(self):
+        """(UI thread) The warm spare isn't needed: Claude Code closes."""
+        self._give(None)
+
+    def _give(self, value):
+        with self._give_lock:
+            self._given = (value,)
+            loop, fut = self._loop, self._given_fut
+        if loop is not None and fut is not None and not loop.is_closed():
+            loop.call_soon_threadsafe(lambda: fut.done() or fut.set_result(value))
+
+    async def _wait_given(self):
+        with self._give_lock:
+            if self._given is not None:
+                return self._given[0]
+            self._given_fut = self._loop.create_future()
+        return await self._given_fut
+
     async def _on_approval(self, req) -> bool:
         self._approval_fut = self._loop.create_future()
         self.approvalRequested.emit(self.key, req)
@@ -230,8 +335,9 @@ class AgentWorker(QObject):
         )
         runner.allow_all = self._allow_all
         self._runner = runner            # exposed so stop() can interrupt the live turn
+        kw = {"wait_for": self._wait_given} if self._parked else {}
         await runner.run(self._prompt, resume=self._resume, bypass=self._bypass,
-                         model=self._model, effort=self._effort, images=self._images)
+                         model=self._model, effort=self._effort, images=self._images, **kw)
 
 
 _session_keys = itertools.count(1)
@@ -256,6 +362,10 @@ class AgentSession:
         self.busy_in_app = None              # (chat id, title) the Codex app was working on when asked
         self.reopen_codex = None             # chat to reopen the Codex app on once this turn is done
         self.reopen_token = 0                # a newer turn cancels a pending reopen (_reopen_codex_when_quiet)
+        self.live_turn = False               # this turn came from Filect Assistant (hands-free) → may be spoken
+        self.pending_live = False            # …and so did the queued follow-up
+        self.speak_noted = False             # this turn's message asked the agent what to say aloud (SPEAK_NOTE)
+        self.n_tools = 0                     # this turn's tool calls (analytics: a count)
         self.cwd = cwd
         self.prompt = prompt                 # this turn's input
         self.title = title                   # short conversation name (list row + notification)
@@ -295,6 +405,13 @@ class AssistantPage(QWidget):
     _setup_checked = Signal(str, bool)         # (agent, ready)
     _models_loaded = Signal(object)            # [model dicts] from Claude Code
     _voice_decided = Signal(object)            # {intent, idx, task, candidates, focused_key, …} from the router
+    live_routed = Signal(object, str, str, str)    # Filect Assistant: (tag, new|continued|ignored|failed|cancelled|
+                                                   #   approved|denied, title, key)
+    live_screen_used = Signal(object)              # Filect Assistant: that request's screen capture was attached
+    live_event = Signal(object, str, object)       # Filect Assistant: a hands-free turn's (key, done|approval|error,
+                                                   #   payload) — the page may say it out loud ("Speak replies")
+    agents_setup_changed = Signal(object)          # {"claude"/"codex": ready|install|signin, "waiting": agent|None}
+    primary_changed = Signal(str)                  # the agent new chats use changed ("claude" | "codex") — Assistant tab
     _codex_info_ready = Signal(object)         # {models, update, msg} — Codex's live model list (background)
     _codex_released = Signal(str, str, str)    # (session key, what closed "app"/"terminal"/"", interrupted chat)
     _codex_hold_checked = Signal(str, str, object)   # (session key, who holds it, [(id, title)] the app is busy on)
@@ -328,6 +445,20 @@ class AssistantPage(QWidget):
         self._quiet_routes = set()   # routing ids you ✕'d the card during — their task starts with the card tucked
         self._quiet_start = False    # (set while one of those is being dispatched)
         self._from_page = False      # the turn about to start was sent from this page (the card stays tucked)
+        # Filect Assistant (hands-free, Mac §8m–8q): listening on/off (the Assistant page tells us), decisions made
+        # while you finish a sentence, requests held a moment in case you go on talking, the router ids of
+        # hands-free requests, whether the turn about to start is hands-free, and the warm Claude Codes.
+        self._hands_free = False
+        self._speedups = not _offscreen()           # (tests / renders never start Claude Code)
+        self._early = {}             # tag -> {sig, done, d}: a decision made while you finished the sentence
+        self._holds = {}             # tag -> don't start it before this (monotonic) — hold_live
+        self._live_tags = {}         # router id -> the page's tag (Esc cancels them)
+        self._live_turn_next = False
+        self._spares = {}            # "new" / "follow" -> a warm Claude Code waiting for its request
+        self._spare_threads = {}     # spare key -> its thread, until it's used or has ended
+        self._spare_timer = QTimer(self)
+        self._spare_timer.setInterval(60000)
+        self._spare_timer.timeout.connect(self._check_spare)
         from app.core import agent_runner as _ar
         self._claude_models = _ar.cached_claude_models()
         self._model = _setting("assistant_model", "") or "opus"           # Claude Code's pick
@@ -409,6 +540,12 @@ class AssistantPage(QWidget):
         lay.addWidget(v)
         # The Mac engine's handles, so the ported code reads the same.
         self.task_input = v.composer.input
+        # You're about to ask: start the Claude Code that request will need (agent_intent) — typing takes longer than
+        # Claude Code + your tools take to start.
+        self._intent_at = {}
+        self.task_input.installEventFilter(self)
+        self.task_input.textChanged.connect(
+            lambda: self.task_input.toPlainText().strip() and self._intent_throttled("page"))
         self.run_btn = v.composer.send_btn
         self.mic_btn = v.composer.mic_btn
         self.status_label = QLabel(self)
@@ -577,17 +714,37 @@ class AssistantPage(QWidget):
         self.view.set_models(self._models_of(agent), model or "", effort or "")
 
     def _set_primary(self, agent: str):
-        """The agent menu's "Agent" rows: who new chats (typed, Shift+Z, the card) go to. Saved."""
-        if agent not in ("claude", "codex") or agent == self._primary:
+        """The agent menu's "Agent" rows (and the Assistant tab's "Agent"): who new chats (typed, Shift+Z, the card,
+        hands-free) go to. Saved. Picked while a chat of the OTHER agent is open → a new chat with it starts (a chat
+        can't change agents — it stays in the list). What you'd typed stays in the box."""
+        if agent not in ("claude", "codex"):
             return
-        self._primary = agent
-        self._down.pop(agent, None)                 # you picked it: try it first again
-        _save_setting(assistant_agent=agent)
-        _trace(f"primary agent -> {agent}")
+        sess = self._focused
+        leave = sess is not None and sess.agent != agent
+        if agent == self._primary and not leave:
+            return
+        if agent != self._primary:
+            self._primary = agent
+            self._down.pop(agent, None)             # you picked it: try it first again
+            _save_setting(assistant_agent=agent)
+            _trace(f"primary agent -> {agent}")
+            try:
+                self.primary_changed.emit(agent)
+            except Exception:
+                pass
+        if leave:                                   # the box now talks to the agent you picked: a new chat
+            _trace(f"  -> new chat with {agent} (the open chat {sess.key} stays with {sess.agent})")
+            self._resume_target = None
+            self._focused_key = None
+            self._refresh_page()
         if self._card_key is None:                  # a blank card offers the new pick's models
             self._set_card_agent(self._pick_agent())
         self._sync_view_agent(force=True)
         self._schedule_page()
+        if self._hands_free:                        # hands-free's kept-ready Claude Code follows the pick
+            self._check_spare()
+            if agent == "claude" and "new" not in self._spares:
+                self._prewarm_new()
 
     def _set_models(self, agent: str, model: str, effort: str):
         """Model / thinking for `agent` (saved) — that agent's next turn (of any chat) uses them."""
@@ -598,6 +755,7 @@ class AssistantPage(QWidget):
         else:
             self._model, self._effort = model or "", effort or ""
             _save_setting(assistant_model=self._model, assistant_effort=self._effort)
+            QTimer.singleShot(0, self._check_spare)     # (the new-chat warm Claude Code: with the new model)
         if self._overlay is not None and (self._card_agent or self._pick_agent()) == agent:
             m, e = self._model_for(agent)
             self._overlay.set_model_effort(m or "", e or "")
@@ -651,13 +809,21 @@ class AssistantPage(QWidget):
         if not st:
             return
         st = {"claude": st.get("claude"), "codex": st.get("codex")}
-        if st != {k: (self._agents_state or {}).get(k) for k in ("claude", "codex")}:
+        was = dict(self._agents_state or {})
+        if st != {k: was.get(k) for k in ("claude", "codex")}:
             _trace(f"agents: claude={st.get('claude')} codex={st.get('codex')}")
         self._agents_state = st
+        if (st.get("claude") == "ready" and was.get("claude") not in (None, "ready") and self._hands_free
+                and "new" not in self._spares):
+            self._prewarm_new()                  # Claude Code just got set up while listening: ready it now (as the Mac)
         try:
             self.view.set_setup(dict(st, waiting=self._agents_waiting))
         except Exception as e:
             _trace(f"setup card failed: {e}")
+        try:
+            self.agents_setup_changed.emit(dict(st, waiting=self._agents_waiting))
+        except Exception:
+            pass
         both_ready = st.get("claude") == "ready" and st.get("codex") == "ready"
         if both_ready:
             self._agents_recheck.stop()          # (an error triggers a check if that ever changes)
@@ -796,6 +962,331 @@ class AssistantPage(QWidget):
             return (m or None), (self._codex_effort or None)
         return (self._model or None), (self._effort or None)
 
+    # ---- Filect Assistant (hands-free) — the Mac's speed-ups: a warm Claude Code + deciding while you finish ----
+    SPARE_IDLE_SEC = 600         # a warm Claude Code nobody used for 10 min: the new-chat one is replaced by a fresh
+                                 # one, a follow-up one closes. (Mac: ~360 MB each.)
+
+    def set_hands_free(self, on: bool):
+        """Filect Assistant started / stopped listening. While it listens, Claude Code is kept running ahead of
+        time — one for a NEW chat (always, replaced when used), and one for a follow-up of the chat you just talked
+        to — so a request doesn't wait ~3.5 s for Claude Code + your tools to start; the voice connection and the
+        decider are warmed too. Stopped → they close."""
+        self._hands_free = bool(on)
+        _trace(f"hands-free {'on' if on else 'off'}")
+        if not self._speedups:
+            return
+        if on:
+            self._spare_timer.start()
+            self.refresh_agents_setup()              # (background; requests read its saved answer)
+            if "new" not in self._spares:
+                self._prewarm_new()
+            try:
+                from app.core.speech_out import warm_up
+                warm_up()
+                if self._agent_ok("claude"):         # the router's own Claude Code too (~0.6 s off request 1)
+                    from app.core.intent_router import warm_up as router_warm_up
+                    threading.Thread(target=router_warm_up, daemon=True, name="filect-router-warm").start()
+            except Exception:
+                pass
+        else:
+            self._spare_timer.stop()
+            self._drop_spare("stopped listening")
+            self._early.clear()
+
+    def _new_sig(self):
+        """What a new hands-free chat would start with right now (the new-chat Claude Code must match it)."""
+        m, e = self._model_for("claude")
+        return (DEFAULT_WORKSPACE, None, bool(self.bypass_check.isChecked()), m or None, e or None)
+
+    def _prewarm_new(self, intent: bool = False):
+        if self._pick_agent() != "claude":
+            return
+        cwd, _, bypass, m, e = self._new_sig()
+        self._prewarm(cwd, None, bypass, m, e, intent=intent)
+
+    def _prewarm(self, cwd, resume, bypass, model, effort, intent: bool = False):
+        """Start a Claude Code for exactly this turn's settings; it waits for its request (AgentWorker parked).
+        While hands-free listening — or `intent`: you're about to ask (agent_intent: typing on the Agents page or in
+        the card, holding Shift+Z)."""
+        if not (self._hands_free or intent) or not self._speedups or self._closing or not self._agent_ok("claude"):
+            return
+        sig = (cwd, resume or None, bool(bypass), model or None, effort or None)
+        slot = "follow" if resume else "new"
+        cur = self._spares.get(slot)
+        if cur is not None:
+            if cur["sig"] == sig:
+                cur["at"] = time.time()              # (wanted again: its idle clock restarts)
+                return
+            self._drop_spare("replaced", slot)
+        if not self._spare_timer.isActive():
+            self._spare_timer.start()
+        if os.path.normcase(os.path.normpath(cwd)) == os.path.normcase(os.path.normpath(DEFAULT_WORKSPACE)):
+            os.makedirs(cwd, exist_ok=True)
+        key = f"spare{next(_session_keys)}"
+        th = QThread(self)
+        w = AgentWorker(key, cwd, "", resume=resume, bypass=bypass, model=model, effort=effort, agent="claude",
+                        parked=True)
+        w.moveToThread(th)
+        th.started.connect(w.run)
+        w.done.connect(self._on_spare_done)          # (died / discarded before anyone used it)
+        mark = None
+        if resume:                                   # the chat's last message as it starts: it knows up to here
+            try:
+                from app.core.agent_sessions import last_message_id
+                mark = last_message_id(resume, cwd)
+            except Exception:
+                mark = None
+        self._spares[slot] = {"worker": w, "thread": th, "sig": sig, "key": key, "at": time.time(), "mark": mark}
+        self._spare_threads[key] = th
+        th._spare_worker = w                         # (held until its thread ends: closed before its thread got to
+                                                     #  run it, the worker was garbage-collected, its run() never
+                                                     #  came, and the thread sat idle forever — found 2026-11-09)
+        th.start()
+        _trace(f"warm Claude Code ready-ing: resume={resume or '(new chat)'} model={model} bypass={bypass}")
+
+    INTENT_IDLE_SEC = 120        # started because you were about to ask (not listening hands-free): unused → closed
+
+    def _intent_throttled(self, where: str):
+        now = time.monotonic()
+        if now - self._intent_at.get(where, 0.0) >= 2.0:     # (typing calls this per keystroke)
+            self._intent_at[where] = now
+            self.agent_intent(where)
+
+    def eventFilter(self, obj, e):
+        from PySide6.QtCore import QEvent
+        if obj is getattr(self, "task_input", None) and e.type() == QEvent.FocusIn \
+                and e.reason() in (Qt.MouseFocusReason, Qt.TabFocusReason, Qt.BacktabFocusReason, Qt.ShortcutFocusReason):
+            self._intent_throttled("page")             # you clicked / tabbed into it (code moving focus doesn't count)
+        return super().eventFilter(obj, e)
+
+    def agent_intent(self, where: str):
+        """You're about to ask an agent something — Shift+Z is held ("voice"), you're typing in the card ("notch") or
+        on the Agents tab ("page"). Start what THAT request will need now, while you talk / type, so it doesn't wait
+        ~3.5 s for Claude Code + your tools (and the decider) to start (Mac e677e8e: Agents tab new chat 6.1–7.7 →
+        3.1 s, fn + ⌃ 9.7–11 → 5.4–7.2 s):
+          · page: exactly where it goes — the open chat's follow-up, else a past chat picked in the list, else a new
+            chat. (A chat that's still working queues the reply on its own Claude Code: nothing to start.)
+          · voice / notch: they're routed — a new chat AND the follow-up of the chat you're in, + the decider.
+        Same matching rules as hands-free (_take_spare): another chat / folder / setting → not used; a chat that got a
+        message elsewhere since → not used. Unused ones close after INTENT_IDLE_SEC. Only Claude Code (Codex starts
+        per turn)."""
+        if not self._speedups or self._closing:
+            return
+        bypass = self.bypass_check.isChecked()
+        if where == "page":
+            sess = self._focused
+            if sess is not None:
+                sid = sess.session_id or sess.resume
+                if sid and sess.agent == "claude" and not sess.running:
+                    m, e = self._model_for("claude")
+                    self._prewarm(sess.cwd, sid, bypass, m, e, intent=True)
+                return
+            t = self._resume_target
+            if t:
+                if (t.get("agent") or "claude") == "claude":
+                    m, e = self._model_for("claude")
+                    self._prewarm(t["cwd"], t["id"], bypass, m, e, intent=True)
+                return
+            self._prewarm_new(intent=True)
+            return
+        if self._agent_ok("claude"):                # the decider (routed requests) — warm by the time you've said it
+            threading.Thread(target=self._warm_router, daemon=True, name="filect-router-warm").start()
+        self._prewarm_new(intent=True)
+        sess = self._voice_target()
+        sid = (sess.session_id or sess.resume) if sess is not None else None
+        if sid and sess.agent == "claude" and not sess.running:
+            m, e = self._model_for("claude")
+            self._prewarm(sess.cwd, sid, bypass, m, e, intent=True)
+
+    @staticmethod
+    def _warm_router():
+        try:
+            from app.core.intent_router import IntentRouter
+            IntentRouter.get()
+        except Exception:
+            pass
+
+    def _take_spare(self, sess, resume_id):
+        slot = "follow" if resume_id else "new"
+        try:
+            return self._take_spare_slot(sess, resume_id, slot)
+        finally:
+            if slot == "new" and self._hands_free and "new" not in self._spares:
+                QTimer.singleShot(0, self._prewarm_new)      # the NEXT new chat is ready too
+
+    def _take_spare_slot(self, sess, resume_id, slot):
+        sp = self._spares.get(slot)
+        if sp is None or sess.agent != "claude":
+            return None
+        sig = (sess.cwd, resume_id or None, bool(sess.bypass), sess.model or None, sess.effort or None)
+        if sp["sig"] != sig:                         # another chat / folder, or settings changed: not for this one
+            if slot == "follow" or sp["sig"] != self._new_sig():     # …and it can't be used later either: close it
+                self._drop_spare("it doesn't match this request (another chat / settings changed)", slot)
+            return None
+        if resume_id:                                # the chat got a message elsewhere since it started → stale
+            try:
+                from app.core.agent_sessions import last_message_id
+                changed = last_message_id(resume_id, sess.cwd) != sp["mark"]
+            except Exception:
+                changed = True
+            if changed:
+                self._drop_spare("the chat changed elsewhere since it started", slot)
+                return None
+        del self._spares[slot]
+        self._spare_threads.pop(sp["key"], None)     # (it's this session's thread now)
+        return sp
+
+    def _drop_spare(self, why: str, slot: str = None):
+        """Close the warm Claude Code in `slot` ("new" / "follow"), or all of them."""
+        for name in ([slot] if slot else list(self._spares)):
+            sp = self._spares.pop(name, None)
+            if sp is not None:
+                _trace(f"warm Claude Code closed ({why}) [{name}]")
+                sp["worker"].discard()
+
+    def _on_spare_done(self, key):
+        """A spare's worker ended before it was used (discarded, or Claude Code couldn't start): end its thread."""
+        for name, sp in list(self._spares.items()):
+            if sp["key"] == key:
+                del self._spares[name]
+        th = self._spare_threads.pop(key, None)
+        if th is not None:
+            th.quit()
+            th.wait(3000)
+            th.deleteLater()
+
+    def _check_spare(self):
+        """Every minute, and when Full access / the model changes: a new-chat Claude Code that no longer matches
+        your settings, or nobody used for 10 min, is replaced by a fresh one; a follow-up one nobody used for
+        10 min closes."""
+        limit = self.SPARE_IDLE_SEC if self._hands_free else self.INTENT_IDLE_SEC
+        for slot, sp in list(self._spares.items()):
+            changed = slot == "new" and sp["sig"] != self._new_sig()
+            idle = time.time() - sp["at"] > limit
+            if changed or idle:
+                self._drop_spare("your settings changed" if changed else f"not used for {int(limit // 60)} min", slot)
+                if slot == "new" and (self._hands_free or not idle):
+                    self._prewarm_new(intent=not self._hands_free)   # (with the new settings — still wanted)
+        if not self._spares and not self._hands_free:
+            self._spare_timer.stop()
+
+    def prepare_live_route(self, tag, text: str, live: bool = True):
+        """The sentence you're finishing is already transcribed (hands-free; or Shift+Z just released, `live` False) —
+        decide NEW / FOLLOW_UP / … now, in the background, while the final transcript arrives. run_voice_task uses it
+        when the final words, the chat you're in and what it asked you are all the same; otherwise it decides again."""
+        text = (text or "").strip()
+        if not text or not self._speedups or not self._agent_ok("claude"):
+            return
+        ctx = self.live_answer_context() if live else None
+        org = self._organizer() if live else None
+        if (ctx and ctx["kind"] == "approval") or (
+                org is not None and org.takes_yes_no() and _plain_answer(text) is not None):   # (answered directly)
+            return
+        asked = ctx["question"] if ctx and ctx["kind"] == "question" else None
+        organize = self._organize_state(org)
+        focused = self._voice_target()
+        candidates = self._build_voice_candidates(text)
+        ent = {"sig": self._route_sig(text, focused, asked, candidates, organize), "done": threading.Event(),
+               "d": None}
+        self._early[tag] = ent
+        while len(self._early) > 6:                 # (requests that were never sent)
+            self._early.pop(next(iter(self._early)))
+        titles = [c["title"] for c in candidates]
+        ftitle = focused.title if focused else None
+
+        def work():
+            try:
+                from app.core.intent_router import IntentRouter
+                kw = {"live": True} if live else {}     # (Shift+Z: exactly as its final decision is asked)
+                if asked:
+                    kw["asked"] = asked
+                if organize:
+                    kw["organize"] = organize
+                ent["d"] = IntentRouter.get().classify(text, ftitle, titles, **kw)
+            except Exception as e:
+                _trace(f"early routing {tag} failed ({e}) — it'll decide when the text is final")
+            finally:
+                ent["done"].set()
+        threading.Thread(target=work, daemon=True, name="filect-assistant-early-route").start()
+        _trace(f"early routing {tag} (while you finish): {text!r}")
+
+    @staticmethod
+    def _route_sig(text, focused, asked, candidates, organize=None):
+        import re
+        words = " ".join(re.sub(r"[^\w\s]", " ", (text or "").lower()).split())
+        return (words, focused.key if focused else None, asked, tuple(c["title"] for c in candidates),
+                organize["text"] if organize else None)
+
+    ANSWER_WINDOW_SEC = 600      # an agent's question stays "waiting for your answer" this long after it finished
+
+    def _organizer(self):
+        """The voice organize flow (None if it couldn't be set up)."""
+        return getattr(self.mw, "voice_organize", None)
+
+    def _organize_state(self, org):
+        """What organizing is doing, for the decider. Most recent wins: if a chat changed files after the organize,
+        "undo those changes" is about that chat."""
+        try:
+            st = org.decider_state() if org is not None else None
+        except Exception as e:
+            _trace(f"organize state unavailable: {e}")
+            return None
+        f = self._voice_target()
+        if st and "ORGANIZE_UNDO" in st["allowed"] and f is not None and getattr(f, "n_tools", 0) and (
+                f.running or (f.started_at or 0) + (f.duration or 0) > org.finished_at):
+            st["text"] += " The current conversation changed files more recently than that."
+        return st
+
+    def live_answer_context(self):
+        """What you might be answering right now: organizing by voice comes first (its panel is on screen), then
+        the chat you're talking to. Hands-free then keeps a short reply ("yes", "undo") instead of dropping it as
+        noise."""
+        org = self._organizer()
+        try:
+            if org is not None and org.waiting_for_answer():
+                return {"kind": "organize", "key": "", "title": "Organize your files", "question": None}
+        except Exception:
+            org = None
+        ctx = self._chat_answer_context()
+        if ctx is None and org is not None and org.can_undo():
+            return {"kind": "organize_undo", "key": "", "title": "Organize your files", "question": None}
+        return ctx
+
+    def _chat_answer_context(self):
+        """What the chat you're talking to is waiting for from you, if anything: an approval, or an answer to the
+        question its last message ended with (recently)."""
+        s = self._voice_target()
+        if s is None:
+            return None
+        if s.status == "needs_you" and s.approval_req is not None:
+            return {"kind": "approval", "key": s.key, "title": s.title}
+        if s.status == "done" and not s.running and s.result_text:
+            q = _last_question(s.result_text)
+            if q and time.time() - (s.started_at + (s.duration or 0)) < self.ANSWER_WINDOW_SEC:
+                return {"kind": "question", "key": s.key, "title": s.title, "question": q}
+        return None
+
+    def cancel_live(self, tag, quiet: bool = False) -> bool:
+        """Esc on a hands-free request the router is still checking (or that's held — hold_live): drop it — it
+        never runs. `quiet`: you just went on talking — it's joined with the rest, no "Cancelled"."""
+        self._holds.pop(tag, None)
+        for rid, t in list(self._live_tags.items()):
+            if t == tag and rid in self._routing:
+                del self._routing[rid]
+                self._live_tags.pop(rid, None)
+                _trace(f"hands-free request {tag} {'pulled back (you went on talking)' if quiet else 'cancelled (Esc)'}"
+                       " while routing")
+                if not quiet:
+                    self.live_routed.emit(tag, "cancelled", "", "")
+                return True
+        return False
+
+    def hold_live(self, tag, secs: float):
+        """Hands-free: a request sent the moment a sentence LOOKED finished isn't started until the normal "send
+        after" would have passed — you might go on talking ("March, April… and May"); then it's pulled back
+        (cancel_live quiet) and joined with the rest. Costs nothing: routing takes longer than the wait anyway."""
+        self._holds[tag] = time.monotonic() + max(0.0, float(secs))
+
     def shutdown(self):
         """App quit: end every running agent and wait for its thread. Without this, quitting mid-task
         destroys a running QThread → Qt aborts with "QThread: Destroyed while thread is still running"."""
@@ -824,6 +1315,14 @@ class AssistantPage(QWidget):
             if s.thread is not None and s.thread.isRunning() and s.worker is not None:
                 s.worker.kill_process()
         _wait_all(time.time() + 3.0)
+        spares, self._spares = list(self._spares.values()), {}
+        for sp in spares:
+            sp["worker"].discard()                  # the warm Claude Codes close too
+        for th in list(self._spare_threads.values()):
+            if th is not None and th.isRunning():
+                th.quit()
+                th.wait(2000)
+        self._spare_threads = {}
         self._stop_mic_quietly()
         if live:
             _trace(f"shutdown: stopped {len(live)} running agent(s) in {time.time() - t0:.2f}s")
@@ -858,6 +1357,7 @@ class AssistantPage(QWidget):
         ov.model_changed.connect(self._on_card_model_changed)
         ov.stop_clicked.connect(self._on_card_stop)
         ov.submit_text.connect(lambda t: self.run_voice_task(t, source="typed"))   # typed = same routing
+        ov.typing_started.connect(lambda: self._intent_throttled("notch"))    # (warm while you type)
         ov.collapsed.connect(self._on_notch_collapsed)
         ov.setup_requested.connect(lambda agent, kind: self._open_agent_setup(agent, kind, self._card_key or ""))
         self._overlay = ov
@@ -1103,51 +1603,114 @@ class AssistantPage(QWidget):
             _add("saved", None, ss.id, ss.cwd, self._display_title(ss), getattr(ss, "agent", "claude"))
         return cands
 
-    def run_voice_task(self, text: str, source: str = "voice", images=None):
+    def run_voice_task(self, text: str, source: str = "voice", images=None, tag=None, screen=None):
         """Shift+Z (voice) or the card's type field: route the request to a NEW chat, a FOLLOW_UP of the chat
         in focus, or a RESUME of one you named — one warm Claude call (~2-3 s) off the UI thread. The card
-        shows "Routing..." meanwhile. Any routing failure falls back safely (continue the focused one, else new)."""
+        shows "Routing..." meanwhile. Any routing failure falls back safely (continue the focused one, else new).
+        source="live" (Filect Assistant, hands-free): the router may also say IGNORE (not a request — the mic is
+        always on), the card stays closed until it's a real request, a routing failure runs NOTHING (never guess
+        from an always-on mic), a clear yes / no answers a waiting approval, and the outcome is reported via
+        `live_routed` with `tag`. `screen`: a capture taken as you started talking — attached only if the request
+        is about your screen (the router's "screen" flag, or _mentions_screen); `live_screen_used` reports it."""
         text = (text or "").strip()
         if not text:
             return
+        live = source == "live"
+        asked = None
+        org = self._organizer() if live else None
+        organize_waiting = org is not None and org.waiting_for_answer()
+        if organize_waiting:                            # the organize panel is asking something
+            yn = _plain_answer(text) if org.takes_yes_no() else None
+            if yn is not None and org.answer(yn):
+                _trace(f"hands-free answer to the organize panel: {'yes' if yn else 'no'}")
+                self.live_routed.emit(tag, "approved" if yn else "denied", "Organize your files", "")
+                return
+        organize = self._organize_state(org)            # (the decider reads everything else, knowing this)
+        if live and not organize_waiting:
+            ctx = self._chat_answer_context()
+            if ctx and ctx["kind"] == "approval":       # "yes" / "no" to a waiting approval: answer it
+                yn = _yes_no(text)
+                if yn is not None:
+                    _trace(f"hands-free answer to {ctx['key']}'s approval: {'yes' if yn else 'no'}")
+                    self._decide(yn, ctx["key"])
+                    self.live_routed.emit(tag, "approved" if yn else "denied", ctx["title"], ctx["key"])
+                    return
+            elif ctx:                                   # it just asked you something
+                asked = ctx["question"]
         focused = self._voice_target()
         focused_title = focused.title if focused else None
         candidates = self._build_voice_candidates(text)
         images = list(images or [])
         _trace(f"{source} heard: {text!r} | focused={focused_title!r} | screenshots={len(images)} | "
                f"candidates={[c['title'] for c in candidates][:10]}")
-        self._card_key = None                     # the card shows THIS request now ("Routing…"), not a chat
-        self._notch("present", True)
-        self._notch("set_title", "Routing…")
-        self._notch("show_working", "", "")
-        self._notch("flash")
+        if not live:                                # hands-free: no card until it's a real request
+            self._card_key = None                   # the card shows THIS request now ("Routing…"), not a chat
+            auto = bool(_setting("assistant_auto_open", True))   # "Open answers automatically" OFF → stays tucked
+            self._notch("present", auto)            #   (as the Mac: present(_auto_open()), flash only when on)
+            self._notch("set_title", "Routing…")
+            self._notch("show_working", "", "")
+            if auto:
+                self._notch("flash")
         self._route_seq += 1
         rid = self._route_seq
         self._routing[rid] = text
+        if live:
+            self._live_tags[rid] = tag
         claude_ok, codex_ok = self._agent_ok("claude"), self._agent_ok("codex")
+        early = self._early.pop(tag, None) if tag is not None else None
+        if early is not None and early["sig"] != self._route_sig(text, focused, asked, candidates, organize):
+            _trace(f"early routing {tag} doesn't fit the final words / chat — deciding again")
+            early = None
 
         def worker():
             titles = [c["title"] for c in candidates]
+            screen_wanted, mode = False, None
             try:
-                try:                                   # Claude routes when it's available (fast, warm)…
-                    if not claude_ok:
-                        raise RuntimeError("Claude Code unavailable right now")
-                    from app.core.intent_router import IntentRouter
-                    d = IntentRouter.get().classify(text, focused_title, titles)
-                except Exception as e:                 # …else Codex does (a cold `codex exec`, ~5 s)
-                    if not codex_ok:
-                        raise
-                    _trace(f"router: Claude couldn't route ({e}) -> Codex")
-                    from app.core.intent_router import classify_with_codex
-                    d = classify_with_codex(text, focused_title, titles)
+                kw = {"live": True} if live else {}
+                if asked:
+                    kw["asked"] = asked
+                if organize:
+                    kw["organize"] = organize
+                from app.core.intent_router import organize_guard, organize_quick
+                d = organize_quick(text, organize) if live else None
+                if d is not None:                      # an answer to the organize panel, said plainly: no AI
+                    _trace(f"router: organize answer said plainly -> {d['intent']} (no AI)")
+                else:
+                    try:                               # Claude routes when it's available (fast, warm)…
+                        if not claude_ok:
+                            raise RuntimeError("Claude Code unavailable right now")
+                        from app.core.intent_router import IntentRouter
+                        if early is not None and early["done"].wait(12.0) and early["d"] is not None:
+                            d = early["d"]             # decided while you were finishing the sentence
+                            _trace(f"router: decided early ({d['intent']}) — no wait")
+                        if d is None:
+                            d = IntentRouter.get().classify(text, focused_title, titles, **kw)
+                    except Exception as e:             # …else Codex does (a cold `codex exec`, ~5 s)
+                        if not codex_ok:
+                            raise
+                        _trace(f"router: Claude couldn't route ({e}) -> Codex")
+                        from app.core.intent_router import classify_with_codex
+                        d = classify_with_codex(text, focused_title, titles, **kw)
+                    if live:                           # a decision that can't be right here (Codex, mostly)
+                        cands = getattr(org, "_folder_candidates", None) if org is not None else None
+                        g = organize_guard(d, text, organize, folders=cands)
+                        if g is not d:
+                            _trace(f"router: {d['intent']} doesn't fit what Filect is asking -> {g['intent']}")
+                            d = g
                 intent, idx, task = d["intent"], d["index"], d["task"]
+                screen_wanted, mode = bool(d.get("screen")), d.get("mode")
             except Exception as e:
-                intent, idx, task = ("FOLLOW_UP" if focused_title else "NEW"), None, text
+                if live:                               # hands-free: never guess — run nothing
+                    intent, idx, task = "FAILED", None, text
+                else:
+                    intent, idx, task = ("FOLLOW_UP" if focused_title else "NEW"), None, text
                 _trace(f"router FAILED ({e}) -> fallback {intent}")
             try:
-                self._voice_decided.emit({"rid": rid, "intent": intent, "idx": idx, "task": task,
+                self._voice_decided.emit({"rid": rid, "intent": intent, "idx": idx, "task": task, "mode": mode,
                                           "candidates": candidates, "images": images,
-                                          "focused_key": focused.key if focused else None})
+                                          "focused_key": focused.key if focused else None,
+                                          "source": source, "tag": tag, "heard": text,
+                                          "screen": screen if (screen_wanted or _mentions_screen(text)) else None})
             except RuntimeError:
                 pass
         threading.Thread(target=worker, daemon=True, name="filect-agents-route").start()
@@ -1180,18 +1743,29 @@ class AssistantPage(QWidget):
         return True
 
     def _on_voice_decided(self, result):
+        tag = result.get("tag")
+        until = self._holds.pop(tag, None) if tag is not None else None
+        if until is not None and time.monotonic() < until:   # (hold_live: you may still go on talking)
+            QTimer.singleShot(int((until - time.monotonic()) * 1000) + 10, lambda r=result: self._on_voice_decided(r))
+            return
         rid = result.get("rid")
+        self._live_tags.pop(rid, None)
         if rid not in self._routing:
             _trace(f"request {rid} dropped — you stopped it while it was routing")
             return
         del self._routing[rid]
+        live = result.get("source") == "live"
         quiet = rid in self._quiet_routes           # you ✕'d the card while this was routing: it starts tucked
         self._quiet_routes.discard(rid)
         self._quiet_start = quiet
+        self._live_turn_next = live                 # a hands-free turn may be spoken ("Speak replies")
         try:
             self._dispatch_decided(result)
         finally:
             self._quiet_start = False
+            self._live_turn_next = False
+        if live:
+            return                                  # (hands-free never showed "Routing…": nothing to tidy)
         if self._card_key is None and not quiet:      # (every path binds the card; never leave it on "Routing…")
             if self._focused is not None:
                 self._render_card(self._focused_key)
@@ -1201,13 +1775,47 @@ class AssistantPage(QWidget):
     def _dispatch_decided(self, result):
         intent, idx, task = result["intent"], result["idx"], result["task"]
         cands, fkey = result["candidates"], result["focused_key"]
-        images = result.get("images") or []
+        images = list(result.get("images") or [])
         _trace(f"decided: {intent} idx={idx} task={task!r}")
+        live, tag = result.get("source") == "live", result.get("tag")
+
+        def _report(outcome, title=""):
+            if live:
+                key = self._focused_key if outcome in ("new", "continued") else ""
+                self.live_routed.emit(tag, outcome, title or "", key or "")
+
+        if live:
+            if intent in ("IGNORE", "FAILED"):
+                _report("ignored" if intent == "IGNORE" else "failed")
+                return
+            if intent.startswith("ORGANIZE"):
+                org = self._organizer()
+                if org is not None:
+                    try:
+                        _report(*self._act_on_organize(org, intent, task, result.get("heard") or task,
+                                                       result.get("mode")))
+                    except Exception as e:
+                        _trace(f"organize by voice failed: {e}")
+                        _report("failed")
+                    return
+                intent = "NEW"                         # (the flow couldn't be set up: an agent can still try)
+            scr = result.get("screen")                 # it's about your screen: attach what you saw
+            if scr is not None:
+                try:
+                    path = scr() if callable(scr) else scr    # (the page writes the capture to disk only now)
+                except Exception as e:
+                    path = None
+                    _trace(f"  screen capture couldn't be saved: {e}")
+                if path:
+                    images.append(path)
+                    _trace(f"  + your screen (captured as you started talking): {path}")
+                    self.live_screen_used.emit(tag)
 
         def _continue(sess, title):
             self._notch("set_title", f"↳ continuing “{title}”")
             if sess.running:
                 sess.pending_followup, sess.pending_images = task, images
+                sess.pending_live = self._live_turn_next
                 self._last_sent_key = sess.key
                 _trace(f"  -> queue follow-up on {sess.key} '{title}' (running)")
                 self._focus(sess.key)
@@ -1221,6 +1829,7 @@ class AssistantPage(QWidget):
 
         if intent == "FOLLOW_UP" and fkey and fkey in self._sessions:
             _continue(self._sessions[fkey], self._sessions[fkey].title)
+            _report("continued", self._sessions[fkey].title)
             return
         if intent == "RESUME" and isinstance(idx, int) and 0 <= idx < len(cands):
             c = cands[idx]
@@ -1233,11 +1842,45 @@ class AssistantPage(QWidget):
                 self._notch("set_title", f"↳ continuing “{c['title']}”")
                 self.run_task(task, resume=c["id"], cwd=c["cwd"], images=images, agent=c.get("agent", "claude"))
                 self._resume_target = None
+            _report("continued", c["title"])
             return
         _trace("  -> NEW conversation")
         self._resume_target = None
         self._focused_key = None
         self.run_task(task, images=images)
+        _report("new", self._focused.title if self._focused else task)
+
+    @staticmethod
+    def _act_on_organize(org, intent, task, heard, mode=None):
+        """The decider's answer about organizing: Filect does the rest. Returns what to show in "What it heard"."""
+        if intent == "ORGANIZE" and org.waiting_for_answer() and org.refine_fits(heard):
+            # (Measured on Codex: "put the screenshots in their own folder" with the plan up came back as ORGANIZE,
+            # "organize a different folder". It names no folder: it's a change to what's on screen.)
+            intent, task = "ORGANIZE_CHANGE", heard
+        if intent == "ORGANIZE":
+            started = org.start_hands_free(heard, how=task, replace=True)
+            return ({"started": "organize", "busy": "organize_busy", "page_busy": "organize_page_busy"}[started],)
+        if intent == "ORGANIZE_AUTO":
+            started = org.start_hands_free(heard, how=task, replace=True, kind="auto", mode=mode)
+            return ({"started": "auto_setup", "busy": "organize_busy", "page_busy": "organize_page_busy"}[started],)
+        if intent == "ORGANIZE_AUTO_OFF":
+            # "…for all my folders" / "…for both": no folder's name, so the decider gives "" — but it isn't "which one?"
+            # (the 2026-11-10 hunt)
+            import re
+            if not task and re.search(r"\b(?:all|both|every|everything|each)\b", heard or "", re.I):
+                task = "all"
+            return (org.stop_auto(task),)
+        if intent == "ORGANIZE_CHOICE":
+            return ("organize_changed" if org.choose(task) else "ignored",)
+        if intent == "ORGANIZE_NO_RULES":
+            return ("auto_setup" if org.no_rules() else "ignored",)
+        if intent == "ORGANIZE_UNDO":
+            return ("undone" if org.undo() else "ignored",)
+        if intent == "ORGANIZE_GO":
+            return ("approved", "Organize your files") if org.answer(True) else ("ignored",)
+        if intent == "ORGANIZE_CANCEL":
+            return ("denied", "Organize your files") if org.cancel() else ("ignored",)
+        return ("organize_changed" if org.refine(task) else "ignored",)    # ORGANIZE_CHANGE
 
     # ---- what you did on the page ----
     def _on_send(self, text: str):
@@ -1256,7 +1899,7 @@ class AssistantPage(QWidget):
         sess = self._focused
         if sess is not None:
             if sess.running:                                # still working → a queued follow-up
-                sess.pending_followup = text
+                sess.pending_followup, sess.pending_live = text, False
                 self._last_sent_key = sess.key
                 _trace(f"queue follow-up on {sess.key} '{sess.title}' (running)")
                 self._schedule_page()
@@ -1293,6 +1936,7 @@ class AssistantPage(QWidget):
         and lets the rest of this turn run without asking."""
         self.bypass_check.setChecked(bool(full))
         _save_setting(assistant_bypass=bool(full))
+        QTimer.singleShot(0, self._check_spare)         # (the new-chat warm Claude Code: with the new access)
         _trace(f"access -> {'Full access' if full else 'Ask first'}")
         sess = self._focused
         if sess is not None and sess.worker is not None:
@@ -1392,6 +2036,7 @@ class AssistantPage(QWidget):
             existing = self._session_by_claude_id(resume)
             if existing is not None and existing.running:
                 existing.pending_followup, existing.pending_images = prompt, list(images or [])
+                existing.pending_live = self._live_turn_next
                 self._last_sent_key = existing.key
                 _trace(f"run_task: queue follow-up on {existing.key} '{existing.title}' (running)")
                 self._focus(existing.key)
@@ -1432,12 +2077,28 @@ class AssistantPage(QWidget):
         sess.model, sess.effort = self._model_for(sess.agent)     # the pill's choice applies to every next turn
         sess.reopen_token += 1                      # a pending Codex reopen waits for this turn too
         sess.awaiting_codex = False
-        sess.thread = QThread(self)
-        sess.worker = AgentWorker(sess.key, sess.cwd, send or sess.prompt, resume=resume_id,
-                                  bypass=sess.bypass, model=sess.model, effort=sess.effort,
-                                  images=sess.images, agent=sess.agent)
-        sess.worker.moveToThread(sess.thread)
-        sess.thread.started.connect(sess.worker.run)
+        if seed:                                    # a new turn (a hand-over keeps the turn's own flag)
+            sess.live_turn = self._live_turn_next
+        message = send or sess.prompt
+        sess.n_tools = 0
+        sess.speak_noted = bool(sess.live_turn and _setting("live_speak", False))
+        if sess.speak_noted:                        # it'll be read aloud: the agent says what to say, first
+            from app.core.speech_out import SPEAK_NOTE
+            message = f"{message}\n\n{SPEAK_NOTE}"
+        spare = self._take_spare(sess, resume_id)
+        if spare is not None:                       # Claude Code is already running (hands-free): ~4 s sooner
+            sess.thread, sess.worker = spare["thread"], spare["worker"]
+            try:
+                sess.worker.done.disconnect(self._on_spare_done)
+            except Exception:
+                pass
+        else:
+            sess.thread = QThread(self)
+            sess.worker = AgentWorker(sess.key, sess.cwd, message, resume=resume_id,
+                                      bypass=sess.bypass, model=sess.model, effort=sess.effort,
+                                      images=sess.images, agent=sess.agent)
+            sess.worker.moveToThread(sess.thread)
+            sess.thread.started.connect(sess.worker.run)
         # BOUND methods, never lambdas: Qt queues a bound-method slot to its receiver's (main) thread.
         sess.worker.step.connect(self._on_step)
         sess.worker.approvalRequested.connect(self._on_approval)
@@ -1445,9 +2106,13 @@ class AssistantPage(QWidget):
         sess.worker.error.connect(self._on_error)
         sess.worker.done.connect(self._on_done)
         _trace(f"spawn {sess.key} '{sess.title}' agent={sess.agent} cwd={sess.cwd} "
-               f"resume={resume_id or '(new)'} model={sess.model} effort={sess.effort} bypass={sess.bypass} | "
+               f"resume={resume_id or '(new)'} model={sess.model} effort={sess.effort} bypass={sess.bypass}"
+               f"{' (warm)' if spare is not None else ''}{' (hands-free)' if sess.live_turn else ''} | "
                f"live now: {sorted(k for k, s in self._sessions.items() if s.running)}")
-        sess.thread.start()
+        if spare is not None:
+            sess.worker.deliver(sess.key, message, sess.images)
+        else:
+            sess.thread.start()
         self._last_sent_key = sess.key
         if seed:
             self._focus(sess.key, fresh=True)
@@ -1787,6 +2452,8 @@ class AssistantPage(QWidget):
             if not self._page_in_front():
                 self._notch("open_full")
         self._schedule_page()
+        if sess.live_turn and not sess.stopping:
+            self.live_event.emit(key, "approval", {"tool": req.tool, "input": dict(req.tool_input or {})})
         if key not in (self._focused_key, self._card_key) or not _app_is_active():
             self._notify_needs_you(sess)
 
@@ -1827,6 +2494,9 @@ class AssistantPage(QWidget):
             if not sess.stopping and self._card_auto():
                 self._notch("open_full")
         self._schedule_page()
+        if sess.live_turn and not sess.stopping:
+            self.live_event.emit(key, "done", {"text": sess.final_text or sess.result_text, "noted": sess.speak_noted,
+                                               "question": _last_question(sess.result_text)})
         if not sess.stopping:
             _play_chime(True)
             if key != self._focused_key or not _app_is_active():
@@ -1958,6 +2628,8 @@ class AssistantPage(QWidget):
         sess.status, sess.error = "error", msg
         sess.last_action = ""
         _trace(f"{key} ERROR '{sess.title}': {msg}")
+        if sess.live_turn and not sess.stopping:
+            self.live_event.emit(key, "error", {"text": msg})
         if self._card_shows(key):
             self._notch("show_error", msg)
             if self._card_auto() or (self._setup_kind(msg) and not self._page_in_front()):
@@ -2054,12 +2726,19 @@ class AssistantPage(QWidget):
         if sess.pending_followup:                   # sent while this was running — continue the SAME chat
             text, sess.pending_followup = sess.pending_followup, None
             imgs, sess.pending_images = sess.pending_images, []
-            sid = sess.session_id or sess.resume
-            if sid:
-                self.run_task(text, resume=sid, cwd=sess.cwd, images=imgs, agent=sess.agent)
-            else:
-                self._restart_session(sess, text, self.bypass_check.isChecked(), imgs)
+            self._live_turn_next, sess.pending_live = sess.pending_live, False
+            try:
+                sid = sess.session_id or sess.resume
+                if sid:
+                    self.run_task(text, resume=sid, cwd=sess.cwd, images=imgs, agent=sess.agent)
+                else:
+                    self._restart_session(sess, text, self.bypass_check.isChecked(), imgs)
+            finally:
+                self._live_turn_next = False
             return
+        if (self._hands_free and sess.agent == "claude" and sess.live_turn and sess.session_id
+                and sess.status == "done"):
+            self._prewarm(sess.cwd, sess.session_id, sess.bypass, sess.model, sess.effort)   # its follow-up
         self._schedule_page()
 
     def _notify_needs_you(self, sess):

@@ -12,6 +12,8 @@ Core Principle: The LLM must never directly modify files.
 import json
 import logging
 import os
+import re
+import unicodedata
 from pathlib import Path
 from typing import Dict, List, Any, Optional, Tuple
 
@@ -229,7 +231,9 @@ def _extract_category_to_folder_map(user_instruction: str) -> Dict[str, str]:
         if marker in text:
             text = text.split(marker, 1)[1]
             break
-    text = text.strip()
+    # Only the user's own words: the watcher's rules follow them after a blank line, and their examples ("do NOT
+    # route any video to a different folder", "belongs in the lions folder") must never become rules.
+    text = text.strip().split("\n\n", 1)[0].strip()
 
     mapping: Dict[str, str] = {}
     stopwords = {
@@ -529,7 +533,32 @@ def request_organization_plan(
     if not any_ok or not merged_folders:
         logger.error("Chunked organize produced no plan")
         return None
+    if (user_instruction.startswith("[AUTO-ORGANIZE]") and "User's specific instructions:" not in user_instruction
+            and "EXISTING FOLDERS ONLY" not in user_instruction):      # (names you gave are never merged)
+        merged_folders = _merge_similar_folders(merged_folders)
     return {"folders": merged_folders}
+
+
+def _merge_similar_folders(folders: Dict[str, List[Any]]) -> Dict[str, List[Any]]:
+    """Chunks of a big folder are planned without seeing each other's names, which gave "invoices" next to
+    "invoices-northwind", and "recipes-tomato-soup" next to "tomato-soup-recipes". Fold a name into a bigger
+    folder when one's words are all in the other. (A nested "a/b" name is never merged; Windows: "a\\b" too.)"""
+    def words(name: str) -> frozenset:
+        return frozenset(w[:-1] if w.endswith("s") and len(w) > 3 else w for w in re.findall(r"[a-z0-9]+", name.lower()))
+
+    def nested(name: str) -> bool:
+        return "/" in name or "\\" in name
+
+    kept: Dict[str, List[Any]] = {}
+    for name in sorted(folders, key=lambda n: (-len(folders[n]), n)):
+        w = words(name)
+        home = None if nested(name) or not w else next(
+            (k for k in kept if not nested(k) and (w <= words(k) or words(k) <= w)), None)
+        if home is None:
+            kept[name] = list(folders[name])
+        else:
+            kept[home].extend(folders[name])
+    return kept
 
 
 def _request_plan_single(
@@ -584,9 +613,19 @@ Files to organize ({len(files)} total):
 {file_summary}
 
 CRITICAL RULES:
-- FOLLOW the user's specific instructions EXACTLY
-- ONLY create folders that the user explicitly mentioned - do NOT invent additional folders
-- For any file not clearly covered by the instruction, place it in whichever user-specified folder is the closest match
+- FOLLOW the user's specific instructions EXACTLY: every file the instruction is about goes in the folder it names for it
+- Only the files the instruction is about go in a folder it names: "put the bills in Money" puts ONLY bills in Money;
+  a recipe, a photo or a ticket is not a bill and never goes there
+- If the user says to put everything (all files) in one folder, every file goes there
+- A file the instruction does NOT cover: put it in another folder the user named only if that folder clearly fits it
+  (a PDF report when they named a 'Docs' folder for documents); otherwise put it in ONE new folder with a short, clear
+  name for its type or topic ('recipes', 'photos', 'tickets') — never in a folder the user named for something else,
+  and never 'misc', 'other' or 'unsorted'. (This overrides "do not create folders the user didn't name": new files
+  keep arriving here, and one the instruction isn't about must not be filed as something it isn't.) Unsure whether
+  a file IS one of the things the instruction names (a lease is not an invoice, a schedule is not a bill)? It isn't.
+- Examples, for the instruction "put the bills in a folder called Money":
+  files 1 electricity bill, 2 pasta recipe, 3 beach photo -> {{"folders": {{"Money": [1], "recipes": [2], "photos": [3]}}}}
+  one file, 1 pasta recipe -> {{"folders": {{"recipes": [1]}}}}
 - You MUST include EVERY file_id in your response
 - Each file_id must appear in exactly ONE folder
 - Total files in your response must equal {len(files)}
@@ -640,9 +679,13 @@ Files to organize ({len(files)} total):
 
 CRITICAL RULES:
 - FOLLOW the user's instruction for organizing these files
-- If user says "move all files to X", put ALL files in folder "X"
+- Only the files the instruction is about go in the folder(s) it names: "put the bills in Money" puts ONLY the
+  bills in Money; a party plan, a recipe or a photo is not a bill and never goes there
+- If user says "move all files to X" (or "everything in X"), put ALL files in folder "X"
 - If user specifies a structure, follow it exactly
-- For any files NOT covered by the instruction, organize them logically by type or topic
+- For any files NOT covered by the instruction, organize them logically by type or topic, in OTHER folders —
+  never in a folder the instruction named for something else, and with a real name ('events', 'documents'), not
+  'Miscellaneous', 'Misc' or 'Other' unless the user asked for one
 - You MUST include EVERY file_id in your response ({len(files)} total)
 - Every file_id must appear exactly once in your response
 - NEVER return empty folders
@@ -758,17 +801,321 @@ Files available ({len(files)} total):
 
 Based on the user feedback, provide an UPDATED organization plan.
 Apply the user's requested changes to the current plan.
+First work out every file the feedback refers to: check each file's name, label and tags. "The invoice and the receipt"
+means every file matching either word. Return JSON with "files_mentioned": [every such file_id] FIRST, then "folders".
+Each file in files_mentioned must end up where the feedback says, under the folder name it gives.
 Return the complete updated plan as JSON only."""
 
     provider = settings.ai_provider
-    
+
     if provider == 'openai':
-        return _request_openai(user_message)
+        plan = _request_openai(user_message)
+        if _same_folders(plan, current_plan):      # (measured: about 1 in 4 comes back unchanged)
+            logger.info("Refined plan came back unchanged — asking once more")
+            plan = _request_openai(user_message + "\n\nYour last answer did not change the plan. "
+                                                  "The user asked for a change: make it.") or plan
+        plan = _gather_mentioned(plan, current_plan, feedback)
+        if isinstance(plan, dict):
+            plan.pop("files_mentioned", None)      # (only there to make it list them first: measured 18/18 vs 3/6)
+        return plan
     elif provider == 'local':
-        return _request_ollama(user_message)
+        plan = _gather_mentioned(_request_ollama(user_message), current_plan, feedback)
+        if isinstance(plan, dict):
+            plan.pop("files_mentioned", None)      # (the same prompt asks for it: never let it reach the plan)
+        return plan
     else:
         logger.warning("No AI provider configured")
         return None
+
+
+_KEEP_WORDS = re.compile(r"\b(?:leave|keep|stay|stays|except|but not|not the|apart from|other than)\b", re.I)
+
+
+def _gather_mentioned(plan: Optional[Dict[str, Any]], current_plan: Optional[Dict[str, Any]],
+                      feedback: str) -> Optional[Dict[str, Any]]:
+    """The model lists the files the feedback means ("files_mentioned"), then sometimes leaves one of them where it
+    was. Seen live: "Put the invoice and the receipt in a folder called Billing" -> files_mentioned [invoice, receipt],
+    but only the receipt in "billing". When the feedback sends them to ONE folder (the only folder in the plan it
+    names, else the only new one holding any of them), every file it listed goes there. Not when the feedback also
+    keeps something where it is ("leave the receipt", "except…"), or names more than one destination."""
+    try:
+        ids = plan.get("files_mentioned") if isinstance(plan, dict) else None
+        folders = plan.get("folders") if isinstance(plan, dict) else None
+        if not isinstance(ids, list) or len(ids) < 2 or not isinstance(folders, dict) or _KEEP_WORDS.search(feedback or ""):
+            return plan
+        want = {str(i) for i in ids}
+        holding = [n for n, f in folders.items() if isinstance(f, list) and any(str(x) in want for x in f)]
+        if len(holding) < 2:
+            return plan
+        said = " " + " ".join(_name_words(feedback or "")) + " "
+
+        def named(folder: str) -> bool:
+            key = _name_key(re.split(r"[\\/]", str(folder))[-1])
+            return bool(key) and (f" {key} " in said or f" {key}s " in said)
+        everywhere = [n for n in folders if named(n)]
+        if len(everywhere) > 1:
+            return plan
+        target = [n for n in holding if named(n)]
+        if not target:
+            old = set(((current_plan or {}).get("folders") or {}).keys())
+            target = [n for n in holding if n not in old]
+        if len(target) != 1:
+            return plan
+        dest = target[0]
+        moved = []
+        for n in holding:
+            if n == dest:
+                continue
+            keep = [x for x in folders[n] if str(x) not in want]
+            moved += [x for x in folders[n] if str(x) in want]
+            folders[n] = keep
+        folders[dest] = list(folders[dest]) + moved
+        for n in [n for n, f in folders.items() if isinstance(f, list) and not f]:
+            del folders[n]
+        if moved:
+            logger.info(f"[refine] the feedback sends its files to {dest!r}: moved {moved} there too")
+    except Exception as e:
+        logger.warning(f"[refine] couldn't check files_mentioned: {e}")
+    return plan
+
+
+def _same_folders(a: Optional[Dict[str, Any]], b: Optional[Dict[str, Any]]) -> bool:
+    def shape(p):
+        folders = (p or {}).get("folders") if isinstance(p, dict) else None
+        return {k: sorted(map(str, v if isinstance(v, (list, tuple)) else [v]))
+                for k, v in (folders if isinstance(folders, dict) else {}).items()}
+    return bool(a) and shape(a) == shape(b)
+
+
+_HOW_FILLER = {"by", "the", "a", "an", "in", "into", "to", "of", "and", "all", "put", "move", "sort", "organize",
+               "folder", "folders", "called", "named", "file", "files"}
+
+
+def _how_from_reply(raw: str) -> Optional[str]:
+    """The answer inside organize_how's reply. Windows: the shared proxy forces a JSON object on every chat call,
+    so the model answers {"how": "..."}; a bare text answer is taken as it is. None = no answer at all."""
+    raw = (raw or "").strip()
+    if not raw:
+        return None
+    s, e = raw.find("{"), raw.rfind("}")
+    if s != -1 and e > s:
+        try:
+            obj = json.loads(raw[s:e + 1])
+        except ValueError:
+            obj = None
+        if isinstance(obj, dict):
+            val = obj.get("how", next((v for v in obj.values() if isinstance(v, str)), ""))
+            return str(val or "NONE")             # (an explicit empty answer: it doesn't say how)
+    return raw
+
+
+def organize_how(sentence: str, folder: str) -> str:
+    """What a spoken organize request says about HOW to sort, without which folder; "" if it doesn't say.
+    The planner must not get the whole sentence: "organize the Reports folder" reads to it as "put everything in
+    a folder called Reports", the files are already there, and nothing moves. On any failure: the sentence."""
+    try:
+        from .vision import _call_openai_proxy
+        # (Windows: the shared openai-proxy forces response_format=json_object on ALL chat calls, so the request
+        # must ask for JSON (and say "json") or OpenAI answers 400 and this would quietly give back the sentence.)
+        system = (
+            "You read a spoken request to organize the files in a folder. Which folder has already been worked out. "
+            "Find ONLY the part that says HOW to sort the files, e.g. 'by file type', 'by year', 'put the invoices "
+            "in a folder called Money'. Leave out which folder is being organized and words like 'organize', 'sort' "
+            "or 'clean up' on their own. If it doesn't say how, the answer is exactly: NONE. "
+            'Respond with a JSON object of the form {"how": "<that part, or NONE>"}. JSON only, nothing else.'
+        )
+        user = f"Request:\n{sentence}\n\nFolder being organized: {Path(folder).name}\n\nReturn JSON only."
+        resp = _call_openai_proxy("chat", [{"role": "system", "content": system}, {"role": "user", "content": user}],
+                                  max_tokens=400, temperature=0, model=PLAN_MODEL)   # (nano missed real instructions)
+        if not resp:
+            return sentence
+        out = _how_from_reply(resp.get("choices", [{}])[0].get("message", {}).get("content", "") or "")
+        out = (out or "").strip().strip("\"'`").strip()
+        if not out:
+            return sentence
+        if out.upper().rstrip(".") == "NONE":
+            return ""
+        # (Measured: it sometimes makes one up for a plain "organize the Reports folder". An answer that shares
+        # no real word with what you said, other than the folder's own name, is one you didn't ask for.)
+        said = set(re.findall(r"[a-z0-9]+", sentence.lower()))
+        name = set(re.findall(r"[a-z0-9]+", Path(folder).name.lower()))
+        words = set(re.findall(r"[a-z0-9]+", out.lower())) - _HOW_FILLER - name
+        return out if words & said else ""
+    except Exception as e:
+        logger.warning(f"organize_how failed: {e}")
+        return sentence
+
+
+_NOT_A_FOLDER_NAME = {"a", "an", "the", "my", "our", "your", "this", "that", "these", "those", "in", "on", "at", "from",
+                      "of", "to", "into", "organize", "sort", "clean", "tidy", "up", "out", "please", "and",
+                      # (not a name either: "put the screenshots in their own folder", "a separate folder")
+                      "their", "its", "his", "her", "own", "separate", "same", "different", "another"}
+
+
+def _fold(text: str) -> str:
+    """Lower case, accents off ("Café" is said and typed "cafe"), curly quotes straight, "&" said as "and"."""
+    t = unicodedata.normalize("NFKD", str(text or ""))
+    t = "".join(ch for ch in t if not unicodedata.combining(ch))
+    return t.lower().replace("’", "'").replace("‘", "'").replace("&", " and ")
+
+
+_NUMBER_WORDS = {"one": "1", "two": "2", "three": "3", "four": "4", "five": "5", "six": "6", "seven": "7",
+                 "eight": "8", "nine": "9", "ten": "10", "eleven": "11", "twelve": "12"}
+
+
+def _name_words(text: str) -> list:
+    """The words of a name, the same however it's said or typed: "Mom's Recipes" = "moms recipes", "Bills &
+    Receipts" = "bills and receipts", "New folder (2)" = "new folder two". (Found by the 2026-11-10 hunt: these
+    never counted as named, and "organize new folder 2" matched Windows' "New folder" instead.)"""
+    words = [w.replace("'", "") for w in re.findall(r"[a-z0-9']+", _fold(text))]
+    return [_NUMBER_WORDS.get(w, w) for w in words if w and w != "and"]
+
+
+def _name_key(text: str) -> str:
+    """A folder name as it would be spoken: no case, accents, apostrophes, separators, plural, or trailing "folder"."""
+    key = " ".join(_name_words(text))
+    key = re.sub(r"\s*\bfolders?$", "", key)
+    return key[:-1] if key.endswith("s") else key
+
+
+def _folder_phrases(sentence: str) -> set:
+    """What the sentence calls a folder: "the Filect Test Small folder" -> "filect test small"; "new folder 2" ->
+    "new folder 2" (Windows names copies "New folder (2)")."""
+    words = _name_words(sentence)
+    phrases = set()
+    for i, w in enumerate(words):
+        if w in ("folder", "folders"):
+            j = i
+            while j > 0 and words[j - 1] not in _NOT_A_FOLDER_NAME:
+                j -= 1
+            if j < i:
+                numbered = i + 1 < len(words) and words[i + 1].isdigit()
+                phrases.add(_name_key(" ".join(words[j:i + 2] if numbered else words[j:i])))
+    return phrases
+
+
+def sentence_names_a_folder(sentence: str) -> bool:
+    """Does it say which folder at all? ("put these in a folder called Money" doesn't.)"""
+    return bool(_folder_phrases(sentence)) or bool(re.search(r"\b(?:desktop|downloads?|documents?)\b", sentence, re.I))
+
+
+def folder_is_named(name: str, sentence: str) -> bool:
+    """Does the sentence name this folder outright? "the Blue Elephant Project folder" names a folder called exactly
+    that, not one called "Project"; and the plain word "folder" never names a folder called "Folder"."""
+    key = _name_key(name)
+    if not key:
+        return False
+    phrases = _folder_phrases(sentence)
+    if phrases:
+        return key in phrases
+    # (No "... folder" in the sentence: the name has to be where a folder's name goes, so that a folder that happens
+    # to be called "put" isn't named by "Put this in...".)
+    said = " ".join(_name_words(sentence))
+    return bool(re.search(r"\b(?:organi[sz]e|sort|clean(?: up)?|tidy(?: up)?|the|my|our|this|in|called|named) "
+                          + " ".join(map(re.escape, key.split())) + r"s?(?!\w)", said))
+
+
+def _folder_named_in(sentence: str, candidates: list) -> Optional[str]:
+    """The one subfolder a sentence names outright, or None. The AI guesses by meaning and, measured, sometimes
+    picked a similar name ("Filect Organize Test" for "Filect Test Small") or none at all. Never Desktop / Downloads
+    / Documents themselves: "on my desktop" doesn't mean the whole Desktop, it says where to look.
+    Windows: paths end in "\\" or "/", and compare without case (C:\\Users\\x\\desktop is the Desktop)."""
+    def name(c):
+        return os.path.basename(c.rstrip("/\\"))
+
+    def key(c):
+        c = c.rstrip("/\\") or c
+        return os.path.normcase(os.path.normpath(c))
+
+    def parent(c):
+        d = os.path.dirname(c.rstrip("/\\"))
+        return key(d) if d and key(d) != key(c) else ""        # (a drive root has no parent)
+
+    sentence = sentence or ""
+    known = {key(c) for c in candidates}
+    tops = {key(c) for c in candidates if parent(c) not in known  # (the place you said: "...in my Documents")
+            and re.search(rf"(?<!\w){re.escape(name(c))}(?!\w)", sentence, re.I)}
+    subs = [c for c in candidates if parent(c) in known and len(name(c)) >= 3
+            and folder_is_named(name(c), sentence) and (not tops or parent(c) in tops)]
+    # "put these in a folder called Money" says where things go, not which folder
+    plain = [c for c in subs if not re.search(rf"\b(?:called|named)\s+{re.escape(name(c))}(?!\w)", sentence, re.I)]
+    subs = plain if plain or re.search(r"\b(?:put|move|into)\b", sentence, re.I) else subs
+    if not subs:
+        return None
+    longest = max(len(name(c)) for c in subs)
+    best = [c for c in subs if len(name(c)) == longest]
+    return best[0] if len(best) == 1 else None
+
+
+# Words that never say WHICH folder: what to do ("organize", "keep … tidy"), how ("only new files"), and filler.
+# Measured live: the AI picked "organize-and-auto-organize-for-windows" for "organize my messy stuff" and "auto organizing"
+# for "keep my inbox organized automatically" — the action words matched those folders' names.
+_GUESS_SKIP = frozenset("""
+a an the my our your this that these those it its me i we you us please can could would will should just
+now then too also again all any some of for in on at to into onto from with by and or so up out over
+folder folders file files stuff things thing
+organize organise organized organised organizing organising organizer auto automatic automatically sort sorted
+sorting tidy tidied tidying clean cleaned cleaning arrange arranged arranging keep keeping kept neat set setup start
+make get have want like help do turn
+new only existing already there using use way how everything
+""".split())
+_GUESS_PLACES = {"desktop": "desktop", "download": "downloads", "document": "documents"}
+
+
+def _guess_words(t):
+    return {w[:-1] if w.endswith("s") and len(w) > 3 else w for w in re.findall(r"[a-z0-9]+", _fold(t))}
+
+
+def _only_action_words_match(sentence: str, path: str) -> bool:
+    """The AI's pick shares nothing with the sentence but an action word ("Organize my photos" -> the
+    "organize-and-auto-organize-for-windows" folder, measured): not a match. (A pick by meaning — "my photos" ->
+    "images" — shares no word at all, and stands.)"""
+    def root(w):                     # ("organized automatically" and "auto organizing" share the same two roots)
+        for r in ("organi", "auto", "sort", "tid", "clean", "arrang", "keep", "kept"):
+            if w.startswith(r):
+                return "action:" + r
+        return w
+
+    said = {root(w) for w in _guess_words(sentence)}
+    named = {root(w) for w in _guess_words(os.path.basename(path.rstrip("/\\")))}
+    common = said & named
+    return bool(common) and all(w.startswith("action:") for w in common)
+
+
+def _word_guess_folder(sentence: str, candidates: list) -> Optional[str]:
+    """The one subfolder whose name shares the words that describe it ("my messy stuff" -> Demo Messy Desk, "the
+    pile in my downloads" -> Downloads\\Demo Downloads Pile), or None (no word in common, or a tie: the AI decides).
+    Only the part before an instruction counts ("…, only new files", "… and put the bills in Money"). A guess: the
+    caller asks before anything is read or moved. Never Desktop / Downloads / Documents themselves."""
+    words = _guess_words
+
+    def name(c):
+        return os.path.basename(c.rstrip("/\\"))
+
+    def key(c):
+        return os.path.normcase(os.path.normpath(c.rstrip("/\\") or c))
+
+    head = re.split(r",|;|\b(?:put|move|send|by|called|named|except|but|so that|and then)\b", sentence or "",
+                    maxsplit=1, flags=re.I)[0]
+    said = words(head) - _GUESS_SKIP
+    places = {_GUESS_PLACES[w] for w in said if w in _GUESS_PLACES}
+    said -= set(_GUESS_PLACES)
+    if not said:
+        return None
+    known = {key(c) for c in candidates}
+    scored = []
+    for c in candidates:
+        par = os.path.dirname(c.rstrip("/\\"))
+        if not par or key(par) not in known:                 # (a place itself, not a folder in it)
+            continue
+        hits = len(said & words(name(c)))
+        if hits:
+            scored.append((hits, not places or name(par).lower() in places, c))
+    if not scored:
+        return None
+    best = max((h, p) for h, p, _ in scored)
+    top = [c for h, p, c in scored if (h, p) == best]
+    return top[0] if len(top) == 1 else None
 
 
 def _request_openai(user_message: str) -> Optional[Dict[str, Any]]:
@@ -814,6 +1161,14 @@ def resolve_folder_with_ai(instruction: str, candidate_paths: List[str]) -> Opti
     instruction = (instruction or "").strip()
     if not instruction or not candidate_paths:
         return None
+    named = _folder_named_in(instruction, candidate_paths)   # (said outright: no AI, so never a similar name)
+    if named:
+        logger.info(f"[VOICE ORGANIZE] folder resolve: {instruction!r} -> {named!r} (named outright)")
+        return named
+    by_words = _word_guess_folder(instruction, candidate_paths)   # (a guess: the caller always asks "did you mean")
+    if by_words:
+        logger.info(f"[VOICE ORGANIZE] folder resolve: {instruction!r} -> {by_words!r} (by its words)")
+        return by_words
     try:
         from .vision import _call_openai_proxy
         listing = "\n".join(candidate_paths)
@@ -823,7 +1178,19 @@ def resolve_folder_with_ai(instruction: str, candidate_paths: List[str]) -> Opti
         system = (
             "You map a spoken request to the ONE folder the user wants to "
             "organize. Choose STRICTLY from the AVAILABLE FOLDERS list below "
-            "(they are real paths). Respond with a JSON object of the form "
+            "(they are real paths).\n"
+            "How to match:\n"
+            "- The request's action words (organize, organized, organizing, auto organize, sort, tidy, clean up, "
+            "arrange, keep ... organized / tidy, automatically) say what to DO. They are NOT the folder's name: never "
+            "pick a folder because its name contains one of them. Only when the user plainly calls a folder by such a "
+            "name ('the auto organizing folder', 'my Organize Test folder') is that the folder.\n"
+            "- Match on the OTHER words: the folder's name or what it holds ('my messy stuff' -> a folder named like "
+            "'Messy Desk'; 'my camera roll' -> 'Camera Roll'; 'my inbox' -> a folder whose name has 'Inbox'). Names can "
+            "be loose: singular / plural, a word left out, a prefix the user doesn't say ('Demo ...', 'Filect ...').\n"
+            "- A place they say ('in my downloads', 'on the desktop') is WHERE the folder is: pick a folder inside that "
+            "place whose name matches the other words. Pick the place itself (e.g. Downloads) only when they mean the "
+            "whole place ('organize my downloads').\n"
+            "Respond with a JSON object of the form "
             '{"folder": "<exact folder path, verbatim>"} — or {"folder": "NONE"} '
             "if none clearly matches. JSON only, no prose."
         )
@@ -873,6 +1240,10 @@ def resolve_folder_with_ai(instruction: str, candidate_paths: List[str]) -> Opti
                 elif len(matches) > 1:
                     desk = [p for p in matches if "desktop" in p.lower()]
                     resolved = desk[0] if len(desk) == 1 else None
+        if resolved and _only_action_words_match(instruction, resolved):
+            logger.info(f"[VOICE ORGANIZE] folder resolve: {instruction!r} -> {resolved!r} matched only on an "
+                        "action word: not a match")
+            return None
         logger.info(f"[VOICE ORGANIZE] folder resolve: {instruction!r} -> {resolved!r} (raw={answer[:80]!r})")
         return resolved
     except Exception as e:

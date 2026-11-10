@@ -367,11 +367,15 @@ class StreamingTranscriber(QObject):
     _DONE_WAIT = 3.0
     _MAX_RECORD_SEC = 600              # 10-min runaway / stuck-hotkey cap
 
-    def __init__(self, language: Optional[str] = None, device=None, terms=None):
+    def __init__(self, language: Optional[str] = None, device=None, terms=None, external: bool = False):
         super().__init__()
         self.language = language
         self.terms = terms
         self.device = device           # QAudioDevice or None (default input)
+        self._external = external      # True: no mic of its own — Filect Assistant's listener feed()s the audio
+        self._cancelled = False        # cancel(): nobody wants the text — never fall back to a batch upload
+        self._heard_nothing = False    # streaming finished properly and heard NO words (not a failure)
+        self._release_fg = None        # mic_helper.foreground_begin()'s release — hands-free waits meanwhile
         self.is_recording = False
         self._outbox: List[bytes] = [] # boosted int16 PCM frames for streaming
         self._chunks: List[bytes] = [] # raw int16 PCM for the batch fallback
@@ -392,13 +396,38 @@ class StreamingTranscriber(QObject):
         self._outbox = []
         self._chunks = []
         self._run_peak = _PEAK_FLOOR
-        self._start_capture()
+        if self._external:
+            self._mic_stopped = True            # (no mic: the listener feeds the audio)
+        else:
+            self._start_capture()
         self._ws_thread = threading.Thread(target=self._run_stream, daemon=True)
         _keep_stream(self)              # (on the GUI thread) — never freed by its own worker thread
         self._ws_thread.start()
 
     def stop_recording(self):
         self.is_recording = False
+
+    def cancel(self) -> None:
+        """Hands-free dropped this one (Esc, a noise): stop, and if streaming came back empty DON'T upload the clip
+        again for a batch transcription — that costs voice time for text nobody uses. (Dictation never calls it.)"""
+        self._cancelled = True
+        self.is_recording = False
+
+    def feed(self, data: bytes) -> None:
+        """External audio (external=True — Filect Assistant's listener owns the mic): 16 kHz int16 mono, any block
+        size. Streamed up exactly like mic blocks (no gain: the listener's mic level is what it is), and kept for
+        the batch fallback."""
+        if not data:
+            return
+        data = data[: len(data) - len(data) % 2]
+        self._chunks.append(data)
+        self._outbox.append(data)
+
+    def text_so_far(self) -> str:
+        """Everything transcribed so far, the part still in progress included — read from the UI thread by the
+        hands-free listener (Mac: the whole punctuated sentence is here ~0.5 s after you stop)."""
+        live = getattr(self, "_live", None)
+        return _assemble(*live).strip() if live else ""
 
     def words_so_far(self) -> int:
         """Words heard so far (finished sentences + the one in progress) — a screenshot taken
@@ -408,6 +437,11 @@ class StreamingTranscriber(QObject):
 
     # ----- capture (runs on the GUI thread) -----
     def _start_capture(self):
+        try:
+            from app.core import mic_helper           # Filect Assistant (hands-free) lets go of the mic first
+            self._release_fg = mic_helper.foreground_begin()
+        except Exception:
+            self._release_fg = None
         try:
             from PySide6.QtMultimedia import QMediaDevices, QAudioSource, QAudioFormat
             fmt = QAudioFormat()
@@ -463,6 +497,9 @@ class StreamingTranscriber(QObject):
             pass
 
     def _stop_capture(self):
+        rel, self._release_fg = self._release_fg, None
+        if rel is not None:
+            rel()                                      # (also when the mic never opened)
         if self._mic_stopped:
             return
         self._mic_stopped = True
@@ -519,8 +556,10 @@ class StreamingTranscriber(QObject):
     # ----- streaming (runs on the worker thread) -----
     def _run_stream(self):
         # Mute AFTER the mic is already capturing (mic started in start()), so
-        # the opening words aren't lost to the mute call.
-        self._mute_output_if_enabled()
+        # the opening words aren't lost to the mute call. External audio (hands-free): never mute — it runs for
+        # hours while you listen to things.
+        if not self._external:
+            self._mute_output_if_enabled()
         stream_text, stream_ok = None, False
         try:
             import asyncio
@@ -535,6 +574,16 @@ class StreamingTranscriber(QObject):
         if stream_ok and stream_text is not None:
             logger.info(f"[STREAM] final via streaming: {len(stream_text)} chars")
             self.finished.emit(stream_text)
+            return
+        if self._cancelled:                       # (hands-free only — dictation never cancels)
+            logger.info("[STREAM] cancelled — no batch fallback")
+            self.finished.emit("")
+            return
+        if self._external and self._heard_nothing:
+            # Hands-free: the stream finished properly and heard no words (a cough, a long "hmm") — trust it;
+            # re-uploading the clip for a batch pass only costs voice time. Dictation keeps its batch fallback.
+            logger.info("[STREAM] no words heard (hands-free) — no batch re-upload")
+            self.finished.emit("")
             return
         self._finish_via_batch()
 
@@ -701,6 +750,8 @@ class StreamingTranscriber(QObject):
             logger.info(f"[STREAM] FINAL text: {final!r}")
         if final:
             return final, True
+        if done_flag["v"]:
+            self._heard_nothing = True                  # (a proper end with no words — see _run_stream)
         logger.info(f"[STREAM] empty streaming result → batch fallback")
         return None, False
 

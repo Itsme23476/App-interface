@@ -178,17 +178,16 @@ def test_page_and_card_show_the_reply_while_it_streams(monkeypatch):
         ov = page._ensure_notch()
         assert _wait(lambda: any(e.get("live") and "15" in e["text"] for e in s.entries), 5), \
             "no live row while it streams"
-        _wait(lambda: False, 0.15)                            # (the page's 60 ms repaint)
-        cv = page.view.chat
+        cv = page.view.chat                                   # (the page's 60 ms repaint — a busy run: longer)
+        assert _wait(lambda: bool(cv._turn_widgets) and cv._turn_widgets[-1].reply_browser is not None
+                     and "15" in cv._turn_widgets[-1].reply_text(), 3), "the page shows nothing yet"
         w = cv._turn_widgets[-1]
-        assert w.reply_browser is not None and "15" in w.reply_text(), "the page shows nothing yet"
         assert ov._state == "working" and any(ch.isdigit() for ch in ov._tool_chip.text()), ov._tool_chip.text()
         assert _wait(lambda: any(e.get("live") and "35" in e["text"] for e in s.entries), 5)
-        _wait(lambda: False, 0.15)
+        assert _wait(lambda: "35" in cv._turn_widgets[-1].reply_text(), 3)
         assert cv._turn_widgets[-1] is w, "the turn was rebuilt for every word (flicker) — not updated in place"
-        assert "35" in w.reply_text()
         assert _wait(lambda: s.status == "done" and not s.running, 6)
-        _wait(lambda: False, 0.15)
+        assert _wait(lambda: "done." in cv._turn_widgets[-1].reply_text(), 3)
         texts = [e for e in s.entries if e["kind"] == "text"]
         assert len(texts) == 1 and texts[0]["text"].endswith("— done.") and "live" not in texts[0]
         assert "done." in cv._turn_widgets[-1].reply_text()

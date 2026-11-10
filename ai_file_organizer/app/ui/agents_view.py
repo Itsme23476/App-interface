@@ -719,11 +719,11 @@ class SetupCard(QFrame):
     updates by itself when it's done. `state`: {"claude"/"codex": ready|install|signin, "waiting": agent|None}."""
     setup = Signal(str)                      # "claude" | "codex"
 
-    def __init__(self, c, parent=None):
+    def __init__(self, c, parent=None, compact=False):
         super().__init__(parent)
         self.setObjectName("agentSetupCard")
         self.setMaximumWidth(620)
-        self._c, self._state = c, None
+        self._c, self._state, self._compact = c, None, bool(compact)
         self._lay = QVBoxLayout(self)
         self.apply_theme(c)
 
@@ -735,7 +735,7 @@ class SetupCard(QFrame):
         """Like the Mac: the first sentence on its own line, the second under it — when the first fits. In a
         narrower window the two just flow (a forced break there left a third, one-word-ish line)."""
         d = getattr(self, "desc", None)
-        if d is None:
+        if d is None or self._compact:
             return
         room = self.width() - 56 - 8
         fits = room > 0 and d.fontMetrics().horizontalAdvance(_SETUP_LINE1) <= room
@@ -752,27 +752,29 @@ class SetupCard(QFrame):
         _clear(self._lay)
         st = self._state or {}
         waiting = st.get("waiting")
-        self._lay.setContentsMargins(28, 24, 28, 22)
-        self._lay.setSpacing(10)
+        compact = self._compact
+        self._lay.setContentsMargins(*((16, 14, 16, 14) if compact else (28, 24, 28, 22)))
+        self._lay.setSpacing(8 if compact else 10)
         self.setStyleSheet(f"QFrame#agentSetupCard {{ background:{c['surface']}; border:1px solid {c['border']};"
                            f" border-radius:16px; }} QFrame#agentSetupCard QLabel {{ background:transparent; border:none; }}")
-        logos = QHBoxLayout()
-        logos.setSpacing(12)
-        logos.addStretch(1)
-        for agent in ("claude", "codex"):
-            lg = QLabel()
-            lg.setPixmap(agent_logo(agent, 40))
-            logos.addWidget(lg)
-        logos.addStretch(1)
-        self._lay.addLayout(logos)
-        self._lay.addSpacing(2)
-        t = QLabel("Connect Claude Code or Codex")
-        t.setAlignment(Qt.AlignCenter)
-        t.setStyleSheet(f"color:{c['text']}; font-size:19px; font-weight:700;")
+        if not compact:
+            logos = QHBoxLayout()
+            logos.setSpacing(12)
+            logos.addStretch(1)
+            for agent in ("claude", "codex"):
+                lg = QLabel()
+                lg.setPixmap(agent_logo(agent, 40))
+                logos.addWidget(lg)
+            logos.addStretch(1)
+            self._lay.addLayout(logos)
+            self._lay.addSpacing(2)
+        t = QLabel("Connect Claude Code or Codex" + (" to use the assistant" if compact else ""))
+        t.setAlignment(Qt.AlignLeft if compact else Qt.AlignCenter)
+        t.setStyleSheet(f"color:{c['text']}; font-size:{15 if compact else 19}px; font-weight:700;")
         self._lay.addWidget(t)
         d = QLabel(f"{_SETUP_LINE1} {_SETUP_LINE2}")
         d.setWordWrap(True)
-        d.setAlignment(Qt.AlignCenter)
+        d.setAlignment(Qt.AlignLeft if compact else Qt.AlignCenter)
         d.setStyleSheet(f"color:{c['muted']}; font-size:13px;")
         self._lay.addWidget(d)
         self.desc = d
@@ -780,7 +782,8 @@ class SetupCard(QFrame):
         self._lay.addSpacing(4)
         row = QHBoxLayout()
         row.setSpacing(10)
-        row.addStretch(1)
+        if not compact:
+            row.addStretch(1)
         self.buttons = {}
         for agent, primary in (("claude", True), ("codex", False)):
             kind = st.get(agent) or "install"
@@ -809,7 +812,7 @@ class SetupCard(QFrame):
                    "Opens a PowerShell window with the official installer and sign-in. This updates by itself "
                    "when you're done.")
         n.setWordWrap(True)
-        n.setAlignment(Qt.AlignCenter)
+        n.setAlignment(Qt.AlignLeft if compact else Qt.AlignCenter)
         n.setStyleSheet(f"color:{c['accent'] if waiting else c['muted']}; font-size:12px;")
         self._lay.addWidget(n)
         self.note = n
@@ -1364,7 +1367,8 @@ def _blurred(pm: QPixmap, radius: float = 18.0) -> QPixmap:
     """A soft blur of a window snapshot (done at quarter size — cheap)."""
     w, h = max(1, pm.width() // 4), max(1, pm.height() // 4)
     small = pm.scaled(w, h, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
-    scene = QGraphicsScene()
+    small.setDevicePixelRatio(1.0)     # (a 200 %-scaled screen's snapshot keeps ratio 2 → the scene laid it out at half
+    scene = QGraphicsScene()           #  size: the blurred backdrop filled only the top-left quarter of the window)
     item = QGraphicsPixmapItem(small)
     eff = QGraphicsBlurEffect()
     eff.setBlurRadius(radius / 4 + 2)
@@ -1408,6 +1412,15 @@ class Tour(QWidget):
         self.step_lbl = QLabel()
         self.step_lbl.setStyleSheet(f"color:{c['accent']}; font-size:11px; font-weight:700;")
         cl.addWidget(self.step_lbl)
+        # Steps with art (the Assistant page's tour: a key / an icon on a lilac panel, like the Mac) get it here.
+        self.art = QFrame()
+        self.art.setObjectName("tourArt")
+        self.art.setFixedHeight(120)
+        self.art.setStyleSheet(f"QFrame#tourArt {{ background:{c['accent_soft']}; border:none; border-radius:14px; }}")
+        self._art = QHBoxLayout(self.art)
+        self._art.setSpacing(10)
+        self.art.setVisible(any(len(st) == 3 for st in self.steps))
+        cl.addWidget(self.art)
         self.title = QLabel()
         self.title.setWordWrap(True)
         self.title.setStyleSheet(f"color:{c['text']}; font-size:18px; font-weight:700;")
@@ -1472,7 +1485,9 @@ class Tour(QWidget):
             self.close_tour()
             return
         self.i = max(0, i)
-        t, b = self.steps[self.i]
+        st = self.steps[self.i]
+        art, t, b = st if len(st) == 3 else (None, st[0], st[1])
+        self._show_art(art)
         self.step_lbl.setText(f"STEP {self.i + 1} OF {len(self.steps)}")
         self.title.setText(t)
         self.body.setText(b)
@@ -1483,6 +1498,32 @@ class Tour(QWidget):
         self.dots.setText(dots)
         if self.isVisible():
             self._place()
+
+    def _show_art(self, art):
+        _clear(self._art)
+        if not art:
+            return
+        c = self.c
+        self._art.addStretch(1)
+        kind, what = art
+        if kind == "icon":
+            ic = QLabel()
+            ic.setPixmap(line_pixmap(what, 44, c["accent"]))
+            self._art.addWidget(ic, 0, Qt.AlignVCenter)
+        else:                                          # keycaps: "Shift", "+", "Ctrl", "→", "Esc"…
+            for k in what:
+                lab = QLabel(k)
+                if k in ("+", "→", "…"):
+                    lab.setStyleSheet(f"color:{c['muted']}; font-size:20px; background:transparent; border:none;")
+                else:
+                    lab.setAlignment(Qt.AlignCenter)
+                    lab.setMinimumWidth(56)
+                    lab.setFixedHeight(48)
+                    lab.setStyleSheet(f"color:{c['text']}; font-size:15px; font-weight:600; background:{c['surface']};"
+                                      f" border:1px solid {c['border_strong']}; border-bottom:3px solid {c['border_strong']};"
+                                      f" border-radius:10px; padding:0 14px;")
+                self._art.addWidget(lab, 0, Qt.AlignVCenter)
+        self._art.addStretch(1)
 
     def close_tour(self):
         try:
@@ -2040,7 +2081,11 @@ class AgentsView(QWidget):
 
     def _agent_row(self, menu, agent):
         c = self.c
-        sel = agent == self._primary
+        # ✓ = the agent this box is using (the open chat's, else new chats') — the same one the pill names. (It was
+        # "new chats' agent": with a Codex chat open and Claude Code already picked, Claude Code had the ✓, picking
+        # it did nothing and the pill still said Codex — "it won't let me switch", 2026-11-09.)
+        sel = agent == (self._chat_agent or self._primary)
+        other_chat = self._chat_agent is not None and not sel
         w = _ClickRow(menu, lambda a=agent: self._pick_agent(a))
         w.setObjectName("agentRow")
         w.setStyleSheet(f"QWidget#agentRow {{ background:{c['hover'] if sel else 'transparent'}; border-radius:8px; }}"
@@ -2055,7 +2100,8 @@ class AgentsView(QWidget):
         col.setSpacing(0)
         a = QLabel(AGENT_NAMES[agent])
         a.setStyleSheet(f"color:{c['text']}; font-size:12.5px; font-weight:600; background:transparent;")
-        b = QLabel(AGENT_SUBS[agent])
+        b = QLabel(f"Starts a new chat · {AGENT_SUBS[agent][0].lower()}{AGENT_SUBS[agent][1:]}" if other_chat
+                   else AGENT_SUBS[agent])
         b.setStyleSheet(f"color:{c['muted']}; font-size:11px; background:transparent;")
         col.addWidget(a)
         col.addWidget(b)
@@ -2072,17 +2118,18 @@ class AgentsView(QWidget):
         menu.addAction(act)
 
     def _pick_agent(self, agent):
-        """The agent row in the menu: it becomes the agent NEW chats use (an open chat keeps its own)."""
+        """The agent row in the menu: it becomes the agent new chats use — and with a chat of the OTHER agent open,
+        a new chat starts with it (a chat can't change agents; it stays in the list)."""
         for m in self.findChildren(QMenu):
             if m.isVisible():
                 m.close()
-        if agent != self._primary:
+        if agent != (self._chat_agent or self._primary):       # (the ✓ one: nothing to change)
             self.agent_changed.emit(agent)
 
     def _agent_menu(self, anchor):
         menu = QMenu(self)
         menu.setStyleSheet(self._menu_css())
-        self._menu_header(menu, "AGENT" if self._chat_agent is None else "AGENT FOR NEW CHATS")
+        self._menu_header(menu, "AGENT")
         for agent in ("claude", "codex"):
             self._agent_row(menu, agent)
         menu.addSeparator()

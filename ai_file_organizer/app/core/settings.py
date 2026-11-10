@@ -4,6 +4,7 @@ Application settings and configuration management.
 
 import copy
 import json
+import re
 import os
 from datetime import datetime
 from pathlib import Path
@@ -81,6 +82,16 @@ class Settings:
         self.assistant_router_model: str = 'opus'   # model for the voice intent router
         self.agents_list_collapsed: bool = True     # Agents page: the chat list starts hidden for a new user
         self.agents_tour_seen: bool = False         # Agents page: "See what it can do" stops glowing once opened
+        # ======= Filect Assistant (hands-free voice) — keys + defaults copied verbatim from the Mac app =======
+        self.live_send_after_sec: float = 2.0       # send after you've stopped talking this long (1–10 s)
+        self.live_sensitivity: str = 'medium'       # 'low' (ignores more) | 'medium' | 'high' (picks up softer)
+        self.live_chime: bool = True                # a short sound when something you said becomes a task
+        self.live_noise_filter: bool = True         # (Mac: voice processing. Windows has none in Qt — kept for the file)
+        self.live_speak: bool = False               # Speak replies — OFF by default
+        self.live_voice: str = 'sal'                # Speak replies' voice (speech_out.VOICES; xAI voice id)
+        self.live_organize_preview: bool = True     # "organize my Downloads": show the plan first (Off: moves at once)
+        self.live_tour_seen: bool = False          # Assistant page: its tour button stands out until opened once
+        self.live_settings_collapsed: bool = False  # Assistant page: the Settings panel (right) hidden
         # Hold to talk to the agent from anywhere. TEST keybind for the Parallels dev box — swap for the real
         # one before release (see the project's test-keybind list).
         self.assistant_voice_shortcut: str = 'shift+z'
@@ -404,6 +415,19 @@ class Settings:
         for _k in ('assistant_codex_close_app', 'assistant_auto_open', 'agents_list_collapsed', 'agents_tour_seen'):
             if isinstance(data.get(_k), bool):
                 setattr(self, _k, data[_k])
+        try:                                         # Filect Assistant (hands-free)
+            if data.get('live_send_after_sec') is not None:
+                self.live_send_after_sec = min(10.0, max(1.0, float(data['live_send_after_sec'])))
+        except (TypeError, ValueError):
+            pass
+        if data.get('live_sensitivity') in ('low', 'medium', 'high'):
+            self.live_sensitivity = data['live_sensitivity']
+        if isinstance(data.get('live_voice'), str) and re.fullmatch(r'[a-z]{2,16}', data['live_voice']):
+            self.live_voice = data['live_voice']
+        for _k in ('live_chime', 'live_noise_filter', 'live_speak', 'live_organize_preview', 'live_tour_seen',
+                   'live_settings_collapsed'):
+            if isinstance(data.get(_k), bool):
+                setattr(self, _k, data[_k])
         self.has_completed_onboarding = bool(data.get('has_completed_onboarding', False))
         self.onboarding_remind_count = int(data.get('onboarding_remind_count', 0))
         self.seen_tips = list(data.get('seen_tips', []))
@@ -454,6 +478,16 @@ class Settings:
             'agents_list_collapsed': self.agents_list_collapsed,
             'agents_tour_seen': self.agents_tour_seen,
             'assistant_voice_shortcut': self.assistant_voice_shortcut,
+            # Filect Assistant (hands-free)
+            'live_send_after_sec': self.live_send_after_sec,
+            'live_sensitivity': self.live_sensitivity,
+            'live_chime': self.live_chime,
+            'live_noise_filter': self.live_noise_filter,
+            'live_speak': self.live_speak,
+            'live_organize_preview': self.live_organize_preview,
+            'live_voice': self.live_voice,
+            'live_tour_seen': self.live_tour_seen,
+            'live_settings_collapsed': self.live_settings_collapsed,
             # Auto-organize watcher settings
             'auto_organize_folders': self.auto_organize_folders,
             'auto_organize_auto_start': self.auto_organize_auto_start,
@@ -780,6 +814,68 @@ class Settings:
                 return folder.get('action', 3)  # Default to Watch Only
         return 3
 
+    # Per-folder flags (set up by voice). Not the global `auto_organize_paused` above (the user's Stop):
+    # `paused` = this one folder was left off when only another folder was turned on by voice.
+    @staticmethod
+    def _norm_folder(path: str) -> str:
+        """A folder as Windows compares it: no case, one kind of slash, no trailing slash."""
+        return os.path.normcase(os.path.normpath(str(path or ''))) if path else ''
+
+    def _auto_organize_entry(self, folder_path: str) -> Optional[Dict[str, Any]]:
+        wanted = self._norm_folder(folder_path)
+        if not wanted:
+            return None
+        for folder in self.auto_organize_folders:
+            if isinstance(folder, dict) and self._norm_folder(folder.get('path', '')) == wanted:
+                return folder
+        return None
+
+    def set_auto_organize_flags(self, folder_path: str, **flags) -> None:
+        """Set `paused` (left off when only another folder was turned on) / `skip_known` on one folder."""
+        entry = self._auto_organize_entry(folder_path)
+        if entry is not None:
+            entry.update(flags)
+            self._save_config()
+
+    def auto_organize_skip_known(self, folder_path: str) -> bool:
+        """True once a day's auto-organize was reverted here: files Filect already knows stay where they are."""
+        entry = self._auto_organize_entry(folder_path)
+        return bool(entry and entry.get('skip_known'))
+
+    def auto_organize_watching_since(self, folder_path: str) -> float:
+        """When this folder was turned on (0 if unknown). Anything that arrives after that is new, even while Filect is closed."""
+        entry = self._auto_organize_entry(folder_path)
+        try:
+            return float((entry or {}).get('watching_since') or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def clear_auto_organize_paused(self) -> None:
+        """Pressing Start means "run my whole list"."""
+        changed = False
+        for folder in self.auto_organize_folders:
+            if isinstance(folder, dict) and folder.pop('paused', None) is not None:
+                changed = True
+        if changed:
+            self._save_config()
+
+    def mark_auto_organize_skip_known(self, paths) -> None:
+        """Files were just put back: any auto-organized folder holding them must not sort them again."""
+        wanted = [self._norm_folder(p) for p in paths if p]
+        changed = False
+        for folder in self.auto_organize_folders:
+            if not isinstance(folder, dict):
+                continue
+            base = self._norm_folder(folder.get('path', ''))
+            if not base:
+                continue
+            root = base.rstrip('\\/') + os.sep
+            if not folder.get('skip_known') and any(p.startswith(root) for p in wanted):
+                folder['skip_known'] = True
+                changed = True
+        if changed:
+            self._save_config()
+
     def set_auto_organize_paused(self, paused: bool) -> None:
         """Mark the watcher as user-paused (or un-pause it). Persisted across
         tab switches, dialog saves, and app restarts.
@@ -841,20 +937,69 @@ class Settings:
         - File extensions: ".json" is automatically treated as "*.json"
         - Pinned paths: specific files/folders that are protected
         """
-        import fnmatch
         import logging
         logger = logging.getLogger(__name__)
-        
+
         # First check if the path is pinned (protected)
         if self.is_pinned(file_path):
             logger.debug(f"Excluding pinned path: {file_path}")
             return True
-        
-        # Get the file/folder name (case-insensitive matching)
+
+        # The same three checks as _should_exclude_by_patterns below, with every pattern compiled into one regex
+        # per check (cached until the list changes). Measured 2026-11-09: ~250 patterns one by one took ~2.5 ms
+        # a file — 20,000 files ≈ 50 s, on the UI thread when auto-organize started.
+        name_re, path_re, part_re = self._exclusion_matchers()
+        nc = os.path.normcase
+        name = os.path.basename(file_path)
+        if name_re is not None and name_re.match(nc(name.lower())):
+            logger.debug(f"Excluding {name} - matched an exclusion pattern")
+            return True
+        if path_re is not None:
+            if path_re.match(nc(file_path.lower())):
+                logger.debug(f"Excluding {name} - path matched an exclusion pattern")
+                return True
+            for part in file_path.replace('\\', '/').split('/'):
+                if part_re.match(nc(part.lower())):
+                    logger.debug(f"Excluding {name} - path component '{part}' matched an exclusion pattern")
+                    return True
+        return False
+
+    def _exclusion_matchers(self):
+        """(name, full path, path component) regexes for exclusion_patterns — exactly what fnmatch.fnmatch does
+        for each pattern (normcase both sides, then translate), joined with |. Rebuilt when the list changes."""
+        import fnmatch
+        import re
+        key = tuple(self.exclusion_patterns or ())
+        cached = getattr(self, "_exclusion_cache", None)
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        nc = os.path.normcase
+        names, paths = [], []
+        for pattern in key:
+            p = pattern.lower()
+            names.append(fnmatch.translate(nc(p)))
+            if p.startswith('.') and not p.startswith('.*') and '*' not in p:
+                names.append(fnmatch.translate(nc('*' + p)))          # ".json" means "*.json"
+            if p.startswith('.') and '*' not in p and len(p) <= 5:
+                continue                                              # (extension-only: names only)
+            paths.append(p)
+        join = lambda parts: re.compile("|".join(f"(?:{x})" for x in parts)) if parts else None
+        name_re = join(names)
+        # full path: "*/<p>" or "*\<p>" (the same once normcased on Windows); a component: "<p>" alone
+        path_re = join([fnmatch.translate(nc(f"*{sep}{p}")) for p in paths for sep in ("/", "\\")])
+        part_re = join([fnmatch.translate(nc(p)) for p in paths])
+        self._exclusion_cache = (key, (name_re, path_re, part_re))
+        return name_re, path_re, part_re
+
+    def _should_exclude_by_patterns(self, file_path: str) -> bool:
+        """The original pattern-by-pattern check (kept as the reference the compiled one is tested against)."""
+        import fnmatch
+        import logging
+        logger = logging.getLogger(__name__)
         name = os.path.basename(file_path)
         name_lower = name.lower()
         file_path_lower = file_path.lower()
-        
+
         for pattern in self.exclusion_patterns:
             pattern_lower = pattern.lower()
             

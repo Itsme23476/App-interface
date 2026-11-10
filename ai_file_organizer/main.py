@@ -340,7 +340,31 @@ def main():
     main_window_holder[0] = window
     window.show()
 
-    sys.exit(app.exec())
+    exit_without_crashing(app.exec())
+
+
+def exit_without_crashing(code):
+    """Quitting while a background thread won't stop (a stuck read, a Claude Code that didn't close in its 3 s
+    shutdown wait): Python tearing that QThread down crashes Filect on the way out — 0xC0000409, reproduced on
+    Windows (Mac bug 50). Everything that saves has already run (aboutToQuit), so end the process right here.
+    Looks through every QThread, not only the window's children: most of Filect's have no parent."""
+    import gc
+    running = 0
+    try:
+        from PySide6.QtCore import QThread
+        for o in gc.get_objects():
+            try:
+                if isinstance(o, QThread) and o.isRunning():
+                    running += 1
+            except Exception:                # (its Qt side is already gone)
+                pass
+    except Exception:
+        running = 0
+    if running:
+        logger.info(f"Quitting with {running} background thread(s) still running - exiting directly")
+        logging.shutdown()
+        os._exit(code)
+    sys.exit(code)
 
 
 if __name__ == "__main__":

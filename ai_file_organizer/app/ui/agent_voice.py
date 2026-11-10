@@ -117,6 +117,7 @@ class AgentVoiceController(QObject):
         self._state = "recording"
         self._pressed_at = time.monotonic()
         self._recorder.start()                # the mic first — not one word lost to the pill showing
+        self._route_tag = None
         pill = self._get_pill()
         if pill is not None:
             try:
@@ -125,6 +126,12 @@ class AgentVoiceController(QObject):
             except Exception:
                 pass
         logger.info("[agent-voice] ▶ listening")
+        try:                                  # Claude Code + the decider start while you talk (warm on intent)
+            page = getattr(self.mw, "assistant_page", None)
+            if page is not None and hasattr(page, "agent_intent"):
+                page.agent_intent("voice")
+        except Exception as e:
+            logger.info(f"[agent-voice] warm-up skipped: {e}")
 
     def _on_release(self):
         if self._state != "recording":
@@ -139,6 +146,19 @@ class AgentVoiceController(QObject):
             return
         self._state = "transcribing"
         self._hold_escape()                    # Esc still cancels while it's written down + routed
+        if not self._shots:
+            # What you said is already transcribed live: start deciding where it goes NOW, while the final transcript
+            # arrives (read-only — the transcription is untouched). Used only if the final words match
+            # (AssistantPage._route_sig); screenshots change the words, so those are decided at the end.
+            try:
+                early = self._recorder.text_so_far() if hasattr(self._recorder, "text_so_far") else ""
+                page = getattr(self.mw, "assistant_page", None)
+                if early and page is not None and hasattr(page, "prepare_live_route"):
+                    self._route_tag = ("shiftz", time.monotonic())
+                    page.prepare_live_route(self._route_tag, early, live=False)
+            except Exception as e:
+                self._route_tag = None
+                logger.info(f"[agent-voice] early routing skipped: {e}")
         pill = self._get_pill()
         if pill is not None:
             pill.show_transcribing()
@@ -180,7 +200,9 @@ class AgentVoiceController(QObject):
             self._drop_escape()
             return
         try:
-            rid = page.run_voice_task(text, images=[s[0] for s in shots])
+            tag, self._route_tag = getattr(self, "_route_tag", None), None
+            kw = {"tag": tag} if tag is not None else {}      # (only with an early decision to match)
+            rid = page.run_voice_task(text, images=[s[0] for s in shots], **kw)
         except Exception as e:
             logger.error(f"[agent-voice] couldn't start the task: {e}", exc_info=True)
             rid = None
@@ -337,7 +359,10 @@ class AgentVoiceController(QObject):
                 except Exception:
                     pass
             try:
-                r.stop_recording()
+                # cancel(), not stop_recording(): nobody wants this text (a tap, Esc, a timeout), so an empty stream
+                # must not be re-uploaded for a batch transcription — 2026-11-09 log: five quick Shift+Z taps in 3 s
+                # each uploaded ~1.3 s of audio (voice usage for nothing).
+                (r.cancel if hasattr(r, "cancel") else r.stop_recording)()
             except Exception:
                 pass
 

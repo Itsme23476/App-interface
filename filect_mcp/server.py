@@ -745,9 +745,11 @@ def _index_apply_moves(moves: list) -> dict:
 
 
 @server.tool(description="Preview how Filect would organize a folder. READ-ONLY — moves nothing. "
-                         "Returns a plan_id and the proposed folders (which files go where). The "
-                         "folder must already be indexed in Filect. Review the plan, then call "
-                         "apply_organization_plan(plan_id) to actually move the files.")
+                         "Returns a plan_id and the proposed folders (which files go where). Only "
+                         "files Filect has indexed can be planned; the result lists the ones that "
+                         "aren't (not_indexed) — analyze_file + save_to_index them first to include "
+                         "them. Review the plan, then call apply_organization_plan(plan_id) to "
+                         "actually move the files.")
 def generate_organization_plan(folder: str, instructions: str = "") -> dict:
     try:
         gate = _require_access()
@@ -756,9 +758,39 @@ def generate_organization_plan(folder: str, instructions: str = "") -> dict:
         import json as _json
         import uuid
         from app.core.ai_organizer import request_organization_plan, plan_to_moves
-        files = _files_under(folder)
+        from app.core.organize_reader import MAX_FILES, scan
+        folder = str(folder or "").strip().strip("\"'").strip()
+        # What's really in the folder, the way voice organize sees it: never inside code projects, apps, hidden or
+        # linked folders, and only files still there (the index can remember deleted ones).
+        found = scan(folder)
+        err = found.get("error")
+        if err == "missing":
+            if os.path.isfile(folder):
+                return {"error": f"That's a file, not a folder: {folder}. Give the folder it's in."}
+            return {"error": f"That folder doesn't exist: {folder}"}
+        if err == "project":
+            return {"error": "That folder is a code project, so Filect won't organize it."}
+        if err == "too_many":
+            return {"error": f"That folder has more than {MAX_FILES:,} files. Pick a smaller folder."}
+        key = lambda p: os.path.normcase(os.path.normpath(str(p or "")))
+        on_disk = {key(p): p for p in found.get("files") or []}
+        if not on_disk:
+            return {"error": "That folder has no files Filect can organize."}
+        files = [f for f in _files_under(folder) if key(f.get("file_path")) in on_disk]
+        indexed = {key(f.get("file_path")) for f in files}
+        missing = [p for k, p in on_disk.items() if k not in indexed]
+        left_out = {}
+        if missing:                          # (Mac bug 13: these were left out without a word)
+            left_out = {
+                "not_indexed": len(missing),
+                "not_indexed_examples": [os.path.basename(p) for p in missing[:20]],
+                "how_to_include_them": "Filect hasn't indexed these, so a plan can't place them and they stay where "
+                                       "they are. To include them: analyze_file, then save_to_index, for each one "
+                                       "(or index the folder in the Filect app), then generate the plan again.",
+            }
         if not files:
-            return {"error": "No indexed files under this folder — index it in Filect first."}
+            return {"error": f"None of the {len(on_disk)} files in that folder are in Filect's index yet, so there's "
+                             "nothing to plan.", **left_out}
         files_by_id = {f["id"]: f for f in files}
         plan = request_organization_plan(
             instructions or "Organize these files into sensible folders by content and type.", files)
@@ -777,7 +809,11 @@ def generate_organization_plan(folder: str, instructions: str = "") -> dict:
             "plan_id": plan_id,
             "total_files": len(moves),
             "proposed_folders": {k: v[:20] for k, v in summary.items()},
-            "note": "Nothing moved yet. Call apply_organization_plan(plan_id) to apply.",
+            "note": "Nothing moved yet. Call apply_organization_plan(plan_id) to apply." + (
+                f" {len(missing)} file{'s' if len(missing) != 1 else ''} in the folder "
+                f"{'are' if len(missing) != 1 else 'is'}n't indexed and stay where they are: see not_indexed."
+                if missing else ""),
+            **left_out,
         })
     except Exception as e:
         return {"error": f"plan failed: {e}"}

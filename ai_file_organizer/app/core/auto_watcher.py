@@ -15,9 +15,136 @@ from datetime import datetime
 from typing import Dict, List, Optional, Set
 from collections import defaultdict
 
-from PySide6.QtCore import QObject, Signal, QTimer, QThread
+from PySide6.QtCore import QCoreApplication, QObject, Qt, Signal, QTimer, QThread
 
 logger = logging.getLogger(__name__)
+
+
+class _Cancelled(Exception):
+    """A background step whose run was stopped (stop(), or a newer start()) gives up at its next check."""
+
+
+class _OffUIThread(QThread):
+    """One heavy step — walking or hashing a big folder — off the UI thread. Measured on a 20,000-file folder
+    (2026-11-09): turning on 'only new files' froze the window ~4.5 min, the other modes ~20 s, and the
+    every-3-seconds check ~0.3-0.5 s each time, because all of it ran on the UI thread. The result comes back
+    on the UI thread (done -> AutoOrganizeWatcher._on_bg_done), where the watcher's state is changed."""
+    done = Signal(int, object, object)          # token, result, error
+
+    def __init__(self, token: int, fn):
+        super().__init__()
+        self._token, self._fn = token, fn
+
+    def run(self):
+        try:
+            result = self._fn()
+        except Exception as e:                  # (_Cancelled too: the caller drops it)
+            self.done.emit(self._token, None, e)
+            return
+        self.done.emit(self._token, result, None)
+
+
+def _path_key(path: str) -> str:
+    """How two paths are compared (Windows paths are case-insensitive)."""
+    return os.path.normcase(os.path.normpath(path))
+
+
+def _is_inside(path: str, folder: str) -> bool:
+    """`path` is somewhere under `folder` (not the folder itself). Case-insensitive, like Windows."""
+    if not path or not folder:
+        return False
+    p, f = _path_key(path), _path_key(folder)
+    return p != f and p.startswith(f.rstrip("\\/") + os.sep)
+
+
+def _created_at(path: str) -> Optional[float]:
+    """When the file was created on this disk, or None where the system can't say.
+    st_birthtime (macOS; Windows from Python 3.12), else st_ctime on Windows, which IS the creation time there.
+    (The Mac code catches AttributeError and treats the file as already there: on a Python without
+    st_birthtime that would make the watching_since fix silently do nothing.)"""
+    st = os.stat(path)
+    born = getattr(st, 'st_birthtime', None)
+    if born:
+        return float(born)
+    if os.name == 'nt':
+        return float(st.st_ctime)
+    return None
+
+
+def _arrived_since(path: str, since: float) -> bool:
+    """True if `path` was created after `since` (when its folder was turned on)."""
+    if not since:
+        return False
+    try:
+        born = _created_at(path)
+    except OSError:
+        return False
+    return born is not None and born > since
+
+
+def _record_auto_moves(folder: str, moves) -> None:
+    """Automatic moves go in History (apply.record_auto_moves: one entry per folder per day).
+    History must never break a move: any failure is logged and the moves stand."""
+    if not moves:
+        return
+    try:
+        from app.core.apply import record_auto_moves
+        record_auto_moves(folder, list(moves))
+    except Exception as e:
+        logger.warning(f"[AutoOrganize] Couldn't add {len(moves)} automatic move(s) to History: {e}")
+
+
+def existing_folders_instruction(instruction: str, existing_folders: List[str]) -> str:
+    """The planner's rules for "only use the folders already there" (Organize As-Is). Also used by the voice
+    set-up of auto-organize. Folder names may be nested ('Photos/Vacation')."""
+    folders_list = ', '.join(f"'{f}'" for f in existing_folders)
+    return (
+        f"[AUTO-ORGANIZE - EXISTING FOLDERS ONLY]\n"
+        f"User's instructions: {instruction if instruction else 'Organize files into appropriate folders'}\n\n"
+        f"EXISTING FOLDERS YOU CAN USE: {folders_list}\n\n"
+        "GROUND RULES:\n"
+        "• You can ONLY use the folders listed above — never create new folders.\n"
+        "• Folder names use forward slashes for nested paths ('Photos/Vacation' = Vacation inside Photos).\n"
+        "• When both a parent and a nested folder apply, PREFER the most-specific nested one (a vacation photo "
+        "goes to 'Photos/Vacation', not just 'Photos').\n"
+        "• Every file_id MUST appear exactly once in your plan. Omitting a file is FORBIDDEN.\n\n"
+        "DECISION TREE — for EACH file, follow these steps IN ORDER:\n\n"
+        "  Step 1: Compare the file's TAGS to the LEAF NAME of each existing folder. The LEAF NAME is the "
+        "LAST segment after any slashes — for 'everything-else/pigs' the leaf is 'pigs' (not 'everything-else'). "
+        "Does any tag (or its singular/plural form) match a leaf name? Tag 'pig' matches leaf 'pigs'; tag 'lion' "
+        "matches leaf 'lions'; tag 'vacation' matches leaf 'Vacation'.\n"
+        "    → YES: place the file in that folder. If MULTIPLE folders share a matching leaf (e.g. both 'pigs' "
+        "and 'everything-else/pigs' would match a pig file), pick the most-specific (nested) one.\n"
+        "    → NO: go to Step 2.\n\n"
+        "  Step 2: Is there a CATCH-ALL folder among the existing folders? (A catch-all is one whose LEAF NAME "
+        "contains 'other', 'everything', 'misc', 'general', 'rest', 'else', 'various', or 'unsorted'.)\n"
+        "    → YES: place the file in that catch-all folder. STOP HERE. Do NOT put it in a subject folder it "
+        "doesn't actually belong to just because that folder vaguely exists.\n"
+        "    → NO: go to Step 3.\n\n"
+        "  Step 3: No catch-all available — pick the existing folder whose name is most similar to the file's "
+        "content type, using your best judgment.\n\n"
+        "WORKED EXAMPLES:\n\n"
+        "Folders = ['lions', 'everything-else', 'everything-else/pigs']  (NOTE: 'pigs' is NESTED inside "
+        "everything-else):\n"
+        "  • Lion photo  (tag 'lion') → 'lions'                  [Step 1: tag matches leaf 'lions']\n"
+        "  • Pig photo   (tag 'pig')  → 'everything-else/pigs'   [Step 1: tag 'pig' matches LEAF 'pigs' of the "
+        "nested folder — use the nested folder, NOT the parent 'everything-else']\n"
+        "  • Bear photo  (tag 'bear') → 'everything-else'        [Step 2: no bear folder anywhere; catch-all]\n"
+        "  • Sunset photo (no clear subject) → 'everything-else' [Step 2: catch-all]\n\n"
+        "Folders = ['Photos', 'Photos/Vacation', 'Docs']:\n"
+        "  • Vacation photo (tags 'photo','vacation') → 'Photos/Vacation'  [Step 1: 'vacation' matches the "
+        "leaf of the nested folder; prefer nested over the parent 'Photos']\n"
+        "  • Regular photo (tag 'photo' only) → 'Photos'  [Step 1: 'photo' matches leaf 'Photos'; nested "
+        "'Photos/Vacation' does not apply because the file has no vacation tag]\n"
+        "  • PDF document → 'Docs'  [Step 1: 'document' matches leaf 'Docs']\n\n"
+        "FORBIDDEN:\n"
+        "  • Putting a PIG photo in 'everything-else' when 'everything-else/pigs' exists. The nested 'pigs' "
+        "folder is the correct destination for pig files — don't dump them in the parent.\n"
+        "  • Putting a BEAR photo in 'lions' or 'pigs' just because they're animal-themed — they are not bear "
+        "folders. Bears with no bear-named folder go to the catch-all.\n"
+        "  • Omitting any file from your response (every file_id must appear exactly once).\n"
+        "  • Creating a folder not in the listed existing folders."
+    )
 
 
 class AutoWatcherWorker(QThread):
@@ -115,7 +242,8 @@ class AutoWatcherWorker(QThread):
         """Process files in background thread."""
         # Track all files we process (for marking as organized)
         all_processed_files = []
-        
+        history_moves = []     # (from, to) of every file this batch moved: goes in History at the end
+
         if not self.file_paths:
             self.finished_processing.emit(all_processed_files)
             return
@@ -391,6 +519,7 @@ class AutoWatcherWorker(QThread):
             for folder_name, file_ids in filtered_folders.items():
                 for file_id in file_ids:
                     if self._should_stop:
+                        _record_auto_moves(self.folder, history_moves)   # (what already moved stays revertable)
                         self.finished_processing.emit(all_processed_files)
                         return
                         
@@ -438,6 +567,7 @@ class AutoWatcherWorker(QThread):
                     try:
                         shutil.move(file_path, dest_path)
                         moved_count += 1
+                        history_moves.append((file_path, dest_path))
                         all_processed_files.append(dest_path)  # Track new location
                         logger.info(f"[Worker] Organized: {file_path} -> {dest_path}")
                         self.file_organized.emit(file_path, dest_path, folder_name)
@@ -473,7 +603,9 @@ class AutoWatcherWorker(QThread):
         except Exception as e:
             logger.error(f"[Worker] Error in organization: {e}")
             self.error_occurred.emit("", str(e))
-        
+
+        _record_auto_moves(self.folder, history_moves)   # (one write per batch, on this background thread)
+
         # Mark all files as processed (including those that weren't moved)
         if not all_processed_files:
             all_processed_files = list(self.file_paths)
@@ -517,7 +649,20 @@ class AutoOrganizeWatcher(QObject):
         self._processed_files: Set[str] = set()
         self._file_check_timer: Optional[QTimer] = None
         self._debounce_seconds = 2.0  # Wait for file to stabilize
-        
+        self._protected_cache: Dict[str, bool] = {}  # (folder -> is it inside an app / code project)
+        self._protected_at = 0.0
+        # Paths this watcher indexed itself this session (normcase). In a `skip_known` folder a file the index
+        # already knows stays where it is, except one of these (just indexed here, still waiting to be sorted).
+        self._indexed_here: Set[str] = set()
+
+        # Background steps (walking / hashing big folders happens off the UI thread)
+        self._run_gen = 0                      # bumped by start() / stop(): a step from an older run is dropped
+        self._preparing: Set[str] = set()      # (path keys) folders still being looked through: not checked yet
+        self._bg: Dict[int, tuple] = {}        # token -> (thread, then, run generation)
+        self._bg_token = 0
+        self._bg_retired: List[QThread] = []   # (threads stop() couldn't wait out: kept until they end)
+        self._tick_busy = False                # a periodic check is running in the background
+
         # Counter for periodic cleanup (every N checks)
         self._check_count = 0
         self._cleanup_interval = 10  # Run cleanup every 10 checks (~30 seconds)
@@ -536,6 +681,7 @@ class AutoOrganizeWatcher(QObject):
         self._current_worker: Optional[AutoWatcherWorker] = None
         # Queue stores (folder, instruction, existing_folders) - we re-scan folder when processing
         self._worker_queue: List[tuple] = []
+        self._current_batch: List[str] = []     # the files the running batch was given
         
         # Track files that have been successfully organized
         # This prevents re-processing the same files and unnecessary AI calls
@@ -556,27 +702,141 @@ class AutoOrganizeWatcher(QObject):
     @property
     def is_running(self) -> bool:
         return self._is_running
-    
+
+    # ------------------------------------------------------------------ background steps
+    def _off_ui(self, fn, then) -> None:
+        """Run fn() off the UI thread; then(result, error) runs on the UI thread when it's done — unless the
+        watcher was stopped or restarted meanwhile (that run's results no longer apply)."""
+        self._bg_token += 1
+        token = self._bg_token
+        thread = _OffUIThread(token, fn)
+        self._bg[token] = (thread, then, self._run_gen)
+        thread.done.connect(self._on_bg_done, Qt.QueuedConnection)
+        thread.start()
+
+    def _on_bg_done(self, token: int, result, error) -> None:
+        entry = self._bg.pop(token, None)
+        if entry is None:
+            return
+        thread, then, gen = entry
+        thread.wait(2000)                      # (it emitted on its way out: it's ending, never drop a running one)
+        self._bg_retired = [t for t in self._bg_retired if not t.isFinished()]
+        if gen != self._run_gen:
+            return
+        if error is not None and not isinstance(error, _Cancelled):
+            logger.error(f"[Watcher] a background step failed: {error}")
+        try:
+            then(result, error)
+        except Exception as e:
+            logger.error(f"[Watcher] after a background step: {e}")
+
+    def _check_gen(self, gen: Optional[int]) -> None:
+        if gen is not None and gen != self._run_gen:
+            raise _Cancelled()
+
+    def wait_ready(self, timeout: float = 30.0) -> bool:
+        """Pump events until no folder is being looked through and no background step is pending (tests, and
+        anything that needs the watcher settled). True if it settled in time."""
+        end = time.monotonic() + timeout
+        while time.monotonic() < end:
+            QCoreApplication.processEvents()
+            if not self._bg and not self._preparing:
+                return True
+            time.sleep(0.005)
+        QCoreApplication.processEvents()
+        return not self._bg and not self._preparing
+
     def add_folder(self, folder_path: str) -> bool:
-        """Add a folder to watch. Returns True if successful."""
+        """Add a folder to watch. Returns True if successful.
+
+        A folder whose entry is `paused` is skipped: voice turned on only another folder on the list, and the
+        others stay off (through restarts) until Start is pressed in the Organize tab, which clears `paused`.
+        """
         # Normalize path for consistent lookups
         folder_path = os.path.normpath(folder_path)
-        
+
         if not os.path.isdir(folder_path):
             logger.warning(f"Not a valid directory: {folder_path}")
             return False
-        
-        if folder_path not in self.watched_folders:
-            self.watched_folders.append(folder_path)
-            logger.info(f"Added watch folder: {folder_path}")
+
+        if self._is_paused(folder_path):
+            logger.info(f"Skipping paused watch folder: {folder_path} (left off until Start is pressed)")
+            return False
+
+        self._watch(folder_path)
         return True
-    
+
+    def _watch(self, folder_path: str) -> str:
+        """Put a folder on the watch list once (in any letter case). Returns the spelling on the list."""
+        for f in self.watched_folders:
+            if _path_key(f) == _path_key(folder_path):
+                return f
+        self.watched_folders.append(folder_path)
+        logger.info(f"Added watch folder: {folder_path}")
+        return folder_path
+
+    @staticmethod
+    def _is_paused(folder_path: str) -> bool:
+        """The folder's own `paused` flag (not the whole watcher's Stop, settings.auto_organize_paused)."""
+        try:
+            from app.core.settings import settings
+            entry = settings._auto_organize_entry(folder_path)
+        except Exception:
+            return False
+        return bool(entry and entry.get('paused'))
+
     def remove_folder(self, folder_path: str) -> None:
-        """Remove a folder from watch list."""
+        """Remove a folder from watch list (in any letter case). Whatever is still queued for it is dropped and
+        a batch running for it is asked to stop, so a folder that was turned off stops moving files."""
+        key = _path_key(folder_path)
+        kept = [f for f in self.watched_folders if _path_key(f) != key]
+        if len(kept) != len(self.watched_folders):
+            self.watched_folders[:] = kept
+            logger.info(f"Removed watch folder: {os.path.normpath(folder_path)}")
+        self._worker_queue = [q for q in self._worker_queue if _path_key(q[0]) != key]
+        worker = self._current_worker
+        if worker is not None and worker.isRunning() and _path_key(worker.folder) == key:
+            worker.stop()
+
+    def add_folder_live(self, folder_path: str, instruction: str = '') -> bool:
+        """Turned on by voice while the watcher runs: watch this one folder from now on without restarting
+        the others.
+
+        Does for this folder what start() does for each folder: its Organize New Only baseline, and every file
+        already there counted as known (whatever was there was dealt with before this), so only files that
+        arrive from now on are sorted. The folder's action, instruction and watching_since must already be
+        saved in settings. It is the folder the person asked for, so its `paused` flag doesn't stop it here.
+        Not running: the folder is only put on the list (start() does the rest). False if it isn't a folder.
+        """
         folder_path = os.path.normpath(folder_path)
-        if folder_path in self.watched_folders:
-            self.watched_folders.remove(folder_path)
-            logger.info(f"Removed watch folder: {folder_path}")
+        if not os.path.isdir(folder_path):
+            logger.warning(f"Not a valid directory: {folder_path}")
+            return False
+        folder_path = self._watch(folder_path)
+        self.folder_instructions[folder_path] = instruction or ''
+        if not self._is_running:
+            return True
+        # Looked through in the background (a big folder took minutes on the UI thread); until then the
+        # periodic check leaves this folder alone, so nothing already there is mistaken for a new file.
+        key = _path_key(folder_path)
+        self._preparing.add(key)
+        gen = self._run_gen
+
+        def look():
+            return self._compute_baseline(folder_path, gen), self._compute_snapshot(folder_path, gen)
+
+        def then(result, error):
+            if result is None:                 # (it failed: do it here rather than sort what was there)
+                self._capture_baseline(folder_path)
+                self._snapshot_existing(folder_path)
+            else:
+                self._merge_look(folder_path, *result)
+            self._preparing.discard(key)
+            logger.info(f"Watching {folder_path} live (now {len(self.watched_folders)} folder(s))")
+            self.status_changed.emit(f"Watching {len(self.watched_folders)} folder(s) for new files...")
+
+        self._off_ui(look, then)
+        return True
     
     def clear_folders(self) -> None:
         """Remove all watched folders."""
@@ -608,68 +868,78 @@ class AutoOrganizeWatcher(QObject):
             return
         
         self._is_running = True
+        self._run_gen += 1
+        gen = self._run_gen
+        self._tick_busy = False
         self._processed_files.clear()
         self._pending_files.clear()
         # Reset Organize-New-Only state every start() so the baseline reflects
         # the folder contents at THIS moment.
         self._baseline_hashes.clear()
         self._left_in_place_paths.clear()
+        self._indexed_here.clear()
 
-        # Capture the Organize-New-Only baseline FIRST — before any flatten or
-        # organize-existing pass — so files the app itself moves don't get
-        # mistaken for "new" arrivals when the periodic scan starts.
-        for folder in self.watched_folders:
-            self._capture_baseline(os.path.normpath(folder))
-
-        # Snapshot every file currently in the watched folders (root AND
-        # subfolders). Files in this snapshot are treated as "already known"
-        # so the periodic checker only fires on files added AFTER start.
-        # Pre-existing files are either already organized (sitting in their
-        # subfolders) or were left in place intentionally — either way the
-        # watcher shouldn't keep re-processing them every cycle.
-        for folder in self.watched_folders:
-            folder = os.path.normpath(folder)
-            if not os.path.isdir(folder):
-                continue
-            for root, dirs, files in os.walk(folder):
-                # Skip hidden subdirs in-place
-                dirs[:] = [d for d in dirs if not d.startswith('.')]
-                for fn in files:
-                    if self._should_ignore(fn):
-                        continue
-                    self._processed_files.add(os.path.normpath(os.path.join(root, fn)))
-
-        folder_count = len(self.watched_folders)
+        # Everything below walks (and for Organize New Only, hashes) every file: done in the background, then
+        # the periodic check starts. Same order as always: the Organize-New-Only baseline FIRST — before any
+        # flatten or organize-existing pass — so files the app itself moves aren't mistaken for "new" arrivals;
+        # then every file already there counts as known (except what arrived while Filect was closed, see
+        # _compute_snapshot); then flatten / organize what's there, if asked.
+        folders = [os.path.normpath(f) for f in self.watched_folders]
+        self._preparing = {_path_key(f) for f in folders}
+        folder_count = len(folders)
         self.status_changed.emit(f"Starting watch on {folder_count} folder(s)...")
-        logger.info(f"Starting watcher for {folder_count} folders (snapshot has {len(self._processed_files)} pre-existing files)")
-        
-        # Flatten folders first if requested (for re-organize)
-        if flatten_first:
-            total_flattened = 0
-            for folder in self.watched_folders:
-                count = self.flatten_folder(folder, instruction=self.folder_instructions.get(folder, ''))
-                total_flattened += count
-            if total_flattened > 0:
-                self.status_changed.emit(f"Flattened {total_flattened} files from subfolders")
-        
-        # Organize existing files if requested
-        if organize_existing:
-            self._organize_existing_files()
-        
-        # Start periodic file check
-        self._file_check_timer = QTimer(self)
-        self._file_check_timer.timeout.connect(self._check_for_new_files)
-        self._file_check_timer.start(3000)  # Check every 3 seconds
-        
-        self.status_changed.emit(f"Watching {folder_count} folder(s) for new files...")
-    
+        logger.info(f"Starting watcher for {folder_count} folders (looking through them in the background)")
+
+        def look():
+            looked = [(f, self._compute_baseline(f, gen), self._compute_snapshot(f, gen)) for f in folders]
+            flattened = 0
+            if flatten_first:
+                for f in folders:
+                    self._check_gen(gen)
+                    flattened += self.flatten_folder(f, instruction=self.folder_instructions.get(f, ''))
+            existing = self._collect_existing(folders, gen) if organize_existing else {}
+            return looked, flattened, existing
+
+        def then(result, error):
+            if result is None:                 # (it failed: do it here rather than sort what was there)
+                for f in folders:
+                    self._capture_baseline(f)
+                    self._snapshot_existing(f)
+                if organize_existing:
+                    self._organize_existing_files()
+            else:
+                looked, flattened, existing = result
+                for f, baseline, snapshot in looked:
+                    self._merge_look(f, baseline, snapshot)
+                logger.info(f"Watcher looked through {folder_count} folder(s): "
+                            f"{len(self._processed_files)} pre-existing files")
+                if flattened:
+                    self.status_changed.emit(f"Flattened {flattened} files from subfolders")
+                self._organize_collected(existing)
+            for f in folders:
+                self._preparing.discard(_path_key(f))
+            if self._file_check_timer is None:
+                self._file_check_timer = QTimer(self)
+                self._file_check_timer.timeout.connect(self._on_check_timer)
+                self._file_check_timer.start(3000)  # Check every 3 seconds
+            self.status_changed.emit(f"Watching {len(self.watched_folders)} folder(s) for new files...")
+
+        self._off_ui(look, then)
+
     def stop(self) -> None:
         """Stop watching folders."""
         if not self._is_running:
             return
-        
+
         self._is_running = False
-        
+        self._run_gen += 1                     # (background steps of this run stop at their next check)
+        self._preparing.clear()
+        self._tick_busy = False
+        for thread, _then, _gen in list(self._bg.values()):
+            if not thread.wait(1500):
+                self._bg_retired.append(thread)
+        self._bg.clear()
+
         if self._file_check_timer:
             self._file_check_timer.stop()
             self._file_check_timer = None
@@ -727,17 +997,20 @@ class AutoOrganizeWatcher(QObject):
                 continue  # Skip root level files
             
             for file_name in files:
-                if self._should_ignore(file_name):
+                file_path = os.path.join(root, file_name)
+                # Full path: pinned files, and anything inside an app / code project, stay put
+                if self._should_ignore(file_path, folder_path):
                     continue
-                files_to_move.append(os.path.join(root, file_name))
-        
+                files_to_move.append(file_path)
+
         if not files_to_move:
             logger.info(f"No files to flatten in {folder_path}")
             return 0
-        
+
         self.status_changed.emit(f"Flattening {len(files_to_move)} files...")
-        
+
         # Move files to root, handling name conflicts
+        flattened = []     # (from, to): goes in History
         for file_path in files_to_move:
             try:
                 file_name = os.path.basename(file_path)
@@ -753,6 +1026,7 @@ class AutoOrganizeWatcher(QObject):
                 
                 shutil.move(file_path, dest_path)
                 moved_count += 1
+                flattened.append((file_path, dest_path))
                 logger.info(f"Flattened: {file_path} -> {dest_path}")
 
                 # Keep the DB in sync with disk. Without this the AI-plan
@@ -774,7 +1048,9 @@ class AutoOrganizeWatcher(QObject):
             except Exception as e:
                 logger.error(f"Error flattening {file_path}: {e}")
                 self.error_occurred.emit(file_path, str(e))
-        
+
+        _record_auto_moves(folder_path, flattened)
+
         # Clean up empty subdirectories, preserving any folders the user
         # explicitly named in their instruction.
         self._cleanup_empty_folders(folder_path, protected_names=protected)
@@ -881,6 +1157,10 @@ class AutoOrganizeWatcher(QObject):
             if os.path.basename(dirpath).lower() in protected:
                 continue
 
+            # Never inside an app, a library or a code project (an empty .git\refs\tags is part of a repository)
+            if self._inside_protected(os.path.join(dirpath, '_'), root_folder):
+                continue
+
             try:
                 # Check if folder is empty (no files or subdirs)
                 if not os.listdir(dirpath):
@@ -892,11 +1172,14 @@ class AutoOrganizeWatcher(QObject):
 
         return removed_count
     
-    def _should_ignore(self, file_path: str) -> bool:
+    def _should_ignore(self, file_path: str, root: Optional[str] = None) -> bool:
         """Check if a file should be ignored.
-        
+
         Args:
-            file_path: Full path or just filename to check
+            file_path: Full path or just filename to check. Only a full path can be
+                checked for pins and for being inside an app / a code project.
+            root: The folder being scanned, if the caller knows it (else the
+                watched folder holding the file is used).
         """
         from app.core.settings import settings
         
@@ -924,9 +1207,60 @@ class AutoOrganizeWatcher(QObject):
         if settings.should_exclude(file_path):
             logger.debug(f"Excluding {file_path} (matches user exclusion pattern)")
             return True
-        
+
+        # Never reach inside an app, a library or a code project in a watched folder
+        return self._inside_protected(file_path, root)
+
+    def _inside_protected(self, file_path: str, root: Optional[str] = None) -> bool:
+        """organize_reader.protected (the same rule as organize by voice) for a file under `root`, or under
+        the watched folder holding it."""
+        if not os.path.dirname(file_path):          # (a bare name: the caller has no location yet)
+            return False
+        path = os.path.normpath(file_path)
+        key = _path_key(path)
+        for folder in ([root] if root else list(self.watched_folders)):
+            top = os.path.normpath(folder)
+            if not key.startswith(_path_key(top).rstrip(os.sep) + os.sep):
+                continue
+            try:
+                from app.core.organize_reader import protected
+                return bool(protected(path, top, self._fresh_protected_cache()))
+            except Exception as e:
+                logger.warning(f"Couldn't check whether {path} is inside a project or an app ({e}): leaving it alone")
+                return True
         return False
-    
+
+    def _fresh_protected_cache(self) -> Dict[str, bool]:
+        """{folder: is it off-limits}, shared by every check; forgotten each minute (a project can appear later)."""
+        now = time.monotonic()
+        if now - self._protected_at > 60:
+            self._protected_cache, self._protected_at = {}, now
+        return self._protected_cache
+
+    def _prune_walk(self, root: str, dirs: List[str]) -> None:
+        """For os.walk, in place: don't descend into hidden folders, nor apps / libraries / code projects
+        (nothing inside them may move, so there's nothing there to look at)."""
+        try:
+            from app.core.organize_reader import _dir_is_off_limits
+        except Exception:
+            _dir_is_off_limits = None
+        cache = self._fresh_protected_cache()
+        kept = []
+        for d in dirs:
+            if d.startswith('.'):
+                continue
+            p = os.path.join(root, d)
+            if _dir_is_off_limits is not None:
+                if p not in cache:
+                    try:
+                        cache[p] = bool(_dir_is_off_limits(p))
+                    except Exception:
+                        cache[p] = True
+                if cache[p]:
+                    continue
+            kept.append(d)
+        dirs[:] = kept
+
     def _get_instruction_for_folder(self, folder_path: str) -> str:
         """Get the CURRENT instruction for a specific folder.
 
@@ -962,7 +1296,13 @@ class AutoOrganizeWatcher(QObject):
     def _collect_existing_folders(self, folder_path: str,
                                   max_depth: int = 3,
                                   max_total: int = 200) -> List[str]:
-        """Collect existing subfolders inside ``folder_path`` for As-Is mode.
+        """Existing subfolders for As-Is mode (kept for older callers): see _usable_subfolders."""
+        return self._usable_subfolders(folder_path, max_depth=max_depth, max_total=max_total)
+
+    @staticmethod
+    def _usable_subfolders(folder_path: str, max_depth: int = 3, max_total: int = 200) -> List[str]:
+        """The subfolders files may be sorted into (Organize As-Is): never a code project, an app or a
+        library (organize_reader._dir_is_off_limits), and nothing inside one.
 
         Walks up to ``max_depth`` levels deep so nested folders like
         'Photos/Vacation' are also valid destinations — not just the immediate
@@ -974,6 +1314,13 @@ class AutoOrganizeWatcher(QObject):
         deep listings produce noisy AI plans and the user is likely using
         nested folders as scaffolding, not destinations.
         """
+        from app.core.organize_reader import _dir_is_off_limits
+        skip = AutoOrganizeWatcher._SKIP_DIR_NAMES
+
+        def usable(parent: str, name: str) -> bool:
+            return (not name.startswith('.') and name not in skip
+                    and not _dir_is_off_limits(os.path.join(parent, name)))
+
         folder_path = os.path.normpath(folder_path)
         if not os.path.isdir(folder_path):
             return []
@@ -986,12 +1333,9 @@ class AutoOrganizeWatcher(QObject):
                 if depth + 1 > max_depth:
                     dirs[:] = []
                     continue
-                # Prune hidden + known system/scaffolding folders in-place so we
+                # Prune hidden, scaffolding and off-limits folders in-place so we
                 # neither include them nor descend into them.
-                dirs[:] = [
-                    d for d in dirs
-                    if not d.startswith('.') and d not in self._SKIP_DIR_NAMES
-                ]
+                dirs[:] = [d for d in dirs if usable(root, d)]
                 for d in dirs:
                     sub_rel = os.path.relpath(os.path.join(root, d), folder_path)
                     out.append(sub_rel.replace(os.sep, '/'))
@@ -1007,9 +1351,7 @@ class AutoOrganizeWatcher(QObject):
             out = []
             try:
                 for item in os.listdir(folder_path):
-                    if item.startswith('.') or item in self._SKIP_DIR_NAMES:
-                        continue
-                    if os.path.isdir(os.path.join(folder_path, item)):
+                    if os.path.isdir(os.path.join(folder_path, item)) and usable(folder_path, item):
                         out.append(item)
             except OSError:
                 pass
@@ -1023,19 +1365,22 @@ class AutoOrganizeWatcher(QObject):
     # not known in the DB) are the only ones that get organized.
     # ─────────────────────────────────────────────────────────────────────
 
-    def _compute_file_hash(self, path: str) -> Optional[str]:
+    def _compute_file_hash(self, path: str, gen: Optional[int] = None) -> Optional[str]:
         """SHA-256 of the file's bytes (1 MiB chunks). MUST match the hash
         scheme the indexer uses (search.py uses hashlib.sha256 + 1 MiB) so a
         baseline hash equals the DB-stored content_hash for that file. Returns
-        None on read error.
+        None on read error. `gen` (a background step): gives up between chunks once the watcher is stopped.
         """
         import hashlib
         try:
             h = hashlib.sha256()
             with open(path, 'rb') as fh:
                 for chunk in iter(lambda: fh.read(1024 * 1024), b''):
+                    self._check_gen(gen)
                     h.update(chunk)
             return h.hexdigest()
+        except _Cancelled:
+            raise
         except Exception as e:
             logger.warning(f"_compute_file_hash failed for {path}: {e}")
             return None
@@ -1045,12 +1390,30 @@ class AutoOrganizeWatcher(QObject):
         — but ONLY when the folder's action is Organize New Only (3). Reuses
         the indexer's stored content_hash whenever possible so large media
         folders don't get re-hashed from disk. Stores the resulting set on
-        ``self._baseline_hashes[normpath(folder)]``.
+        ``self._baseline_hashes[normpath(folder)]``. (start() / add_folder_live do this in the background:
+        _compute_baseline; this is the same, here and now.)
         """
+        baseline = self._compute_baseline(folder)
+        if baseline is not None:
+            self._baseline_hashes[os.path.normpath(folder)] = baseline
+
+    def _merge_look(self, folder: str, baseline: Optional[Set[str]], snapshot) -> None:
+        """On the UI thread: what a background look through `folder` found becomes the watcher's state."""
+        folder = os.path.normpath(folder)
+        if baseline is not None:
+            self._baseline_hashes[folder] = baseline
+        paths, arrived = snapshot
+        self._processed_files.update(p for p in paths if p not in self._pending_files)
+        if arrived:
+            logger.info(f"{arrived} file(s) in {folder} arrived while Filect was closed: they count as new")
+
+    def _compute_baseline(self, folder: str, gen: Optional[int] = None) -> Optional[Set[str]]:
+        """The Organize New Only baseline for `folder` (see _capture_baseline), or None if the folder isn't
+        Organize New Only (or can't be walked). Safe off the UI thread: changes nothing on the watcher."""
         from app.core.settings import settings
         ORGANIZE_NEW_ONLY = 3
         if settings.get_auto_organize_action(folder) != ORGANIZE_NEW_ONLY:
-            return
+            return None
 
         try:
             from app.core.database import file_index
@@ -1061,20 +1424,29 @@ class AutoOrganizeWatcher(QObject):
         baseline: Set[str] = set()
         hashed_from_disk = 0
         total = 0
+        arrived = 0
+        since = self._watching_since(folder)
+        known = self._indexed_hashes_under(folder)     # (one query, not one per file: 20,000 took ~20 s)
 
         try:
             for root, dirs, files in os.walk(folder):
+                self._check_gen(gen)
                 # Skip hidden subdirs entirely
                 dirs[:] = [d for d in dirs if not d.startswith('.')]
                 for fn in files:
-                    if fn.startswith('.') or self._should_ignore(fn):
-                        continue
                     path = os.path.join(root, fn)
+                    if fn.startswith('.') or self._should_ignore(path, folder):
+                        continue
+                    if _arrived_since(path, since):
+                        arrived += 1
+                        continue    # arrived after it was turned on (Filect was closed): that's a new file
                     total += 1
                     # Prefer the indexer's stored hash to avoid re-reading
                     # large media files from disk.
                     h: Optional[str] = None
-                    if file_index is not None:
+                    if known is not None:
+                        h = known.get(_path_key(path))
+                    elif file_index is not None:
                         try:
                             row = file_index.get_file_by_path(path)
                             if row:
@@ -1082,23 +1454,127 @@ class AutoOrganizeWatcher(QObject):
                         except Exception:
                             h = None
                     if not h:
-                        h = self._compute_file_hash(path)
+                        h = self._compute_file_hash(path, gen)
                         if h:
                             hashed_from_disk += 1
                     if h:
                         baseline.add(h)
         except OSError as e:
             logger.warning(f"[OrganizeNewOnly] Walk failed for baseline of {folder}: {e}")
-            return
+            return None
 
-        self._baseline_hashes[folder] = baseline
         logger.info(
             f"[OrganizeNewOnly] Captured baseline of {total} existing file(s) "
             f"for {folder} ({hashed_from_disk} hashed from disk, "
-            f"{total - hashed_from_disk} reused from DB)"
+            f"{total - hashed_from_disk} reused from DB"
+            + (f"; {arrived} created after it was turned on count as new" if arrived else "") + ")"
         )
+        return baseline
 
-    def _filter_genuinely_new_files(self, folder: str, candidate_paths: List[str]) -> List[str]:
+    @staticmethod
+    def _watching_since(folder: str) -> float:
+        """When this folder was turned on (settings.auto_organize_watching_since), 0 if unknown."""
+        try:
+            from app.core.settings import settings
+            return float(settings.auto_organize_watching_since(folder) or 0)
+        except Exception:
+            return 0.0
+
+    @staticmethod
+    def _skip_known(folder: str) -> bool:
+        """settings.auto_organize_skip_known: an auto-organize day was reverted here."""
+        try:
+            from app.core.settings import settings
+            return bool(settings.auto_organize_skip_known(folder))
+        except Exception:
+            return False
+
+    @staticmethod
+    def _indexed_paths_under(folder: str) -> Optional[Set[str]]:
+        """Every path the index holds under `folder` (normcase), in one query. None if it can't be read."""
+        import sqlite3
+        try:
+            from app.core.database import file_index
+            prefix = folder.rstrip('\\/') + os.sep
+            like = prefix.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_') + '%'
+            conn = sqlite3.connect(file_index.db_path)
+            try:
+                rows = conn.execute("SELECT file_path FROM files WHERE file_path LIKE ? ESCAPE '\\'", (like,))
+                return {_path_key(r[0]) for r in rows if r[0]}
+            finally:
+                conn.close()
+        except Exception as e:
+            logger.warning(f"Couldn't read the index for {folder}: {e}")
+            return None
+
+    @staticmethod
+    def _indexed_hashes_under(folder: str) -> Optional[Dict[str, str]]:
+        """{path (normcase): content_hash} for every file the index holds under `folder`, in one query.
+        None if it can't be read (the caller then asks per file)."""
+        import sqlite3
+        try:
+            from app.core.database import file_index
+            prefix = folder.rstrip('\\/') + os.sep
+            like = prefix.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_') + '%'
+            conn = sqlite3.connect(file_index.db_path)
+            try:
+                rows = conn.execute("SELECT file_path, content_hash FROM files WHERE file_path LIKE ? ESCAPE '\\'",
+                                    (like,))
+                return {_path_key(p): h for p, h in rows if p and h}
+            finally:
+                conn.close()
+        except Exception as e:
+            logger.warning(f"Couldn't read the index's hashes for {folder}: {e}")
+            return None
+
+    def _snapshot_existing(self, folder: str) -> None:
+        """Count every file already in `folder` (root AND subfolders) as known, so the periodic
+        checker only fires on files added later. Pre-existing files are either
+        already organized (sitting in their subfolders) or were left in place
+        intentionally — either way the watcher shouldn't keep re-processing them
+        every cycle.
+
+        Except a file created after the folder was turned on (watching_since) that
+        the index doesn't hold at that path: it arrived while Filect was closed, so
+        it's new and gets sorted (without this, Organize New Only never sorted
+        anything that came in while the app was closed). Files the watcher already
+        sorted are indexed at their new path, so they stay known. A file being
+        debounced right now (add_folder_live) is left to the periodic check.
+        (start() / add_folder_live do this in the background: _compute_snapshot; this is the same, here and now.)
+        """
+        self._merge_look(folder, None, self._compute_snapshot(folder))
+
+    def _compute_snapshot(self, folder: str, gen: Optional[int] = None):
+        """(paths already in `folder` that count as known, how many arrived while Filect was closed) — see
+        _snapshot_existing. Safe off the UI thread: changes nothing on the watcher."""
+        folder = os.path.normpath(folder)
+        paths: Set[str] = set()
+        if not os.path.isdir(folder):
+            return paths, 0
+        since = self._watching_since(folder)
+        indexed: Optional[Set[str]] = None      # (read once, only if some file is newer than watching_since)
+        looked = False
+        arrived = 0
+        for root, dirs, files in os.walk(folder):
+            self._check_gen(gen)
+            # Skip hidden subdirs (and apps / code projects) in-place
+            self._prune_walk(root, dirs)
+            for fn in files:
+                path = os.path.normpath(os.path.join(root, fn))
+                if self._should_ignore(path, folder):
+                    continue
+                if _arrived_since(path, since):
+                    if not looked:
+                        indexed, looked = self._indexed_paths_under(folder), True
+                    if indexed is not None and _path_key(path) not in indexed:
+                        arrived += 1
+                        continue
+                paths.add(path)
+        return paths, arrived
+
+    def _filter_genuinely_new_files(self, folder: str, candidate_paths: List[str],
+                                    hashes: Optional[Dict[str, str]] = None,
+                                    known: Optional[Dict[str, Optional[dict]]] = None) -> List[str]:
         """For an Organize New Only folder: return only the candidate paths
         that are genuinely new (their hash is not in the baseline AND the
         file_index doesn't already know their content). Files that are
@@ -1107,12 +1583,17 @@ class AutoOrganizeWatcher(QObject):
         re-evaluates them this session; if a pre-existing file's hash is
         already known to the DB at a different path, its DB record's path
         is also updated so the index stays consistent after a move/rename.
-        For non-action-3 folders, returns ``candidate_paths`` unchanged.
+
+        Also applies to a folder with ``skip_known`` (an auto-organize day was
+        reverted there): a file the index already knows stays where it is, so
+        what was put back isn't sorted again. New files still are.
+        For other folders, returns ``candidate_paths`` unchanged.
         """
         from app.core.settings import settings
         ORGANIZE_NEW_ONLY = 3
         folder_n = os.path.normpath(folder)
-        if settings.get_auto_organize_action(folder_n) != ORGANIZE_NEW_ONLY:
+        skip_known = self._skip_known(folder_n)
+        if settings.get_auto_organize_action(folder_n) != ORGANIZE_NEW_ONLY and not skip_known:
             return list(candidate_paths)
 
         baseline = self._baseline_hashes.get(folder_n, set())
@@ -1121,16 +1602,21 @@ class AutoOrganizeWatcher(QObject):
         except Exception:
             file_index = None
 
+        looked_up = known or {}
         kept: List[str] = []
         for path in candidate_paths:
             try:
-                h = self._compute_file_hash(path)
+                # (`hashes`: worked out in the background by the periodic check — a big new download isn't
+                # read again here, on the UI thread)
+                h = hashes.get(path) if hashes and hashes.get(path) else self._compute_file_hash(path)
             except Exception:
                 kept.append(path)  # be lenient — if we can't hash, treat as new
                 continue
             is_baseline = bool(h) and h in baseline
             known = None
-            if not is_baseline and h and file_index is not None:
+            if not is_baseline and h and path in looked_up:
+                known = looked_up[path]          # (looked up in the background, with the hash)
+            elif not is_baseline and h and file_index is not None:
                 try:
                     known = file_index.get_file_by_hash(h)
                 except Exception:
@@ -1159,15 +1645,28 @@ class AutoOrganizeWatcher(QObject):
             # file in place forever (seen in the 22:52:02 log for
             # animal-hero-tiger_0.jpg). Treat as new in that case so the
             # AI plan can still route it.
+            # Known from somewhere ELSE means you just brought it in (dragged, copied or downloaded again), so it's
+            # new to THIS folder. Only a file that was already inside this folder (one you moved around yourself)
+            # stays where you put it. (Mac bug 37: a dragged-in video was silently left alone.)
+            if known is not None and not _is_inside(known.get('file_path') or '', folder_n):
+                logger.info(f"[OrganizeNewOnly] '{os.path.basename(path)}' is known from another folder - "
+                            "new to this one")
+                known = None
             if known is not None:
                 stored = known.get('file_path') or ''
-                if stored and os.path.normpath(stored) != np:
-                    try:
-                        file_index.update_file_path(known['id'], np)
-                    except Exception as e:
-                        logger.warning(f"[OrganizeNewOnly] Could not update DB path: {e}")
+                moved_here = bool(stored) and _path_key(stored) != _path_key(np)
+                # skip_known: known at this very path is known too (a file put back by a
+                # revert), unless this watcher indexed it itself (the race described above).
+                known_here = skip_known and not moved_here and _path_key(np) not in self._indexed_here
+                if moved_here or known_here:
+                    if moved_here:
+                        try:
+                            file_index.update_file_path(known['id'], np)
+                        except Exception as e:
+                            logger.warning(f"[OrganizeNewOnly] Could not update DB path: {e}")
                     logger.info(
-                        f"[OrganizeNewOnly] '{os.path.basename(path)}' already known (moved) - leaving in place"
+                        f"[OrganizeNewOnly] '{os.path.basename(path)}' already known "
+                        f"({'moved' if moved_here else 'skip_known'}) - leaving in place"
                     )
                     self._left_in_place_paths.add(np.lower())
                     self._processed_files.add(np)
@@ -1184,7 +1683,7 @@ class AutoOrganizeWatcher(QObject):
         from app.core.settings import settings
         ORGANIZE_AS_IS = 2
         if settings.get_auto_organize_action(folder_path) == ORGANIZE_AS_IS:
-            return self._collect_existing_folders(folder_path)
+            return self._usable_subfolders(folder_path)
         return None
     
     def _organize_existing_files(self) -> None:
@@ -1194,13 +1693,19 @@ class AutoOrganizeWatcher(QObject):
         skipped here — by contract those folders' pre-existing files must
         stay exactly where they are, and only files added AFTER the watcher
         starts get organized (the periodic scan in ``_check_for_new_files``
-        handles those via the baseline filter).
+        handles those via the baseline filter). (start() does this in the background: _collect_existing, then
+        _organize_collected; this is the same, here and now.)
         """
+        self._organize_collected(self._collect_existing([os.path.normpath(f) for f in self.watched_folders]))
+
+    def _collect_existing(self, folders: List[str], gen: Optional[int] = None) -> Dict[str, tuple]:
+        """{folder: (its files to organize, its existing folders if As-Is)} for an organize-existing pass —
+        Organize New Only folders left out. Safe off the UI thread: changes nothing on the watcher."""
         from app.core.settings import settings
         ORGANIZE_NEW_ONLY = 3
-        all_files = []
-
-        for folder in self.watched_folders:
+        out: Dict[str, tuple] = {}
+        catch_up = self.catch_up_since
+        for folder in folders:
             folder = os.path.normpath(folder)
             if not os.path.isdir(folder):
                 continue
@@ -1211,67 +1716,78 @@ class AutoOrganizeWatcher(QObject):
                 )
                 continue
 
+            files_here: List[str] = []
             # Get ALL files in this folder AND subfolders
             for root, dirs, files in os.walk(folder):
+                self._check_gen(gen)
                 # Skip hidden directories
                 dirs[:] = [d for d in dirs if not d.startswith('.')]
-                
+
                 for item in files:
-                    if self._should_ignore(item):
-                        continue
-                    
                     item_path = os.path.join(root, item)
-                    
+                    if self._should_ignore(item_path, folder):
+                        continue
+
                     # Check catch-up filter
-                    if self.catch_up_since:
+                    if catch_up:
                         try:
                             mtime = datetime.fromtimestamp(os.path.getmtime(item_path))
-                            if mtime < self.catch_up_since:
+                            if mtime < catch_up:
                                 continue  # Skip files older than catch-up time
                         except Exception:
                             pass
-                    
-                    all_files.append((item_path, folder))
-        
-        if not all_files:
+
+                    files_here.append(item_path)
+            if files_here:
+                out[folder] = (files_here, self._get_existing_folders_if_as_is(folder))
+        return out
+
+    def _organize_collected(self, collected: Dict[str, tuple]) -> None:
+        """On the UI thread: hand what _collect_existing found to the planner, folder by folder."""
+        total = sum(len(files) for files, _ in collected.values())
+        if not total:
             self.status_changed.emit("No existing files to organize")
             return
-        
-        self.status_changed.emit(f"Organizing {len(all_files)} existing files...")
-        logger.info(f"Found {len(all_files)} existing files to organize")
-        
-        # Group files by their source folder
-        files_by_folder: Dict[str, List[str]] = defaultdict(list)
-        for file_path, folder in all_files:
-            files_by_folder[folder].append(file_path)
-        
+
+        self.status_changed.emit(f"Organizing {total} existing files...")
+        logger.info(f"Found {total} existing files to organize")
+
         # Process each folder with its instruction
-        for folder, files in files_by_folder.items():
+        for folder, (files, existing_folders) in collected.items():
             instruction = self._get_instruction_for_folder(folder)
-            existing_folders = self._get_existing_folders_if_as_is(folder)
             self._process_files_with_ai(files, folder, instruction, existing_folders)
-    
+
     def _organize_existing_files_with_options(self, flatten_first: bool = False) -> None:
         """
         Organize existing files with options.
-        Called when instructions are changed while watching.
-        
+        Called when instructions are changed while watching. Flattening and looking through the folders
+        happen in the background (a big folder froze the window).
+
         Args:
             flatten_first: If True, flatten folder structure before organizing
         """
         # Clear the catch-up filter so ALL files are processed, not just recent ones
         self.catch_up_since = None
-        
-        if flatten_first:
-            total_flattened = 0
-            for folder in self.watched_folders:
-                count = self.flatten_folder(folder, instruction=self.folder_instructions.get(folder, ''))
-                total_flattened += count
-            if total_flattened > 0:
-                self.status_changed.emit(f"Flattened {total_flattened} files, now organizing...")
-        
-        # Now organize
-        self._organize_existing_files()
+        folders = [os.path.normpath(f) for f in self.watched_folders]
+        gen = self._run_gen
+
+        def work():
+            flattened = 0
+            if flatten_first:
+                for folder in folders:
+                    self._check_gen(gen)
+                    flattened += self.flatten_folder(folder, instruction=self.folder_instructions.get(folder, ''))
+            return flattened, self._collect_existing(folders, gen)
+
+        def then(result, error):
+            if result is None:
+                return
+            flattened, collected = result
+            if flattened > 0:
+                self.status_changed.emit(f"Flattened {flattened} files, now organizing...")
+            self._organize_collected(collected)
+
+        self._off_ui(work, then)
     
     def organize_folders_with_per_folder_options(self, folder_choices: Dict[str, int]) -> None:
         """
@@ -1305,158 +1821,186 @@ class AutoOrganizeWatcher(QObject):
                 folders_to_organize.append(folder_path)
             # CONTINUE_WATCHING = do nothing for this folder
         
-        # Step 1: Flatten folders that need it
-        if folders_to_reorganize:
-            total_flattened = 0
-            for folder in folders_to_reorganize:
-                count = self.flatten_folder(folder, instruction=self.folder_instructions.get(folder, ''))
-                total_flattened += count
-            if total_flattened > 0:
-                self.status_changed.emit(f"Flattened {total_flattened} files from {len(folders_to_reorganize)} folder(s)...")
-        
-        # Combine all folders that need organizing
+        # Steps 1-2 walk (and, for Re-organize All, move) every file: in the background (a big folder froze the
+        # window), then the planner gets each folder's files.
         all_folders_to_organize = folders_to_reorganize + folders_to_organize
-        
         if not all_folders_to_organize:
             self.status_changed.emit("No folders selected for organizing")
             return
-        
-        # Step 2: Collect files from selected folders and track existing subfolders for "Organize As-Is"
-        all_files = []
-        existing_folders_by_parent: Dict[str, List[str]] = {}  # folder -> list of existing subfolders
-        
-        for folder in folders_to_organize:  # Only for "Organize As-Is" folders
-            folder = os.path.normpath(folder)
-            # Pre-create folders the user explicitly named in their instruction
-            # (e.g. "put everything else in a folder called everything else").
-            # Without this, As-Is mode tells the AI "ONLY use existing folders"
-            # but those user-named folders DON'T exist yet — the AI then
-            # proposes them anyway and the fuzzy-match fallback can dump
-            # files into the wrong place. Pre-creating closes that gap.
-            try:
-                instr = self._get_instruction_for_folder(folder) or ''
-                if instr:
-                    self._ensure_named_folders_exist(folder, instr)
-            except Exception as e:
-                logger.debug(f"As-Is: could not pre-create user-named folders for {folder}: {e}")
-            existing_subfolders = self._collect_existing_folders(folder)
-            existing_folders_by_parent[folder] = existing_subfolders
-            logger.info(f"Organize As-Is for {folder}: existing folders = {existing_subfolders}")
-        
-        for folder in all_folders_to_organize:
-            folder = os.path.normpath(folder)
-            if not os.path.isdir(folder):
-                continue
-            
-            # Get ALL files in this folder AND subfolders
-            for root, dirs, files in os.walk(folder):
-                # Skip hidden directories
-                dirs[:] = [d for d in dirs if not d.startswith('.')]
-                
-                for item in files:
-                    if self._should_ignore(item):
-                        continue
-                    
-                    item_path = os.path.join(root, item)
-                    all_files.append((item_path, folder))
-        
-        if not all_files:
-            self.status_changed.emit("No files to organize in selected folders")
-            return
-        
-        self.status_changed.emit(f"Organizing {len(all_files)} files from {len(all_folders_to_organize)} folder(s)...")
-        logger.info(f"Per-folder organize: {len(all_files)} files from {len(all_folders_to_organize)} folders")
-        
-        # Group files by their source folder
-        files_by_folder: Dict[str, List[str]] = defaultdict(list)
-        for file_path, folder in all_files:
-            files_by_folder[folder].append(file_path)
-        
-        # Process each folder with its instruction
-        for folder, files in files_by_folder.items():
-            instruction = self._get_instruction_for_folder(folder)
-            # Pass existing folders for "Organize As-Is" folders
-            existing_folders = existing_folders_by_parent.get(folder)
-            self._process_files_with_ai(files, folder, instruction, existing_folders)
-    
+        gen = self._run_gen
+
+        def work():
+            # Step 1: Flatten folders that need it
+            total_flattened = 0
+            for folder in folders_to_reorganize:
+                self._check_gen(gen)
+                total_flattened += self.flatten_folder(folder, instruction=self.folder_instructions.get(folder, ''))
+
+            # Step 2: Collect files from selected folders and track existing subfolders for "Organize As-Is"
+            existing_folders_by_parent: Dict[str, List[str]] = {}  # folder -> list of existing subfolders
+            for folder in folders_to_organize:  # Only for "Organize As-Is" folders
+                folder = os.path.normpath(folder)
+                # Pre-create folders the user explicitly named in their instruction
+                # (e.g. "put everything else in a folder called everything else").
+                # Without this, As-Is mode tells the AI "ONLY use existing folders"
+                # but those user-named folders DON'T exist yet — the AI then
+                # proposes them anyway and the fuzzy-match fallback can dump
+                # files into the wrong place. Pre-creating closes that gap.
+                try:
+                    instr = self._get_instruction_for_folder(folder) or ''
+                    if instr:
+                        self._ensure_named_folders_exist(folder, instr)
+                except Exception as e:
+                    logger.debug(f"As-Is: could not pre-create user-named folders for {folder}: {e}")
+                existing_subfolders = self._usable_subfolders(folder)
+                existing_folders_by_parent[folder] = existing_subfolders
+                logger.info(f"Organize As-Is for {folder}: existing folders = {existing_subfolders}")
+
+            files_by_folder: Dict[str, List[str]] = defaultdict(list)
+            for folder in all_folders_to_organize:
+                folder = os.path.normpath(folder)
+                if not os.path.isdir(folder):
+                    continue
+                # Get ALL files in this folder AND subfolders
+                for root, dirs, files in os.walk(folder):
+                    self._check_gen(gen)
+                    # Skip hidden directories
+                    dirs[:] = [d for d in dirs if not d.startswith('.')]
+                    for item in files:
+                        item_path = os.path.join(root, item)
+                        if self._should_ignore(item_path, folder):
+                            continue
+                        files_by_folder[folder].append(item_path)
+            return total_flattened, existing_folders_by_parent, dict(files_by_folder)
+
+        def then(result, error):
+            if result is None:
+                return
+            total_flattened, existing_folders_by_parent, files_by_folder = result
+            if total_flattened > 0:
+                self.status_changed.emit(
+                    f"Flattened {total_flattened} files from {len(folders_to_reorganize)} folder(s)...")
+            total = sum(len(f) for f in files_by_folder.values())
+            if not total:
+                self.status_changed.emit("No files to organize in selected folders")
+                return
+            self.status_changed.emit(f"Organizing {total} files from {len(all_folders_to_organize)} folder(s)...")
+            logger.info(f"Per-folder organize: {total} files from {len(all_folders_to_organize)} folders")
+            # Process each folder with its instruction
+            for folder, files in files_by_folder.items():
+                instruction = self._get_instruction_for_folder(folder)
+                # Pass existing folders for "Organize As-Is" folders
+                existing_folders = existing_folders_by_parent.get(folder)
+                self._process_files_with_ai(files, folder, instruction, existing_folders)
+
+        self._off_ui(work, then)
+
     def organize_single_folder(self, folder_path: str, flatten_first: bool = False) -> None:
         """
-        Organize a single folder with the given option.
-        
+        Organize a single folder with the given option. Flattening and looking through the folder happen in the
+        background (a big folder froze the window); then the planner gets its files.
+
         Args:
             folder_path: Path to the folder to organize
             flatten_first: If True, flatten folder structure before organizing.
                           If False (Organize As-Is), only use existing folders.
         """
         folder_path = os.path.normpath(folder_path)
-        
+
         if not os.path.isdir(folder_path):
             logger.warning(f"Cannot organize - not a directory: {folder_path}")
             return
-        
+
         # Clear the catch-up filter so ALL files are processed
         self.catch_up_since = None
-        
+
         logger.info(f"Organizing single folder: {folder_path}, flatten={flatten_first}")
-        
-        # Step 1: Flatten if requested
-        if flatten_first:
-            count = self.flatten_folder(folder_path, instruction=self.folder_instructions.get(folder_path, ''))
+        gen = self._run_gen
+        instr_now = self.folder_instructions.get(folder_path, '') or ''
+
+        def work():
+            # Step 1: Flatten if requested
+            count = 0
+            if flatten_first:
+                count = self.flatten_folder(folder_path, instruction=instr_now)
+
+            # Step 2: Get existing folder structure (for "Organize As-Is" mode).
+            # Includes nested subfolders (up to a sensible depth) so the AI can route
+            # files directly into Photos/Vacation/ instead of just Photos/.
+            existing_folders = []
+            if not flatten_first:
+                # Pre-create folders the user explicitly named in their instruction
+                # so the AI sees them in the existing-folders list. Without this,
+                # As-Is tells the AI "ONLY use existing folders" but the user-named
+                # destinations (e.g. "everything else") don't exist yet — the AI
+                # then invents them anyway and the fuzzy-match fallback can dump
+                # files into the wrong place (the bug seen on 2026-05-29 01:29).
+                try:
+                    if instr_now:
+                        self._ensure_named_folders_exist(folder_path, instr_now)
+                except Exception as e:
+                    logger.debug(f"As-Is: could not pre-create user-named folders for {folder_path}: {e}")
+                existing_folders = self._usable_subfolders(folder_path)
+                logger.info(f"Organize As-Is mode: existing folders = {existing_folders}")
+
+            # Step 3: Collect files from this folder
+            all_files = []
+            for root, dirs, files in os.walk(folder_path):
+                self._check_gen(gen)
+                # Skip hidden directories
+                dirs[:] = [d for d in dirs if not d.startswith('.')]
+                for item in files:
+                    item_path = os.path.join(root, item)
+                    if self._should_ignore(item_path, folder_path):
+                        continue
+                    all_files.append(item_path)
+            return count, existing_folders, all_files
+
+        def then(result, error):
+            if result is None:
+                return
+            count, existing_folders, all_files = result
             if count > 0:
                 self.status_changed.emit(f"Flattened {count} files, now organizing...")
-        
-        # Step 2: Get existing folder structure (for "Organize As-Is" mode).
-        # Includes nested subfolders (up to a sensible depth) so the AI can route
-        # files directly into Photos/Vacation/ instead of just Photos/.
-        existing_folders = []
-        if not flatten_first:
-            # Pre-create folders the user explicitly named in their instruction
-            # so the AI sees them in the existing-folders list. Without this,
-            # As-Is tells the AI "ONLY use existing folders" but the user-named
-            # destinations (e.g. "everything else") don't exist yet — the AI
-            # then invents them anyway and the fuzzy-match fallback can dump
-            # files into the wrong place (the bug seen on 2026-05-29 01:29).
-            try:
-                instr = self.folder_instructions.get(folder_path, '') or ''
-                if instr:
-                    self._ensure_named_folders_exist(folder_path, instr)
-            except Exception as e:
-                logger.debug(f"As-Is: could not pre-create user-named folders for {folder_path}: {e}")
-            existing_folders = self._collect_existing_folders(folder_path)
-            logger.info(f"Organize As-Is mode: existing folders = {existing_folders}")
-        
-        # Step 3: Collect files from this folder
-        all_files = []
-        for root, dirs, files in os.walk(folder_path):
-            # Skip hidden directories
-            dirs[:] = [d for d in dirs if not d.startswith('.')]
-            
-            for item in files:
-                if self._should_ignore(item):
-                    continue
-                
-                item_path = os.path.join(root, item)
-                all_files.append(item_path)
-        
-        if not all_files:
-            self.status_changed.emit(f"No files to organize in {os.path.basename(folder_path)}")
-            return
-        
-        self.status_changed.emit(f"Organizing {len(all_files)} files in {os.path.basename(folder_path)}...")
-        logger.info(f"Single folder organize: {len(all_files)} files in {folder_path}")
-        
-        # Process files with AI
-        instruction = self._get_instruction_for_folder(folder_path)
-        use_existing_only = not flatten_first  # Organize As-Is = only use existing folders
-        self._process_files_with_ai(all_files, folder_path, instruction, existing_folders if use_existing_only else None)
-    
+            if not all_files:
+                self.status_changed.emit(f"No files to organize in {os.path.basename(folder_path)}")
+                return
+            self.status_changed.emit(f"Organizing {len(all_files)} files in {os.path.basename(folder_path)}...")
+            logger.info(f"Single folder organize: {len(all_files)} files in {folder_path}")
+            # Process files with AI
+            instruction = self._get_instruction_for_folder(folder_path)
+            use_existing_only = not flatten_first  # Organize As-Is = only use existing folders
+            self._process_files_with_ai(all_files, folder_path, instruction,
+                                        existing_folders if use_existing_only else None)
+
+        self._off_ui(work, then)
+
     def _check_for_new_files(self) -> None:
-        """Periodic check for new files in watched folders."""
+        """Periodic check for new files in watched folders — here and now (tests; the timer runs the same check
+        with its walk in the background: _on_check_timer)."""
         if not self._is_running:
             return
-        
-        current_time = time.time()
-        
+        plan = self._check_plan()
+        self._after_check(self._walk_for_new(plan, self._run_gen))
+
+    def _on_check_timer(self) -> None:
+        """Every 3 seconds: walk the watched folders in the background (a 20,000-file folder took 0.3-0.5 s on
+        the UI thread, every time), then decide what's new here, on the UI thread."""
+        if not self._is_running or self._tick_busy:
+            return
+        plan = self._check_plan()
+        self._tick_busy = True
+        gen = self._run_gen
+
+        def then(result, error):
+            self._tick_busy = False
+            if result is not None:
+                self._after_check(result)
+
+        self._off_ui(lambda: self._walk_for_new(plan, gen), then)
+
+    def _check_plan(self) -> dict:
+        """On the UI thread: what this check looks at (a copy, so the walk can run elsewhere)."""
         # Periodic cleanup of empty folders. Each watched folder's user
         # instruction may explicitly name destinations (e.g. "in a folder
         # called bears"). Those folders are PROTECTED from deletion even
@@ -1465,13 +2009,13 @@ class AutoOrganizeWatcher(QObject):
         # might place 0 files in one of them (if no files of that subject
         # exist this run), and the next cleanup tick would silently delete
         # the folder the user asked for. Saw this at 2026-05-29 02:00:25.
+        cleanup = None
         self._check_count += 1
         if self._check_count >= self._cleanup_interval:
             self._check_count = 0
+            cleanup = {}
             for folder in self.watched_folders:
                 folder = os.path.normpath(folder)
-                if not os.path.isdir(folder):
-                    continue
                 protected = set()
                 try:
                     instr = self._get_instruction_for_folder(folder) or ''
@@ -1480,18 +2024,61 @@ class AutoOrganizeWatcher(QObject):
                             protected.add(n.lower())
                 except Exception as e:
                     logger.debug(f"Periodic cleanup: could not derive protected names for {folder}: {e}")
+                cleanup[folder] = protected
+        # (a folder still being looked through isn't checked yet: everything in it would look new)
+        folders = [os.path.normpath(f) for f in self.watched_folders if _path_key(f) not in self._preparing]
+        hash_for = {f: self._needs_hash(f) for f in folders}
+        return {"folders": folders, "cleanup": cleanup, "pending": dict(self._pending_files), "now": time.time(),
+                "hash_for": hash_for, "busy": self._busy_keys()}
+
+    def _busy_keys(self) -> set:
+        """Files a batch is sorting right now, or that wait for one in the queue. Without this, a big batch's files
+        were found "new" again at every check while it ran — re-hashed, looked up and re-queued every 3 s."""
+        keys = set()
+        if self._current_worker is not None and self._current_worker.isRunning():
+            keys.update(_path_key(p) for p in self._current_batch)
+        for item in self._worker_queue:
+            if len(item) >= 4 and item[3]:
+                keys.update(_path_key(p) for p in item[3])
+        return keys
+
+    def _needs_hash(self, folder: str) -> bool:
+        """New files here are told apart from known ones by their content (Organize New Only, skip_known)."""
+        from app.core.settings import settings
+        try:
+            return settings.get_auto_organize_action(folder) == 3 or self._skip_known(folder)
+        except Exception:
+            return False
+
+    def _walk_for_new(self, plan: dict, gen: Optional[int] = None) -> dict:
+        """The heavy part of a check, safe off the UI thread (reads the watcher's sets, changes nothing on it):
+        the empty-folder cleanup when it's due, then every file not known yet, per folder; and, for a file that
+        has waited out its debounce in a folder that needs it, its content hash (a big new download is read
+        here, not on the UI thread)."""
+        if plan["cleanup"]:
+            for folder, protected in plan["cleanup"].items():
+                self._check_gen(gen)
+                if not os.path.isdir(folder):
+                    continue
                 deleted = self._cleanup_empty_folders(folder, protected_names=protected)
                 if deleted > 0:
                     logger.info(
                         f"Periodic cleanup: removed {deleted} empty folder(s) "
                         f"(protected: {sorted(protected) if protected else 'none'})"
                     )
-        
-        for folder in self.watched_folders:
-            folder = os.path.normpath(folder)
+        found: Dict[str, List[str]] = {}
+        hashes: Dict[str, str] = {}
+        known: Dict[str, Optional[dict]] = {}    # (path -> what the index knows about that content: looked up HERE,
+        try:                                     #  not per file on the UI thread — 200 lookups at once stalled it)
+            from app.core.database import file_index
+        except Exception:
+            file_index = None
+        busy = plan.get("busy") or set()
+        pending, now = plan["pending"], plan["now"]
+        for folder in plan["folders"]:
             if not os.path.isdir(folder):
                 continue
-
+            paths: List[str] = []
             try:
                 # Walk the WHOLE tree (root + subfolders) so a file dropped
                 # into a subfolder is also detected. Files that existed when
@@ -1500,44 +2087,89 @@ class AutoOrganizeWatcher(QObject):
                 # _organized_files. Anything outside both sets is genuinely
                 # new and should be routed by the current instruction.
                 for root, dirs, files in os.walk(folder):
-                    dirs[:] = [d for d in dirs if not d.startswith('.')]
+                    self._check_gen(gen)
+                    # Hidden folders, apps and code projects: never walked (nothing in them moves)
+                    self._prune_walk(root, dirs)
                     for item in files:
                         item_path = os.path.normpath(os.path.join(root, item))
 
-                        if self._should_ignore(item):
-                            continue
                         # Organize-New-Only loop suppression: once a file has
                         # been declared "leave in place" this session, skip it
                         # immediately — no hashing, no DB lookup, no nothing.
+                        # (Cheap set lookups first: this runs on every file,
+                        # every 3 seconds.)
                         if item_path.lower() in self._left_in_place_paths:
                             continue
                         if item_path in self._processed_files:
                             continue
                         if item_path in self._organized_files:
                             continue
-
-                        # Track pending files for debounce
-                        if item_path not in self._pending_files:
-                            self._pending_files[item_path] = current_time
-                            logger.debug(f"New file detected: {item_path}")
-                        else:
-                            # Check if file has been stable long enough
-                            first_seen = self._pending_files[item_path]
-                            if current_time - first_seen >= self._debounce_seconds:
-                                # Organize-New-Only filter (no-op for other
-                                # modes): drop pre-existing files (baseline
-                                # hash match OR known by content_hash in DB)
-                                # and leave them in place forever.
-                                to_process = self._filter_genuinely_new_files(folder, [item_path])
-                                self._pending_files.pop(item_path, None)
-                                if not to_process:
-                                    continue
-                                instruction = self._get_instruction_for_folder(folder)
-                                existing_folders = self._get_existing_folders_if_as_is(folder)
-                                self._process_files_with_ai(to_process, folder, instruction, existing_folders)
+                        # Being sorted right now, or waiting in the queue: not new again at every check
+                        if _path_key(item_path) in busy:
+                            continue
+                        # Full path: pinned files, and anything inside an app / code project
+                        if self._should_ignore(item_path, folder):
+                            continue
+                        paths.append(item_path)
+                        first_seen = pending.get(item_path)
+                        if plan["hash_for"].get(folder) and first_seen is not None and \
+                                now - first_seen >= self._debounce_seconds:
+                            h = self._compute_file_hash(item_path, gen)
+                            if h:
+                                hashes[item_path] = h
+                                if file_index is not None:
+                                    try:
+                                        known[item_path] = file_index.get_file_by_hash(h)
+                                    except Exception:
+                                        pass
+            except _Cancelled:
+                raise
             except Exception as e:
                 logger.error(f"Error checking folder {folder}: {e}")
-    
+            found[folder] = paths
+        return {"found": found, "hashes": hashes, "known": known, "now": now}
+
+    def _after_check(self, result: dict) -> None:
+        """On the UI thread: what the walk found → debounce, the Organize New Only filter, the planner."""
+        if not self._is_running:
+            return
+        current_time = result["now"]
+        watched = {_path_key(f) for f in self.watched_folders}
+        busy = self._busy_keys()
+        for folder, paths in result["found"].items():
+            if _path_key(folder) not in watched:      # (turned off while the walk ran)
+                continue
+            try:
+                ready = []
+                for item_path in paths:
+                    # (dealt with while the walk ran; or a batch took it on meanwhile)
+                    if item_path.lower() in self._left_in_place_paths or item_path in self._processed_files \
+                            or item_path in self._organized_files or _path_key(item_path) in busy:
+                        continue
+                    # Track pending files for debounce
+                    if item_path not in self._pending_files:
+                        self._pending_files[item_path] = current_time
+                        logger.debug(f"New file detected: {item_path}")
+                    elif current_time - self._pending_files[item_path] >= self._debounce_seconds:
+                        ready.append(item_path)      # (stable long enough)
+                if not ready:
+                    continue
+                for item_path in ready:
+                    self._pending_files.pop(item_path, None)
+                # Organize-New-Only filter (no-op for other modes): drop pre-existing files (baseline hash match OR
+                # known by content_hash in DB) and leave them in place forever.
+                to_process = self._filter_genuinely_new_files(folder, ready, hashes=result["hashes"],
+                                                              known=result.get("known"))
+                if to_process:
+                    # ONE batch for everything that's ready in this folder. (It went one file per batch: 200
+                    # downloads landing at once took ~5 s each, one after another — measured 2026-11-10, 134 of
+                    # 200 still waiting after 7 minutes. A batch reads its files several at a time.)
+                    instruction = self._get_instruction_for_folder(folder)
+                    existing_folders = self._get_existing_folders_if_as_is(folder)
+                    self._process_files_with_ai(to_process, folder, instruction, existing_folders)
+            except Exception as e:
+                logger.error(f"Error checking folder {folder}: {e}")
+
     def _process_files_with_ai(self, file_paths: List[str], folder: str, instruction: str, 
                                 existing_folders: List[str] = None) -> None:
         """
@@ -1559,54 +2191,7 @@ class AutoOrganizeWatcher(QObject):
         
         if existing_folders is not None and len(existing_folders) > 0:
             # ORGANIZE AS-IS MODE: Only use existing folders
-            folders_list = ', '.join(f"'{f}'" for f in existing_folders)
-            full_instruction = (
-                f"[AUTO-ORGANIZE - EXISTING FOLDERS ONLY]\n"
-                f"User's instructions: {instruction if instruction else 'Organize files into appropriate folders'}\n\n"
-                f"EXISTING FOLDERS YOU CAN USE: {folders_list}\n\n"
-                "GROUND RULES:\n"
-                "• You can ONLY use the folders listed above — never create new folders.\n"
-                "• Folder names use forward slashes for nested paths ('Photos/Vacation' = Vacation inside Photos).\n"
-                "• When both a parent and a nested folder apply, PREFER the most-specific nested one (a vacation photo "
-                "goes to 'Photos/Vacation', not just 'Photos').\n"
-                "• Every file_id MUST appear exactly once in your plan. Omitting a file is FORBIDDEN.\n\n"
-                "DECISION TREE — for EACH file, follow these steps IN ORDER:\n\n"
-                "  Step 1: Compare the file's TAGS to the LEAF NAME of each existing folder. The LEAF NAME is the "
-                "LAST segment after any slashes — for 'everything-else/pigs' the leaf is 'pigs' (not 'everything-else'). "
-                "Does any tag (or its singular/plural form) match a leaf name? Tag 'pig' matches leaf 'pigs'; tag 'lion' "
-                "matches leaf 'lions'; tag 'vacation' matches leaf 'Vacation'.\n"
-                "    → YES: place the file in that folder. If MULTIPLE folders share a matching leaf (e.g. both 'pigs' "
-                "and 'everything-else/pigs' would match a pig file), pick the most-specific (nested) one.\n"
-                "    → NO: go to Step 2.\n\n"
-                "  Step 2: Is there a CATCH-ALL folder among the existing folders? (A catch-all is one whose LEAF NAME "
-                "contains 'other', 'everything', 'misc', 'general', 'rest', 'else', 'various', or 'unsorted'.)\n"
-                "    → YES: place the file in that catch-all folder. STOP HERE. Do NOT put it in a subject folder it "
-                "doesn't actually belong to just because that folder vaguely exists.\n"
-                "    → NO: go to Step 3.\n\n"
-                "  Step 3: No catch-all available — pick the existing folder whose name is most similar to the file's "
-                "content type, using your best judgment.\n\n"
-                "WORKED EXAMPLES:\n\n"
-                "Folders = ['lions', 'everything-else', 'everything-else/pigs']  (NOTE: 'pigs' is NESTED inside "
-                "everything-else):\n"
-                "  • Lion photo  (tag 'lion') → 'lions'                  [Step 1: tag matches leaf 'lions']\n"
-                "  • Pig photo   (tag 'pig')  → 'everything-else/pigs'   [Step 1: tag 'pig' matches LEAF 'pigs' of the "
-                "nested folder — use the nested folder, NOT the parent 'everything-else']\n"
-                "  • Bear photo  (tag 'bear') → 'everything-else'        [Step 2: no bear folder anywhere; catch-all]\n"
-                "  • Sunset photo (no clear subject) → 'everything-else' [Step 2: catch-all]\n\n"
-                "Folders = ['Photos', 'Photos/Vacation', 'Docs']:\n"
-                "  • Vacation photo (tags 'photo','vacation') → 'Photos/Vacation'  [Step 1: 'vacation' matches the "
-                "leaf of the nested folder; prefer nested over the parent 'Photos']\n"
-                "  • Regular photo (tag 'photo' only) → 'Photos'  [Step 1: 'photo' matches leaf 'Photos'; nested "
-                "'Photos/Vacation' does not apply because the file has no vacation tag]\n"
-                "  • PDF document → 'Docs'  [Step 1: 'document' matches leaf 'Docs']\n\n"
-                "FORBIDDEN:\n"
-                "  • Putting a PIG photo in 'everything-else' when 'everything-else/pigs' exists. The nested 'pigs' "
-                "folder is the correct destination for pig files — don't dump them in the parent.\n"
-                "  • Putting a BEAR photo in 'lions' or 'pigs' just because they're animal-themed — they are not bear "
-                "folders. Bears with no bear-named folder go to the catch-all.\n"
-                "  • Omitting any file from your response (every file_id must appear exactly once).\n"
-                "  • Creating a folder not in the listed existing folders."
-            )
+            full_instruction = existing_folders_instruction(instruction, existing_folders)
             logger.info(f"[Worker] Organize As-Is mode: restricting to folders: {existing_folders}")
         elif instruction:
             full_instruction = (
@@ -1626,8 +2211,10 @@ class AutoOrganizeWatcher(QObject):
                 "applies STRICTLY to subjects the user did not name in their instruction — it is NOT a license to invent extra "
                 "folders for files the user already routed.\n"
                 "4. FORBIDDEN folder names (catch-all junk drawers): 'misc', 'other', 'unsorted', 'miscellaneous', 'random', "
-                "'stuff', 'various', 'etc'. Never use these names. If a file truly fits nowhere meaningful, place it in the "
-                "closest existing folder by content type.\n"
+                "'stuff', 'various', 'etc'. Never use these names. If a file truly fits nowhere meaningful, use a plain "
+                "folder for its content type ('documents', 'photos', 'videos').\n"
+                "4b. A file the user's instruction does NOT cover never goes in a folder the user named for something "
+                "else: a video, a recipe or a photo is not a bill, so it never goes in the folder named for bills.\n"
                 f"5. IMPORTANT: Do NOT create a folder named '{parent_folder_name}' - use a different name.\n"
                 "6. Every file MUST be placed in exactly one folder."
             )
@@ -1651,18 +2238,24 @@ class AutoOrganizeWatcher(QObject):
         # nothing. That's the bug we hit at 2026-05-29 02:00 where the As-Is
         # request queued behind the auto-organizing run and never executed.
         if self._current_worker is not None and self._current_worker.isRunning():
-            folder_normalized = os.path.normpath(folder)
-            already_queued = any(
-                os.path.normpath(item[0]) == folder_normalized
-                for item in self._worker_queue
-            )
-            if not already_queued:
-                logger.info(f"Worker busy, queuing folder {os.path.basename(folder)} for later processing")
-                self._worker_queue.append(
-                    (folder, full_instruction, existing_folders, list(file_paths))
-                )
-            else:
-                logger.info(f"Folder {os.path.basename(folder)} already queued, skipping duplicate")
+            folder_key = _path_key(folder)
+            for i, item in enumerate(self._worker_queue):
+                if _path_key(item[0]) != folder_key:
+                    continue
+                queued_paths = list(item[3]) if len(item) >= 4 and item[3] else []
+                if queued_paths:
+                    # Already waiting with its own files: these join them. (They were dropped as a "duplicate",
+                    # and each was found again — and sorted — on its own, later.)
+                    seen = {_path_key(p) for p in queued_paths}
+                    more = [p for p in file_paths if _path_key(p) not in seen]
+                    self._worker_queue[i] = (item[0], full_instruction, existing_folders, queued_paths + more)
+                    logger.info(f"Folder {os.path.basename(folder)} already queued: {len(more)} more file(s) join it "
+                                f"({len(queued_paths) + len(more)} waiting)")
+                else:                            # (a re-scan is queued: it finds these too)
+                    logger.info(f"Folder {os.path.basename(folder)} already queued (re-scan), skipping duplicate")
+                return
+            logger.info(f"Worker busy, queuing folder {os.path.basename(folder)} for later processing")
+            self._worker_queue.append((folder, full_instruction, existing_folders, list(file_paths)))
             return
         
         # Create and start worker thread
@@ -1672,7 +2265,8 @@ class AutoOrganizeWatcher(QObject):
                        existing_folders: List[str] = None) -> None:
         """Start a background worker to process files."""
         logger.info(f"Starting background worker for {len(file_paths)} files")
-        
+        self._current_batch = list(file_paths)
+
         self._current_worker = AutoWatcherWorker(
             file_paths, folder, instruction, self.folder_instructions, existing_folders
         )
@@ -1689,10 +2283,12 @@ class AutoOrganizeWatcher(QObject):
     
     def _on_worker_file_indexed(self, file_path: str):
         """Handle file indexed from worker."""
+        self._indexed_here.add(_path_key(file_path))
         self.file_indexed.emit(file_path)
     
     def _on_worker_file_organized(self, source: str, dest: str, category: str):
         """Handle file organized from worker."""
+        self._indexed_here.discard(_path_key(source))   # (put back there by a revert, it's a known file)
         self._processed_files.add(source)
         self._processed_files.add(dest)
         # Track the destination as an organized file (prevents re-processing)
@@ -1761,34 +2357,59 @@ class AutoOrganizeWatcher(QObject):
                     )
             else:
                 # Periodic / detection-driven request. Re-scan so we pick up
-                # files added since the queue entry was created.
-                file_paths = self._scan_folder_for_files(folder, exclude_organized=True)
-                # Organize-New-Only baseline + DB filter — same path the
-                # periodic scan uses. No-op for non-action-3 folders.
-                file_paths = self._filter_genuinely_new_files(folder, file_paths)
-                if file_paths:
-                    logger.info(
-                        f"Processing queued request: {len(file_paths)} "
-                        f"NEW files in {os.path.basename(folder)}"
-                    )
+                # files added since the queue entry was created — walked (and hashed, where it's needed) in
+                # the background: on a big folder this froze the window each time a batch finished.
+                gen = self._run_gen
+                needs_hash = self._needs_hash(folder)
 
-            if file_paths:
-                self._start_worker(file_paths, folder, instruction, existing_folders)
-            else:
-                logger.info(f"Queued folder {folder} has no NEW files to process (all already organized)")
-                # Clear remaining queue for same folder to prevent loops
-                self._worker_queue = [
-                    item for item in self._worker_queue
-                    if os.path.normpath(item[0]) != os.path.normpath(folder)
-                ]
-                # Process next in queue if any remain
-                if self._worker_queue:
-                    self._on_worker_finished()
-                else:
-                    self.status_changed.emit(f"Watching {len(self.watched_folders)} folder(s) for new files...")
+                def rescan():
+                    found = self._scan_folder_for_files(folder, exclude_organized=True)
+                    hashes = {}
+                    if needs_hash:
+                        for p in found:
+                            h = self._compute_file_hash(p, gen)
+                            if h:
+                                hashes[p] = h
+                    return found, hashes
+
+                def then(result, error):
+                    found, hashes = result if result is not None else ([], {})
+                    # Organize-New-Only baseline + DB filter — same path the
+                    # periodic scan uses. No-op for non-action-3 folders.
+                    paths = self._filter_genuinely_new_files(folder, found, hashes=hashes)
+                    if paths:
+                        logger.info(f"Processing queued request: {len(paths)} NEW files in {os.path.basename(folder)}")
+                    self._continue_queue(folder, instruction, existing_folders, paths)
+
+                self._off_ui(rescan, then)
+                return
+
+            self._continue_queue(folder, instruction, existing_folders, file_paths)
         else:
             # All done - update status
             self.status_changed.emit(f"Watching {len(self.watched_folders)} folder(s) for new files...")
+
+    def _continue_queue(self, folder, instruction, existing_folders, file_paths) -> None:
+        """A dequeued request's files are ready: start its batch, or move on to the next one."""
+        if file_paths and self._current_worker is not None and self._current_worker.isRunning():
+            # (another batch started while this one was being looked through: it waits its turn)
+            self._worker_queue.insert(0, (folder, instruction, existing_folders, list(file_paths)))
+            return
+
+        if file_paths:
+            self._start_worker(file_paths, folder, instruction, existing_folders)
+        else:
+            logger.info(f"Queued folder {folder} has no NEW files to process (all already organized)")
+            # Clear remaining queue for same folder to prevent loops
+            self._worker_queue = [
+                item for item in self._worker_queue
+                if os.path.normpath(item[0]) != os.path.normpath(folder)
+            ]
+            # Process next in queue if any remain
+            if self._worker_queue:
+                self._on_worker_finished()
+            else:
+                self.status_changed.emit(f"Watching {len(self.watched_folders)} folder(s) for new files...")
     
     def _scan_folder_for_files(self, folder: str, exclude_organized: bool = False) -> List[str]:
         """
@@ -1817,13 +2438,13 @@ class AutoOrganizeWatcher(QObject):
             return file_paths
 
         for root, dirs, files in os.walk(folder):
-            # Skip hidden directories
-            dirs[:] = [d for d in dirs if not d.startswith('.')]
+            # Skip hidden directories (and apps / code projects: nothing in them moves)
+            self._prune_walk(root, dirs)
 
             for item in files:
-                if self._should_ignore(item):
-                    continue
                 item_path = os.path.join(root, item)
+                if self._should_ignore(item_path, folder):
+                    continue
                 normalized_path = os.path.normpath(item_path)
 
                 # Files captured by the start()-time snapshot were there

@@ -54,3 +54,6 @@ claude-agent-sdk>=0.2.179
 # [mcp_servers.filect] into ~/.codex/config.toml directly. tomlkit edits it surgically, keeping
 # the user's other sections/comments intact. (tomllib, stdlib, handles reading.)
 tomlkit>=0.12,<1
+# Filect Assistant (hands-free): speech detection. Optional at runtime — app/core/live_listener.py falls back to
+# a small built-in detector (SpectralVad) if it is missing. webrtcvad-wheels = prebuilt wheels of webrtcvad.
+webrtcvad-wheels>=2.0.14

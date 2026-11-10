@@ -167,6 +167,22 @@ def _stop(p):
     p.drawRoundedRect(QRectF(7, 7, 10, 10), 2, 2)
     p.restore()
 
+def _lock(p):
+    p.drawRoundedRect(QRectF(5.5, 10.5, 13, 10), 2, 2)
+    path = QPainterPath()
+    path.moveTo(8.5, 10.5); path.lineTo(8.5, 7.5)
+    path.arcTo(QRectF(8.5, 4, 7, 7), 180, -180)
+    path.lineTo(15.5, 10.5)
+    p.drawPath(path)
+
+def _speaker(p):
+    path = QPainterPath()
+    path.moveTo(4, 9.5); path.lineTo(7.5, 9.5); path.lineTo(12, 5.5); path.lineTo(12, 18.5)
+    path.lineTo(7.5, 14.5); path.lineTo(4, 14.5); path.closeSubpath()
+    p.drawPath(path)
+    p.drawArc(QRectF(12.5, 8.5, 5, 7), -60 * 16, 120 * 16)
+    p.drawArc(QRectF(13.5, 5.5, 7, 13), -60 * 16, 120 * 16)
+
 def _plus(p):
     p.drawLine(QLineF(12, 5, 12, 19)); p.drawLine(QLineF(5, 12, 19, 12))
 
@@ -199,6 +215,7 @@ _DRAW = {
     "arrow": _arrow, "keyboard": _keyboard,
     "bolt": _bolt, "file": _file, "sidebar": _sidebar, "arrow_up": _arrow_up, "stop": _stop,
     "plus": _plus, "chevron": _chevron, "external": _external, "check": _check,
+    "lock": _lock, "speaker": _speaker,
 }
 
 _cache = {}

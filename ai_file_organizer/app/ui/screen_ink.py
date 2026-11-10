@@ -82,6 +82,111 @@ def _capture_win(rect: QRect) -> Optional[QImage]:
         return None
 
 
+def _monitor_px_rect(g: QRect, dpr: float):
+    """The physical-pixel rectangle of the monitor Qt shows at logical `g` (dpr = its scale), or None. Matched by
+    position + size: Qt's names aren't Windows' device names (on the dev PC a screen is "Parallels Vu"), and with
+    per-monitor DPI a screen's logical top-left is its physical top-left / its own scale."""
+    import ctypes
+    from ctypes import wintypes
+
+    class MI(ctypes.Structure):
+        _fields_ = [("cbSize", wintypes.DWORD), ("rcMonitor", wintypes.RECT), ("rcWork", wintypes.RECT),
+                    ("dwFlags", wintypes.DWORD)]
+    u = ctypes.WinDLL("user32")
+    mons = []
+    PROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HMONITOR, wintypes.HDC, ctypes.POINTER(wintypes.RECT),
+                              wintypes.LPARAM)
+
+    def cb(hm, _dc, _r, _l):
+        mi = MI()
+        mi.cbSize = ctypes.sizeof(MI)
+        if u.GetMonitorInfoW(hm, ctypes.byref(mi)):
+            r = mi.rcMonitor
+            mons.append((r.left, r.top, r.right - r.left, r.bottom - r.top))
+        return True
+    u.EnumDisplayMonitors(None, None, PROC(cb), 0)
+
+    def miss(m):
+        return (abs(m[0] / dpr - g.x()) + abs(m[1] / dpr - g.y())
+                + abs(m[2] - g.width() * dpr) + abs(m[3] - g.height() * dpr))
+    return min(mons, key=miss) if mons else None
+
+
+def screen_px_rect(rect: QRect):
+    """UI thread (it reads QScreen): `rect` (logical px) as the physical-pixel (x, y, w, h) that grab_px() copies,
+    or None."""
+    try:
+        scr = QGuiApplication.screenAt(rect.center()) or QGuiApplication.primaryScreen()
+        g, dpr = scr.geometry(), scr.devicePixelRatio()
+        mon = _monitor_px_rect(g, dpr)
+        if mon is None:
+            return None
+        return (int(round(mon[0] + (rect.x() - g.x()) * dpr)), int(round(mon[1] + (rect.y() - g.y()) * dpr)),
+                int(round(rect.width() * dpr)), int(round(rect.height() * dpr)))
+    except Exception as e:
+        logger.warning(f"[screen] couldn't place the capture: {e}")
+        return None
+
+
+def grab_px(px) -> Optional[QImage]:
+    """Windows: the screen at physical pixels `px` = (x, y, w, h) (from screen_px_rect), safe to call OFF the UI
+    thread — GDI straight into a QImage (Qt's grabWindow makes a QPixmap, which belongs to the UI thread, and took
+    ~190 ms there on the dev PC: the hands-free page grabs as you start talking and mustn't stutter). Filect's
+    floating windows are left out (WDA_EXCLUDEFROMCAPTURE applies to this too). None on failure."""
+    if not IS_WIN or not px:
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+        x, y, w, h = px
+        if w <= 0 or h <= 0:
+            return None
+        u, gdi = ctypes.WinDLL("user32"), ctypes.WinDLL("gdi32")
+        u.GetDC.restype = wintypes.HDC
+        u.GetDC.argtypes = [wintypes.HWND]
+        u.ReleaseDC.argtypes = [wintypes.HWND, wintypes.HDC]
+        gdi.CreateCompatibleDC.restype = wintypes.HDC
+        gdi.CreateCompatibleDC.argtypes = [wintypes.HDC]
+        gdi.CreateCompatibleBitmap.restype = wintypes.HBITMAP
+        gdi.CreateCompatibleBitmap.argtypes = [wintypes.HDC, ctypes.c_int, ctypes.c_int]
+        gdi.SelectObject.restype = wintypes.HGDIOBJ
+        gdi.SelectObject.argtypes = [wintypes.HDC, wintypes.HGDIOBJ]
+        gdi.BitBlt.argtypes = [wintypes.HDC, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, wintypes.HDC,
+                               ctypes.c_int, ctypes.c_int, wintypes.DWORD]
+        gdi.GetDIBits.argtypes = [wintypes.HDC, wintypes.HBITMAP, wintypes.UINT, wintypes.UINT, ctypes.c_void_p,
+                                  ctypes.c_void_p, wintypes.UINT]
+        gdi.DeleteObject.argtypes = [wintypes.HGDIOBJ]
+        gdi.DeleteDC.argtypes = [wintypes.HDC]
+
+        class BIH(ctypes.Structure):
+            _fields_ = [("biSize", wintypes.DWORD), ("biWidth", wintypes.LONG), ("biHeight", wintypes.LONG),
+                        ("biPlanes", wintypes.WORD), ("biBitCount", wintypes.WORD), ("biCompression", wintypes.DWORD),
+                        ("biSizeImage", wintypes.DWORD), ("biXPelsPerMeter", wintypes.LONG),
+                        ("biYPelsPerMeter", wintypes.LONG), ("biClrUsed", wintypes.DWORD),
+                        ("biClrImportant", wintypes.DWORD)]
+        screen_dc = u.GetDC(None)
+        mem_dc = gdi.CreateCompatibleDC(screen_dc)
+        bmp = gdi.CreateCompatibleBitmap(screen_dc, w, h)
+        old = gdi.SelectObject(mem_dc, bmp)
+        try:
+            gdi.BitBlt(mem_dc, 0, 0, w, h, screen_dc, x, y, 0x00CC0020 | 0x40000000)   # SRCCOPY | CAPTUREBLT
+            bih = BIH()
+            bih.biSize, bih.biWidth, bih.biHeight = ctypes.sizeof(BIH), w, -h       # top-down rows
+            bih.biPlanes, bih.biBitCount, bih.biCompression = 1, 32, 0
+            buf = ctypes.create_string_buffer(w * h * 4)
+            gdi.SelectObject(mem_dc, old)
+            if not gdi.GetDIBits(mem_dc, bmp, 0, h, buf, ctypes.byref(bih), 0):
+                return None
+        finally:
+            gdi.DeleteObject(bmp)
+            gdi.DeleteDC(mem_dc)
+            u.ReleaseDC(None, screen_dc)
+        return QImage(buf.raw, w, h, w * 4, QImage.Format_RGB32).copy()
+    except Exception as e:
+        logger.warning(f"[screen] off-thread capture failed: {e}")
+        return None
+
+
 def _capture(rect: QRect) -> Optional[QImage]:
     """The screen inside `rect` (global points) exactly as you see it — minus Filect's own floating
     windows (this ink layer, the notch, the rail, the dictation pill; the main window stays) — at full

@@ -11,6 +11,7 @@ Flow:
 """
 
 import os
+import time
 import sqlite3
 import json
 import logging
@@ -119,6 +120,14 @@ class VoiceRecordWorker(QThread):
         dev = QMediaDevices.defaultAudioInput()
         if dev is None or dev.isNull():
             return False
+        from app.core import mic_helper           # Filect Assistant (hands-free) lets go of the mic meanwhile
+        release = mic_helper.foreground_begin()
+        try:
+            return self._record(np, QEventLoop, QTimer, QAudioSource, dev, fmt)
+        finally:
+            release()
+
+    def _record(self, np, QEventLoop, QTimer, QAudioSource, dev, fmt) -> bool:
         source = QAudioSource(dev, fmt)
         io = source.start()
         if io is None:
@@ -2544,7 +2553,9 @@ class HistoryDialog(QDialog):
 
         files_count = item.get("successful_moves", item.get("total_files", 0))
         reverted_suffix = " (reverted)" if is_reverted else ""
-        details_label = QLabel(f"{files_count} file(s) organized{reverted_suffix}")
+        what = (f"auto-organized in {os.path.basename(str(item.get('folder', '')).rstrip(chr(92) + '/'))}"
+                if item.get("source") == "auto" else "organized")
+        details_label = QLabel(f"{files_count} file(s) {what}{reverted_suffix}")
         details_label.setStyleSheet(f"""
             font-family: "Segoe UI", sans-serif;
             font-size: 12px;
@@ -2816,17 +2827,8 @@ class HistoryDialog(QDialog):
             )
             return
 
-        can_revert = []
-        cannot_revert = []
-        for move in moves:
-            dest_path = Path(move.get("to", ""))
-            source_path = Path(move.get("from", ""))
-            if not dest_path.exists():
-                cannot_revert.append(f"File not found: {dest_path.name}")
-            elif source_path.exists():
-                cannot_revert.append(f"Original location occupied: {source_path.name}")
-            else:
-                can_revert.append(move)
+        from app.core.apply import split_revertable, revert_moves
+        can_revert, cannot_revert = split_revertable(moves)
 
         if not can_revert:
             details_list = cannot_revert[:5]
@@ -2857,27 +2859,9 @@ class HistoryDialog(QDialog):
         if not confirmed:
             return
 
-        # Perform the revert
-        reverted = 0
-        errors = []
-        for move in can_revert:
-            dest_path = Path(move.get("to", ""))
-            source_path = Path(move.get("from", ""))
-            try:
-                source_path.parent.mkdir(parents=True, exist_ok=True)
-                shutil.move(str(dest_path), str(source_path))
-                reverted += 1
-                logger.info(f"[REVERT] Moved back: {dest_path.name} -> {source_path.parent.name}/")
-                # Best-effort DB sync — if the file isn't tracked, that's fine.
-                try:
-                    if file_index.update_file_path_by_old_path(str(dest_path), str(source_path)):
-                        logger.info(f"[REVERT] DB path updated: {dest_path.name}")
-                    else:
-                        logger.debug(f"[REVERT] DB path update skipped (file not in DB): {dest_path.name}")
-                except Exception as db_err:
-                    logger.warning(f"[REVERT] DB path update failed for {dest_path.name}: {db_err}")
-            except Exception as e:
-                errors.append(f"{dest_path.name}: {str(e)}")
+        # Perform the revert (also marks the log as reverted, so History shows it, and keeps an
+        # auto-organized folder from sorting the files straight back out)
+        reverted, errors = revert_moves(log_file, can_revert)
 
         # Close the details dialog before showing the result
         try:
@@ -2905,23 +2889,6 @@ class HistoryDialog(QDialog):
                 message=f"Successfully moved {reverted} file(s) back to original locations.",
                 details=["Files have been restored to their original locations"]
             )
-
-        # Mark the log file as reverted so the badge + "Already Reverted"
-        # state shows the next time the dialog opens.
-        if reverted > 0:
-            try:
-                import json as _json
-                from datetime import datetime as _dt
-                with open(log_file, 'r', encoding='utf-8') as fh:
-                    log_data = _json.load(fh)
-                log_data['reverted'] = True
-                log_data['reverted_count'] = reverted
-                log_data['reverted_at'] = _dt.now().isoformat()
-                with open(log_file, 'w', encoding='utf-8') as fh:
-                    _json.dump(log_data, fh, indent=2)
-                logger.info(f"[REVERT] Marked log as reverted: {log_file}")
-            except Exception as e:
-                logger.warning(f"[REVERT] Could not mark log as reverted: {e}")
 
         self._refresh_history()
 
@@ -4844,7 +4811,9 @@ class WatchConfigDialog(QDialog):
                 logger.info(f"  Saving folder: {path}, instruction: {instruction[:50] if instruction else '(empty)'}...")
                 # Get existing action if any
                 existing_action = settings.get_auto_organize_action(path)
-                new_folders.append({
+                _old = settings._auto_organize_entry(path) or {}
+                new_folders.append({k: _old[k] for k in ('paused', 'skip_known', 'watching_since') if k in _old})
+                new_folders[-1].update({
                     'path': path,
                     'instruction': instruction,
                     'action': existing_action  # Preserve the action setting
@@ -5257,6 +5226,8 @@ class OrganizePage(QWidget):
         self.files_by_id = {}
         self.destination_path = None
         self.plan_worker = None
+        self._voice_plan_owned = False      # the current plan came from a voice organize, not this page
+        self.last_voice_log = ""            # move log of the last voice organize (what Undo puts back)
         # Undo tracking - stores the last completed organization
         self.last_organization = None  # List of {source, destination, file_id}
         # Refinement tracking
@@ -6377,7 +6348,7 @@ class OrganizePage(QWidget):
         for folder_data in settings.auto_organize_folders:
             folder_path = folder_data.get('path', '')
             instruction = folder_data.get('instruction', '')
-            if folder_path:
+            if folder_path and not folder_data.get('paused'):
                 normalized_path = os.path.normpath(folder_path)
                 folder_instructions[normalized_path] = instruction
         
@@ -6513,6 +6484,7 @@ class OrganizePage(QWidget):
             # User explicitly clicked Start — clear the paused flag so future
             # auto-start checks honor it.
             settings.set_auto_organize_paused(False)
+            settings.clear_auto_organize_paused()    # (and Start means "run my whole list")
 
             # OPTIMISTIC UI UPDATE: disable the button and show a transient
             # "Starting…" label the instant the click is registered. The
@@ -6557,14 +6529,19 @@ class OrganizePage(QWidget):
         folder_instructions = {}
         has_any_instruction = False
         
+        since_added = False
         for folder_data in settings.auto_organize_folders:
             folder_path = folder_data.get('path', '')
             instruction = folder_data.get('instruction', '')
-            
-            if folder_path:
+
+            # (`paused`: left off when only another folder was turned on by voice)
+            if folder_path and not folder_data.get('paused'):
+                if 'watching_since' not in folder_data:    # (removed by Stop; survives a restart)
+                    folder_data['watching_since'] = time.time()
+                    since_added = True
                 # Normalize the path to match how watcher stores folders
                 normalized_path = os.path.normpath(folder_path)
-                
+
                 if os.path.isdir(normalized_path):
                     self.auto_watcher.add_folder(normalized_path)
                     self.watch_folders.append(normalized_path)
@@ -6575,7 +6552,15 @@ class OrganizePage(QWidget):
                     
                     logger.info(f"Added watch folder: {normalized_path} with instruction: {instruction[:30] if instruction else '(none)'}...")
         
+        if since_added:
+            settings._save_config()
         if not self.watch_folders:
+            if skip_existing_popup and any(f.get('paused') for f in settings.auto_organize_folders):
+                # (Opening the app with only folders left off by voice: nothing to run, nothing to say.)
+                logger.info("Auto-organize: every folder on the list is off — not starting")
+                self.watch_toggle_btn.setEnabled(True)
+                self._update_watch_summary()
+                return
             QMessageBox.warning(
                 self, "No Valid Folders",
                 "None of the configured folders exist. Please reconfigure."
@@ -6599,23 +6584,8 @@ class OrganizePage(QWidget):
         from PySide6.QtWidgets import QApplication
         QApplication.processEvents()
         
-        # Count existing files (including files in subfolders)
-        existing_count = 0
-        subfolder_count = 0
-        for folder in self.watch_folders:
-            try:
-                for item in os.listdir(folder):
-                    item_path = os.path.join(folder, item)
-                    if os.path.isfile(item_path):
-                        existing_count += 1
-                    elif os.path.isdir(item_path) and not item.startswith('.'):
-                        # Count files in subfolders too
-                        subfolder_count += 1
-                        for sub_item in os.listdir(item_path):
-                            if os.path.isfile(os.path.join(item_path, sub_item)):
-                                existing_count += 1
-            except Exception:
-                pass
+        # (The files here used to be counted at this point, on the UI thread — for a pop-up that no longer
+        # exists. Measured 2026-11-09: ~0.2-0.3 s for a 5,000-file folder, every time watching started.)
         
         # No popup on Start Watching. The per-folder action (Re-organize All /
         # As-Is / Watch Only) is set via each folder's Options button, and is
@@ -6650,13 +6620,75 @@ class OrganizePage(QWidget):
         """Stop watching folders."""
         if self.auto_watcher:
             self.auto_watcher.stop()
-        
-        # Save last active timestamp for catch-up feature
+        for entry in settings.auto_organize_folders:
+            if isinstance(entry, dict):
+                entry.pop('watching_since', None)
+
+        # Save last active timestamp for catch-up feature (also saves the above)
         settings.update_auto_organize_last_active()
         
         # Update UI using centralized method
         self._update_watch_summary()
     
+    def voice_enable_watch(self, folder: str, instruction: str, action: int) -> None:
+        """Turned on by voice: this one folder starts, and stays on when the app reopens. Other folders on the
+        list that were off stay off. (Everything already there was dealt with before this.)"""
+        path = os.path.normpath(folder)
+        entry = settings._auto_organize_entry(path)
+        if entry is not None:                       # (already on the list: update it, never a second one)
+            path = os.path.normpath(entry.get('path') or path)
+            entry['instruction'] = instruction or ""
+            settings._save_config()
+        else:
+            settings.add_auto_organize_folder(path, instruction or "")
+        settings.update_auto_organize_action(path, action)
+        settings.set_auto_organize_flags(path, paused=False, skip_known=False, watching_since=time.time())
+        was_stopped = settings.auto_organize_paused
+        settings.set_auto_organize_paused(False)    # (the Organize tab's Start / Stop state: on)
+        self._was_manually_stopped = False
+        w = self.auto_watcher
+        if w is not None and w.is_running:
+            live = getattr(w, "add_folder_live", None)
+            if callable(live):
+                live(path, instruction or "")
+            else:
+                w.add_folder(path)
+                w.folder_instructions[path] = instruction or ""
+                try:
+                    w._capture_baseline(path)
+                except Exception as e:
+                    logger.warning(f"[VOICE ORGANIZE] baseline for {path} failed: {e}")
+            if not any(os.path.normcase(f) == os.path.normcase(path) for f in self.watch_folders):
+                self.watch_folders.append(path)
+            self._update_watch_summary()
+            logger.info(f"[VOICE ORGANIZE] auto-organize on for {path} (added to the running watcher)")
+            return
+        for e in settings.auto_organize_folders:   # (stopped: only this folder starts)
+            if isinstance(e, dict) and os.path.normcase(os.path.normpath(e.get('path', ''))) != os.path.normcase(path):
+                e['paused'] = True
+        settings._save_config()
+        logger.info(f"[VOICE ORGANIZE] auto-organize on for {path} (watcher started; was stopped={was_stopped})")
+        self._start_watch_mode(skip_existing_popup=True)
+
+    def voice_disable_watch(self, folder: str) -> None:
+        """Off by voice: it leaves the list. Files stay where they are."""
+        key = os.path.normcase(os.path.normpath(folder))
+        settings.auto_organize_folders = [f for f in settings.auto_organize_folders
+                                          if os.path.normcase(os.path.normpath(f.get('path', ''))) != key]
+        settings._save_config()
+        w = self.auto_watcher
+        if w is not None and w.is_running:
+            for f in list(w.watched_folders):
+                if os.path.normcase(os.path.normpath(f)) == key:
+                    w.remove_folder(f)
+                    w.folder_instructions.pop(f, None)
+            self.watch_folders = [f for f in self.watch_folders if os.path.normcase(os.path.normpath(f)) != key]
+            if not self.watch_folders:
+                self._stop_watch_mode()
+                settings.set_auto_organize_paused(True)   # (nothing left running: stays off next launch)
+        logger.info(f"[VOICE ORGANIZE] auto-organize off for {folder}")
+        self._update_watch_summary()
+
     def _check_auto_start(self):
         """Check if we should auto-start the watcher on app open."""
         # Respect the user's explicit Stop. If they paused the watcher, leave it
@@ -7432,13 +7464,48 @@ class OrganizePage(QWidget):
 
     _VOICE_MAX_FILES = 300   # guardrail — bigger folders need a subfolder
 
-    def _voice_prepare_files(self):
+    def has_plan(self) -> bool:
+        """A plan is waiting to be applied (this page's own, or a voice one: see _voice_plan_owned)."""
+        return bool(self.current_moves)
+
+    def voice_busy(self) -> bool:
+        """A voice plan / refine / index / move is still running (replacing its worker mid-run would crash)."""
+        for name in ("_voice_index_worker", "_voice_plan_worker", "_voice_refine_worker", "_voice_apply_worker"):
+            w = getattr(self, name, None)
+            try:
+                if w is not None and w.isRunning():
+                    return True
+            except RuntimeError:
+                pass
+        return False
+
+    def _voice_prepare_files(self, max_files: int = None):
         """Load + validate indexed files in destination_path and attach
-        subfolder context. Returns (files, error_or_None)."""
+        subfolder context. Returns (files, error_or_None). Files inside an app or
+        a code project, or excluded in Settings, are left out (never moved)."""
         files = self._load_files_from_db()
+        try:
+            from app.core.organize_reader import protected
+            off_limits = {}
+            kept = []
+            for f in files:
+                p = f.get("file_path")
+                try:
+                    if not p or settings.should_exclude(p) or protected(p, self.destination_path, off_limits):
+                        continue
+                except Exception:
+                    continue
+                kept.append(f)
+            if len(kept) != len(files):
+                logger.info(f"[VOICE ORGANIZE] left out {len(files) - len(kept)} protected / excluded file(s)")
+            files = kept
+        except Exception as e:
+            logger.warning(f"[VOICE ORGANIZE] protected-file filter unavailable: {e}")
+        self.files_by_id = {f["id"]: f for f in files}
         if not files:
             return [], None  # caller decides whether to auto-index
-        if len(files) > self._VOICE_MAX_FILES:
+        limit = max_files or self._VOICE_MAX_FILES
+        if len(files) > limit:
             return [], (f"That folder has {len(files)} files — too many to organize by "
                         f"voice at once. Try a specific subfolder.")
         self.files_by_id = {f["id"]: f for f in files}
@@ -7450,21 +7517,29 @@ class OrganizePage(QWidget):
                 f["subfolder"] = "."
         return files, None
 
-    def voice_generate(self, folder: str, instruction: str, _after_index: bool = False):
+    def voice_generate(self, folder: str, instruction: str, _after_index: bool = False,
+                       max_files: int = None, how_only: bool = False):
         """Build an organize plan for `folder` from the spoken `instruction`,
         off-thread. Emits voice_plan_ready or voice_plan_error.
 
         First pass indexes the folder's UNINDEXED media files (bounded only by
         the subscription index quota) so the plan sees ALL the files, not just
         the ones already in the DB — that was the 'only recognised 1 file' bug.
-        Already-indexed files cost nothing (skipped)."""
+        Already-indexed files cost nothing (skipped).
+
+        `how_only`: `instruction` is only how to sort ("" = Filect decides), not the
+        whole sentence. The voice assistant passes it with `_after_index` (it read
+        the files itself, on the person's subscription) and a bigger `max_files`."""
         try:
             self.destination_path = Path(folder)
             if not self.destination_path.exists():
                 self.voice_plan_error.emit("That folder no longer exists.")
                 return
-            self.original_instruction = instruction
-            if not _after_index:
+            self._voice_how_only = bool(how_only)
+            self._voice_max_files = max_files
+            self.original_instruction = instruction if not (how_only and not (instruction or "").strip()) \
+                else "[AUTO-ORGANIZE]"
+            if not _after_index or how_only:
                 self._voice_quota_note = ""
                 # Fresh generate (not a refine): no previous plan to carry from.
                 self._voice_prev_plan = None
@@ -7483,22 +7558,29 @@ class OrganizePage(QWidget):
                 self._voice_index_worker.start()
                 return
 
-            files, err = self._voice_prepare_files()
+            files, err = self._voice_prepare_files(max_files)
             if err:
                 self.voice_plan_error.emit(err)
                 return
             if not files:
-                self.voice_plan_error.emit("No files found in that folder to organize.")
+                self.voice_plan_error.emit("That folder has nothing I can organize." if how_only
+                                           else "No files found in that folder to organize.")
                 return
-            # If the user named NO target folders (e.g. "organize this however you
-            # want"), don't let the AI echo the folder's own name back as the only
-            # category — route to AUTO-ORGANIZE so it sorts BY CONTENT into real
-            # categories. A spoken request always contains the folder name, so we
-            # detect intent from whether any "X -> folder Y" mapping was given.
-            from app.core.ai_organizer import _extract_category_to_folder_map
-            has_scheme = bool(_extract_category_to_folder_map(instruction or ""))
-            self._voice_auto = not has_scheme
-            plan_instruction = instruction if has_scheme else "[AUTO-ORGANIZE]"
+            if how_only:
+                # Only how to sort was passed (the folder was already worked out): use it as is, or let
+                # Filect decide when they didn't say.
+                plan_instruction = (instruction or "").strip() or "[AUTO-ORGANIZE]"
+                self._voice_auto = plan_instruction == "[AUTO-ORGANIZE]"
+            else:
+                # If the user named NO target folders (e.g. "organize this however you
+                # want"), don't let the AI echo the folder's own name back as the only
+                # category — route to AUTO-ORGANIZE so it sorts BY CONTENT into real
+                # categories. A spoken request always contains the folder name, so we
+                # detect intent from whether any "X -> folder Y" mapping was given.
+                from app.core.ai_organizer import _extract_category_to_folder_map
+                has_scheme = bool(_extract_category_to_folder_map(instruction or ""))
+                self._voice_auto = not has_scheme
+                plan_instruction = instruction if has_scheme else "[AUTO-ORGANIZE]"
             logger.info(f"[VOICE ORGANIZE] planning {len(files)} files in {folder} "
                         f"(auto_organize={self._voice_auto})")
             self.voice_status.emit(f"Planning {len(files)} files…")
@@ -7528,7 +7610,9 @@ class OrganizePage(QWidget):
             note = getattr(self, "_voice_quota_note", "") or \
                 f"{remaining} file(s) couldn't be indexed."
             self.voice_status.emit(note)
-        self.voice_generate(folder, instruction, _after_index=True)
+        self.voice_generate(folder, instruction, _after_index=True,
+                            max_files=getattr(self, "_voice_max_files", None),
+                            how_only=getattr(self, "_voice_how_only", False))
 
     def voice_refine(self, feedback: str):
         """Refine the current plan from spoken feedback, off-thread."""
@@ -7536,7 +7620,7 @@ class OrganizePage(QWidget):
             if not self.current_plan or not getattr(self, "original_instruction", None):
                 self.voice_plan_error.emit("No plan to refine yet.")
                 return
-            files, err = self._voice_prepare_files()
+            files, err = self._voice_prepare_files(getattr(self, "_voice_max_files", None))
             if err:
                 self.voice_plan_error.emit(err)
                 return
@@ -7626,6 +7710,7 @@ class OrganizePage(QWidget):
 
             self.current_plan = plan
             self.current_moves = plan_to_moves(plan, self.files_by_id, self.destination_path)
+            self._voice_plan_owned = True          # (a stale voice plan never counts as "the Organize page is busy")
 
             # Which files actually MOVE vs are already in place.
             moving_ids = {m["file_id"] for m in self.current_moves}
@@ -7671,12 +7756,37 @@ class OrganizePage(QWidget):
             logger.error(f"[VOICE ORGANIZE] _voice_on_plan failed: {e}")
             self.voice_plan_error.emit(str(e))
 
-    def voice_apply(self):
-        """Apply the current plan off-thread. Emits voice_apply_done/error."""
+    def voice_apply(self, keep_empty: bool = False):
+        """Apply the current plan off-thread. Emits voice_apply_done/error.
+        `keep_empty`: leave the folders this empties (the voice assistant offers
+        Undo for a while and removes them after — apply.tidy_emptied_sources)."""
+        self.last_voice_log = ""
+        self._voice_keep_empty = bool(keep_empty)
         try:
             if not self.current_moves:
                 self.voice_apply_error.emit("No moves to apply.")
                 return
+            # Final safety re-check (files moved / excluded since the plan was built).
+            kept = []
+            for m in self.current_moves:
+                try:
+                    if settings.should_exclude(m["source_path"]):
+                        continue
+                except Exception:
+                    pass
+                if os.path.exists(m["source_path"]):
+                    kept.append(m)
+            if not kept:
+                self.voice_apply_error.emit("Those files were already moved or are excluded.")
+                return
+            self.current_moves = kept
+            # The auto-organize watcher pauses while these move (it would see them as new arrivals).
+            self._voice_apply_resume = bool(self.auto_watcher and self.auto_watcher.is_running)
+            if self._voice_apply_resume:
+                try:
+                    self.auto_watcher.stop()
+                except Exception:
+                    self._voice_apply_resume = False
             move_plan = [{
                 "source_path": m["source_path"],
                 "destination_path": m["destination_path"],
@@ -7688,16 +7798,31 @@ class OrganizePage(QWidget):
             self.voice_status.emit("Organizing…")
             self._voice_apply_worker = _VoiceApplyWorker(move_plan)
             self._voice_apply_worker.done.connect(self._voice_on_apply_done)
-            self._voice_apply_worker.failed.connect(self.voice_apply_error)
+            self._voice_apply_worker.failed.connect(self._voice_on_apply_failed)
             self._voice_apply_worker.start()
         except Exception as e:
             logger.error(f"[VOICE ORGANIZE] voice_apply failed: {e}")
+            self._voice_resume_watcher()
             self.voice_apply_error.emit(str(e))
 
+    def _voice_resume_watcher(self):
+        if getattr(self, "_voice_apply_resume", False):
+            self._voice_apply_resume = False
+            try:
+                self.auto_watcher.start(organize_existing=False)
+            except Exception as e:
+                logger.warning(f"[VOICE ORGANIZE] couldn't resume auto-organize: {e}")
+
+    def _voice_on_apply_failed(self, msg: str):
+        self._voice_resume_watcher()
+        self.voice_apply_error.emit(msg)
+
     def _voice_on_apply_done(self, result):
+        self._voice_resume_watcher()
         try:
             success, errors, log_file, renamed_count = result
             n = len(self.current_moves)
+            self.last_voice_log = log_file or ""     # (what the voice assistant's Undo puts back)
 
             # Keep the index consistent with the moves: update each moved file's
             # DB path (exactly what the manual apply does). WITHOUT this, the DB
@@ -7728,11 +7853,12 @@ class OrganizePage(QWidget):
                 # Clean up folders left empty by the move (parity with the manual
                 # apply). This matters especially for recursive voice-organize:
                 # pulling files out of subfolders leaves those subfolders empty.
+                # (Not while the voice assistant offers Undo: it tidies them later.)
                 removed = 0
                 try:
-                    source_folders = {Path(m["source_path"]).parent for m in self.current_moves}
+                    source_folders = set() if getattr(self, "_voice_keep_empty", False) else                         {Path(m["source_path"]).parent for m in self.current_moves}
                     empty = list({*self._collect_empty_folders(source_folders),
-                                  *self._scan_all_empty_folders()})
+                                  *self._scan_all_empty_folders()}) if source_folders else []
                     empty.sort(key=lambda p: len(Path(p).parts), reverse=True)
                     if empty:
                         removed = self._delete_folders(empty)
@@ -8015,6 +8141,7 @@ class OrganizePage(QWidget):
         
         self.current_plan = plan
         self.current_moves = plan_to_moves(plan, self.files_by_id, self.destination_path)
+        self._voice_plan_owned = False
         
         # Calculate plan statistics
         folder_count = len(plan.get("folders", {}))

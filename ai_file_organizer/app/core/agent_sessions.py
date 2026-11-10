@@ -339,6 +339,34 @@ def _session_file(session_id: str, cwd: Optional[str]) -> Optional[Path]:
     return next(iter(root.glob(f"*/{session_id}.jsonl")), None)
 
 
+def last_message_id(session_id: str, cwd: Optional[str] = None) -> Optional[str]:
+    """The uuid of the chat's last real message (user / assistant), read from the end of its file. A Claude Code
+    kept running for a follow-up is only handed the request if this hasn't changed since it started — otherwise
+    it would answer without what was said elsewhere (Mac, measured 2026-11-08: it did — "I don't know your favorite
+    color"). Trailing bookkeeping lines (cost, last prompt…) don't count."""
+    import json
+    p = _session_file(session_id, cwd)
+    if p is None:
+        return None
+    try:
+        size = p.stat().st_size
+        with open(p, "rb") as f:
+            for start in (max(0, size - 512 * 1024), 0):    # the tail first; the whole file if that's not enough
+                f.seek(start)
+                for line in reversed(f.read().splitlines()):
+                    try:
+                        d = json.loads(line)
+                    except Exception:
+                        continue
+                    if d.get("type") in ("user", "assistant") and d.get("uuid"):
+                        return d["uuid"]
+                if start == 0:
+                    break
+    except OSError:
+        return None
+    return None
+
+
 def load_transcript(session_id: str, cwd: Optional[str] = None) -> Optional[dict]:
     """What happened in a saved conversation, for showing it: `steps` in order —
     ("user", text) what you said, ("text", text) Claude's replies, ("tool", name, input, id) its
