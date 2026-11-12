@@ -76,7 +76,10 @@ jobs:
           $baseArgs = @(
             "--name", "Filect",
             "--windowed",
-            "--onefile",
+            # A folder, not one file: a --onefile exe unpacked ~390 MB on EVERY start (measured 26-31 s before it
+            # answered as the MCP server; Claude Desktop gives up at 60 s, Codex at 10 s). dist\Filect\Filect.exe
+            # + dist\Filect\_internal\ start without unpacking; the installer copies the whole folder.
+            "--onedir",
             "--collect-all", "PySide6",
             "--collect-all", "shiboken6",
             "--collect-all", "spellchecker",
@@ -165,17 +168,17 @@ jobs:
           }
           $baseArgs += "main.py"
           pyinstaller @baseArgs
-          $exePath = "dist\Filect.exe"
+          $exePath = "dist\Filect\Filect.exe"
           if (Test-Path $exePath) {
-            $size = (Get-Item $exePath).Length / 1MB
-            echo "EXE size: $([math]::Round($size, 2)) MB"
+            $size = (Get-ChildItem "dist\Filect" -Recurse | Measure-Object -Property Length -Sum).Sum / 1MB
+            echo "App folder size: $([math]::Round($size, 2)) MB"
           }
-          dir dist
+          dir dist\Filect
         shell: pwsh
-      
+
       - name: Verify build output
         run: |
-          if (Test-Path "ai_file_organizer/dist/Filect.exe") {
+          if ((Test-Path "ai_file_organizer/dist/Filect/Filect.exe") -and (Test-Path "ai_file_organizer/dist/Filect/_internal")) {
             echo "Build successful!"
           } else {
             echo "ERROR: EXE not found!"
@@ -211,8 +214,13 @@ jobs:
           RestartApplications=yes
           $iconLine
           
+          [InstallDelete]
+          ; (an update over an older one-file install: the old 390 MB Filect.exe is replaced below anyway; this
+          ; clears a previous build's _internal folder so no stale library is left next to the new ones)
+          Type: filesandordirs; Name: "{app}\_internal"
+
           [Files]
-          Source: "ai_file_organizer\dist\Filect.exe"; DestDir: "{app}"; DestName: "Filect.exe"; Flags: ignoreversion
+          Source: "ai_file_organizer\dist\Filect\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
           
           [Icons]
           Name: "{group}\Filect"; Filename: "{app}\Filect.exe"

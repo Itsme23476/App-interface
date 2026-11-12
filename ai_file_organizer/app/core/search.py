@@ -11,7 +11,7 @@ import threading
 from .database import file_index
 from .scan import scan_directory
 from .categorize import get_file_metadata
-from .vision import analyze_image, analyze_text, gpt_vision_fallback, describe_image_detailed
+from .vision import analyze_image, analyze_text, gpt_vision_fallback, describe_image_detailed, FILECT_MODEL
 from .settings import settings
 from .text_extract import extract_file_text, get_supported_text_formats
 import os
@@ -251,7 +251,7 @@ class SearchService:
                         gptv = gpt_vision_fallback(image_b64, filename=file_path.name, user_instructions=user_instructions)
                         if gptv:
                             full_metadata.update(gptv)
-                            full_metadata['ai_source'] = f'openai:{settings.openai_vision_model}'
+                            full_metadata['ai_source'] = f'openai:{FILECT_MODEL}'
                             seen = gptv.get('detected_text') if ext == '.pdf' else None
                             seen = " ".join(map(str, seen)) if isinstance(seen, list) else str(seen or "")
                             if seen.strip():
@@ -274,7 +274,7 @@ class SearchService:
                             gptv = gpt_vision_fallback(image_b64, filename=file_path.name, user_instructions=user_instructions)
                             if gptv:
                                 vision = gptv
-                                full_metadata['ai_source'] = f'openai:{settings.openai_vision_model}'
+                                full_metadata['ai_source'] = f'openai:{FILECT_MODEL}'
                     if vision:
                         full_metadata.update(vision)
                         if 'ai_source' not in full_metadata:
@@ -328,7 +328,7 @@ class SearchService:
                     if tvision:
                         full_metadata.update(tvision)
                         if settings.ai_provider == 'openai':
-                            full_metadata['ai_source'] = 'openai:gpt-4o-mini'
+                            full_metadata['ai_source'] = f'openai:{FILECT_MODEL}'
                         else:
                             full_metadata['ai_source'] = 'ollama:qwen2.5vl'
             

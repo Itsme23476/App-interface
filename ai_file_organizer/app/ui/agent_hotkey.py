@@ -2,7 +2,16 @@
 every Windows box including the ARM64/Parallels dev machine: RegisterHotKey (claims a key so it never types
 into the app in front) + GetAsyncKeyState (sees when it's let go). Verified there with synthetic input.
 
-  * press the chord (setting `assistant_voice_shortcut`, TEST default "shift+z") → `pressed`
+The default (2026-11-12, the owner's pick) is HOLDING Ctrl + Alt — two modifiers, like the Mac's fn + ⌃. Windows
+can't register a modifiers-only hotkey, so that chord is WATCHED (GetAsyncKeyState, like dictation's Ctrl+Win):
+  * left Alt only — AltGr (= Ctrl + right Alt on many layouts, for €, @, ż…) never counts;
+  * Ctrl + Alt alone: Win or Shift with them (dictation's Ctrl+Win+Alt organize), or any other key pressed before
+    it counts (Ctrl+Alt+H Quick Search, Ctrl+Alt+Del…), and it isn't ours until both are let go;
+  * it counts after CHORD_HOLD_SEC; a key pressed after that (a shortcut held a bit long) cancels it quietly;
+  * the moment it counts, an unassigned mask key is sent so letting go of Alt doesn't open the front app's menu.
+A chord with a letter (e.g. "ctrl+alt+z", or the old test key "shift+z") still works the RegisterHotKey way:
+
+  * press the chord (setting `assistant_voice_shortcut`) → `pressed`
   * while it's held, Filect claims — only then — the chord's letter (so a key-repeat after Shift is let go
     doesn't type "zzz"), Space (+Shift+Space) and Esc (+Shift+Esc), all swallowed:
         Space down → space(True) · Space up → space(False)   (draw on the screen / snapshot it)
@@ -31,8 +40,32 @@ logger = logging.getLogger(__name__)
 WM_HOTKEY = 0x0312
 MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_WIN, MOD_NOREPEAT = 0x1, 0x2, 0x4, 0x8, 0x4000
 VK_SPACE, VK_ESCAPE = 0x20, 0x1B
-DEFAULT_SHORTCUT = "shift+z"          # TEST keybind (Parallels) — swap for the real one before release
+DEFAULT_SHORTCUT = "ctrl+alt"         # hold Ctrl + Alt (the owner's pick, 2026-11-12; was the test key Shift+Z)
 MAX_HOLD_SEC = 600                    # same 10-minute cap as the recorder
+CHORD_HOLD_SEC = 0.3                  # a modifiers-only chord counts after this long alone (a shortcut is faster)
+VK_LALT, VK_RALT = 0xA4, 0xA5
+_MODIFIER_VKS = {0x10, 0x11, 0x12, 0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0x5B, 0x5C}
+_NOT_A_KEY = {0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x0A, 0x0B, 0x0E, 0x0F, 0xE8, 0xFF} | _MODIFIER_VKS
+_now = time.monotonic
+
+
+def _mask() -> None:
+    """Tell Windows the Alt / Win being held was part of a combination (no menu / Start on release)."""
+    try:
+        from app.ui.dictation_hotkey import _mask_menu_keys
+        _mask_menu_keys()
+    except Exception:
+        pass
+
+
+def _other_key_down(allow=()):
+    """A key other than the modifiers (and `allow`) that's down right now — or None."""
+    for vk in range(0x08, 0xFF):
+        if vk in _NOT_A_KEY or vk in allow:
+            continue
+        if _down(vk):
+            return vk
+    return None
 
 _ID_FIRST, _ID_LAST, _BLOCK = 0xB100, 0xBEFF, 8
 _next_block = [_ID_FIRST]
@@ -195,6 +228,10 @@ class AgentHotkey(QObject):
         self._timer.timeout.connect(self._poll)
         self._mouse = _RightClickHook(self.right.emit)
         self.ok = False
+        # a modifiers-only chord ("ctrl+alt"): watched, not registered
+        self._modchord = (not self._vk) and bin(self._mods).count("1") >= 2
+        self._cand = None               # when the chord was first seen down (alone)
+        self._tainted = False           # another key went down with it: not ours until it's let go
 
     @property
     def shortcut(self) -> str:
@@ -208,12 +245,18 @@ class AgentHotkey(QObject):
         """Claim the chord. False if it's taken / invalid (another app owns it)."""
         if self.ok:
             return True
-        if not self._vk:
+        if not self._vk and not self._modchord:
             logger.warning(f"[agent-key] can't parse shortcut {self._shortcut!r}")
             return False
         app = QCoreApplication.instance()
         if app is not None:
             app.installNativeEventFilter(self._filter)
+        if self._modchord:
+            self._cand, self._tainted = None, False
+            self._timer.start()                 # watched all the time (two key reads per tick while nothing's held)
+            self.ok = True
+            logger.info(f"[agent-key] hold {label(self._shortcut)} — watched")
+            return True
         self._main_id = self._block[0]
         self._known.add(self._main_id)
         self.ok = bool(ctypes.windll.user32.RegisterHotKey(self._hwnd or None, self._main_id, self._mods, self._vk))
@@ -222,6 +265,7 @@ class AgentHotkey(QObject):
 
     def stop(self) -> None:
         self._end(emit=False)
+        self._timer.stop()
         self.drop_escape()
         if self._main_id is not None:
             ctypes.windll.user32.UnregisterHotKey(self._hwnd or None, self._main_id)
@@ -235,18 +279,10 @@ class AgentHotkey(QObject):
 
     # -- events --------------------------------------------------------------------------------------
     def _on_hotkey(self, hid: int) -> None:
-        if hid == self._main_id:
+        if hid == self._main_id and not self._modchord:
             if self._active:
                 return                          # key-repeat of the held chord
-            self.drop_escape()                  # (a new press: the transient claims take over Esc)
-            self._active, self._space_down, self._since = True, False, time.monotonic()
-            try:
-                self._claim()
-                self._mouse.start()
-            finally:
-                self._timer.start()             # always watch for the release — never stuck "held"
-            logger.info(f"[agent-key] {label(self._shortcut)} down")
-            self.pressed.emit()
+            self._activate()
             return
         if hid in self._post_esc:
             logger.info("[agent-key] Esc (just after letting go)")
@@ -261,15 +297,30 @@ class AgentHotkey(QObject):
         elif role == "esc":
             self.escape.emit()
 
+    def _activate(self) -> None:
+        self.drop_escape()                      # (a new press: the transient claims take over Esc)
+        self._active, self._space_down, self._since = True, False, _now()
+        try:
+            if self._modchord:
+                _mask()                         # (letting go of Alt must not open the front app's menu)
+            self._claim()
+            self._mouse.start()
+        finally:
+            self._timer.start()                 # always watch for the release — never stuck "held"
+        logger.info(f"[agent-key] {label(self._shortcut)} down")
+        self.pressed.emit()
+
     def _claim(self) -> None:
-        """While held: the letter (no Shift), Space and Esc — with and without Shift — swallowed."""
+        """While held: the letter (no Shift), Space and Esc — with and without Shift — swallowed. For a held
+        Ctrl + Alt, Space / Esc arrive as Ctrl+Alt+Space / Ctrl+Alt+Esc, so those are what's claimed."""
         u = ctypes.windll.user32
+        base = self._mods if self._modchord else 0
         for hid, (role, mods, vk) in zip(self._block[1:6], (
                 ("letter", MOD_NOREPEAT, self._vk),
-                ("space", MOD_NOREPEAT, VK_SPACE), ("space", MOD_SHIFT | MOD_NOREPEAT, VK_SPACE),
-                ("esc", MOD_NOREPEAT, VK_ESCAPE), ("esc", MOD_SHIFT | MOD_NOREPEAT, VK_ESCAPE))):
-            if role == "letter" and mods & ~MOD_NOREPEAT == self._mods:
-                continue                        # (a plain-letter chord is already claimed)
+                ("space", base | MOD_NOREPEAT, VK_SPACE), ("space", base | MOD_SHIFT | MOD_NOREPEAT, VK_SPACE),
+                ("esc", base | MOD_NOREPEAT, VK_ESCAPE), ("esc", base | MOD_SHIFT | MOD_NOREPEAT, VK_ESCAPE))):
+            if role == "letter" and (not vk or mods & ~MOD_NOREPEAT == self._mods):
+                continue                        # (a plain-letter chord is already claimed; no letter at all)
             if u.RegisterHotKey(self._hwnd or None, hid, mods, vk):
                 self._transient[hid] = role
                 self._known.add(hid)
@@ -311,20 +362,72 @@ class AgentHotkey(QObject):
             self._known.discard(hid)
         self._transient.clear()
 
+    def _mods_held(self, alone: bool) -> bool:
+        """The modifiers-only chord is down. `alone`: and none of the other modifiers (Win / Shift — dictation's
+        chords) — needed to START; while held, Shift may join (Shift+Space)."""
+        m = self._mods
+        if m & MOD_CONTROL and not (_down(0x11) or _down(0xA2) or _down(0xA3)):
+            return False
+        if m & MOD_ALT and not (_down(VK_LALT) and not _down(VK_RALT)):      # left Alt; AltGr never counts
+            return False
+        if m & MOD_SHIFT and not (_down(0x10) or _down(0xA0) or _down(0xA1)):
+            return False
+        if m & MOD_WIN and not (_down(0x5B) or _down(0x5C)):
+            return False
+        if alone:
+            if not m & MOD_WIN and (_down(0x5B) or _down(0x5C)):
+                return False
+            if not m & MOD_SHIFT and (_down(0x10) or _down(0xA0) or _down(0xA1)):
+                return False
+        return True
+
+    def _poll_mods(self) -> None:
+        if not self._active:
+            if not self._mods_held(alone=False):
+                self._cand, self._tainted = None, False                  # let go: ready for the next press
+                return
+            if not self._mods_held(alone=True) or _other_key_down() is not None:
+                self._tainted = True                                      # a shortcut / dictation's chord
+                return
+            if self._tainted:
+                return
+            if self._cand is None:
+                self._cand = _now()
+            elif _now() - self._cand >= CHORD_HOLD_SEC:
+                self._activate()
+            return
+        if self._space_down and not _down(VK_SPACE):
+            self._space_down = False
+            self.space.emit(False)
+        other = _other_key_down(allow=(VK_SPACE, VK_ESCAPE))
+        if other is not None:                   # Ctrl+Alt held a bit long, then its key: a shortcut, not the agent
+            logger.info(f"[agent-key] {label(self._shortcut)} + key {other:#x}: a shortcut — cancelled")
+            self._tainted, self._cand = True, None
+            self.escape.emit()
+            self._end(emit=False)
+            return
+        if not self._mods_held(alone=False) or _now() - self._since > MAX_HOLD_SEC:
+            self._cand = None
+            self._end(emit=True)
+
     def _poll(self) -> None:
+        if self._modchord:
+            self._poll_mods()
+            return
         if not self._active:
             self._timer.stop()
             return
         if self._space_down and not _down(VK_SPACE):
             self._space_down = False
             self.space.emit(False)
-        if not _down(self._vk) or time.monotonic() - self._since > MAX_HOLD_SEC:
+        if not _down(self._vk) or _now() - self._since > MAX_HOLD_SEC:
             self._end(emit=True)
 
     def _end(self, emit: bool) -> None:
         if not self._active:
             return
-        self._timer.stop()
+        if not self._modchord:
+            self._timer.stop()                  # (a watched chord keeps watching for the next press)
         self._release_claims()
         self._mouse.stop()
         self._active = False

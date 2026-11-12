@@ -52,6 +52,9 @@ def _iso(monkeypatch, tmp_path):
     monkeypatch.setattr(ap, "DEFAULT_WORKSPACE", str(tmp_path / "Filect Assistant"))
     from app.core import agent_sessions as _asn
     monkeypatch.setattr(_asn, "_touched_path", lambda: tmp_path / "assistant_sessions.json")
+    # Never your real Claude Code chats: every page's first load ran the one-time backfill over ALL of
+    # ~/.claude/projects (hundreds of MB) — a dozen pages at once outran the 25 s waits (2026-11-11).
+    monkeypatch.setattr(_asn, "_projects_root", lambda: tmp_path / "claude-projects")
     monkeypatch.setattr(ar, "_models_cache_path", lambda: tmp_path / "claude_models.json")
     launched = []
     monkeypatch.setattr(ar, "_launch", launched.append)

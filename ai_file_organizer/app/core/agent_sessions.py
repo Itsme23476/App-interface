@@ -181,8 +181,24 @@ def _parse_session(path: Path) -> Optional[SessionInfo]:
                        preview=preview[:220], mtime=mtime, project=(Path(cwd).name or cwd))
 
 
-def list_sessions(limit: int = 100, cwd: Optional[str] = None) -> List[SessionInfo]:
-    """All local Claude Code sessions, newest first. Pass `cwd` to scope to one project folder."""
+def is_junk(s) -> bool:
+    """A saved "session" that isn't a real conversation: the voice decider's own classification queries (older
+    versions saved them), resumed-context stubs, and empty titles. Never offered, never counted."""
+    tl = (getattr(s, "title", "") or "").strip().lower()
+    return (not tl or tl.startswith("current conversation:") or "spoken command:" in tl
+            or tl.startswith("this session is being continued"))
+
+
+def _decider_folder(proj: Path) -> bool:
+    """Claude Code's folder for the voice decider's own working folder (Filect's app data \\agent-router): every chat
+    in it is a classification, never a conversation — skipped without even opening its files."""
+    return proj.name.lower().endswith("-agent-router")
+
+
+def list_sessions(limit: int = 100, cwd: Optional[str] = None, real_only: bool = False) -> List[SessionInfo]:
+    """All local Claude Code sessions, newest first. Pass `cwd` to scope to one project folder. `real_only`: junk
+    (is_junk, and the decider's own folder) is left out BEFORE the `limit` — so it never uses up the places real
+    chats need (the Mac: 286 of the newest 500 were junk, which put 177 real chats out of voice's reach)."""
     root = _projects_root()
     if not root.exists():
         return []
@@ -200,7 +216,7 @@ def list_sessions(limit: int = 100, cwd: Optional[str] = None) -> List[SessionIn
         if enc.is_dir():
             projects = [enc]          # else a full scan: Claude Code shortens very long folder names
     for proj in projects:
-        if not proj.is_dir():
+        if not proj.is_dir() or (real_only and _decider_folder(proj)):
             continue
         try:
             files = list(proj.glob("*.jsonl"))
@@ -211,6 +227,8 @@ def list_sessions(limit: int = 100, cwd: Optional[str] = None) -> List[SessionIn
             if info is None:
                 continue
             if want and _norm(info.cwd) != want:
+                continue
+            if real_only and is_junk(info):
                 continue
             out.append(info)
     out.sort(key=lambda s: s.mtime, reverse=True)
@@ -421,7 +439,7 @@ def find_by_name(query: str, limit: int = 5) -> List[SessionInfo]:
     q = (query or "").strip().lower()
     if not q:
         return []
-    hits = [s for s in list_sessions(limit=500)
+    hits = [s for s in list_sessions(limit=500, real_only=True)
             if q in s.title.lower() or q in s.preview.lower()]
     return hits[:limit]
 

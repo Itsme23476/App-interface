@@ -65,8 +65,41 @@ _LIVE = ("\n\nHANDS-FREE: this was picked up by an always-on microphone, so it m
          "files from now on). ORGANIZE_AUTO_OFF: they want automatic organizing stopped for a folder ('stop auto organizing "
          "my Downloads', 'you can stop keeping my desktop tidy now'); task is ONLY the folder's name as "
          "they said it, or \"\" if they didn't name one ('that folder' is not a name). A one-time 'organize my Downloads' is "
-         "ORGANIZE, and a question about the feature is NEW.")
+         "ORGANIZE, and a question about the feature is NEW. "
+         "One more intent for THIS message only. FIND: they want to locate a file or folder on this computer: 'find my "
+         "invoice from Acme', 'where's that contract', 'open my latest invoice', 'pull up the Q3 deck', 'show me the photo of "
+         "the dog', 'look in my Downloads for the tax form'. NOT for code or text ('find the bug', 'find where this function is "
+         "used', 'search this repo'), NOT for the web or an app ('search the web for', 'look up flights', 'find me a restaurant'), "
+         "NOT for things that aren't files ('I can't find my keys' is IGNORE), NOT for an earlier conversation ('find my chat "
+         "about X' is RESUME), and a question about the feature is NEW. For FIND "
+         "task is what they're after in a few words, and add \"find\": {\"what\": plural noun for the kind of thing "
+         "('invoices', 'screenshots'), \"words\": one list per thing the file must be about, each with the word and close "
+         "alternatives, leaving out filler like file, my, document, latest and words that only name the type (recording, "
+         "video, photo, picture) ([[\"invoice\",\"bill\"],[\"Mark\"]]), \"kind\": only if "
+         "they said it or it's nearly always that type: pdf (an invoice or contract), image (a photo, a screenshot), video, "
+         "audio, recording (a screen or voice recording), "
+         "spreadsheet, presentation, document, else \"\", \"after\" and \"before\": YYYY-MM-DD only if they gave a time (before is "
+         "exclusive; 'November' alone is the most recent November), \"date_words\": that time as it would be written inside the "
+         "file (['November'], ['2025']; for one day, the ways it's written: ['October 2', '2 October', 'Oct 2']), \"when\": that "
+         "time as they said it ('from last week'), \"folder\": a folder they named, "
+         "\"newest\": true for latest, last, most recent, \"open\": true if they asked to open it}.")
 
+
+# Hands-free, while Filect is finding a file (the same panel): what the decider may also answer. Offered only when it fits.
+_FIND_DETAIL = ("Put only the new detail in \"find\", in the FIND format ({\"words\":[[\"Acme\"]]}, or after/before/date_words "
+                "for a month, or folder for a place).")
+_FIND_INTENTS = {
+    "FIND_OPEN": "they want one of the files on screen opened ('open it', 'the second one', 'the Acme one', 'yes' to "
+                 "'want me to open it?'). Set task to its number, or \"\" if you can't tell which.",
+    "FIND_SHOW": "they want to see where one of the files is ('show me where it is', 'show it in File Explorer', 'open the "
+                 "folder it's in'). Set task to its number, or \"\" if you can't tell which.",
+    "FIND_ALL": "they want the whole list ('show all of them', 'show me the rest').",
+    "FIND_NOT": "none of the files on screen is it ('not those', 'none of these', 'not that one').",
+    "FIND_MORE": "they gave more detail about the file, or answered the question it asked, and it isn't simply picking one "
+                 "of the files on screen. " + _FIND_DETAIL,
+    "FIND_GO": "yes to what it just asked: go ahead and look through those files, or show the closest ones.",
+    "FIND_CLOSE": "they're done or don't want this ('close it', 'never mind', 'that's all', 'no' to its question).",
+}
 
 # Hands-free, while Filect is organizing a folder: what the decider may also answer. Offered only when it fits.
 _ORGANIZE_INTENTS = {
@@ -88,6 +121,12 @@ _ORGANIZE_INTENTS = {
 
 
 def _organize_block(organize: dict) -> str:
+    if organize.get("head"):                   # (finding a file: the same panel, its own intents)
+        offered = " ".join(f"{k}: {_FIND_INTENTS[k]}" for k in organize["allowed"] if k in _FIND_INTENTS)
+        return ("\n\n" + organize["head"] + organize["text"] + " For THIS message these intents are also allowed, and "
+                "they win over FOLLOW_UP, NEW, RESUME and IGNORE when the words are about that. A short reply to what it "
+                "just asked or showed ('the second one', 'the Acme one', 'November', 'close it') is always about it: never "
+                "IGNORE, and never RESUME of a conversation. " + offered)
     offered = " ".join(f"{k}: {_ORGANIZE_INTENTS[k]}" for k in organize["allowed"])
     return ("\n\nFILECT IS ORGANIZING FILES (separate from the conversations above): " + organize["text"] +
             " For THIS message these intents are also allowed, and they win over FOLLOW_UP, NEW, RESUME and IGNORE "
@@ -106,8 +145,10 @@ def _build_prompt(text: str, focused_title: str | None, candidate_titles: list[s
         extra = (f"\n\nThe CURRENT conversation's assistant just asked the user: {asked[:300]!r}. A reply to "
                  "that question — even a short one ('yes', 'no', 'sure', 'go ahead', 'the first one') — is a "
                  "FOLLOW_UP of the current conversation, not filler. Keep the reply as the task.")
+    from datetime import date
+    today = f" Today is {date.today():%A %B %d, %Y}." if live else ""     # (FIND: "from last week", "in October")
     return (f"Current conversation: {focused_title or '(none)'}\n"
-            f"Other conversations:\n{listing}\n\nSpoken command: {text!r}" + (_LIVE if live else "") + extra +
+            f"Other conversations:\n{listing}\n\nSpoken command: {text!r}" + (_LIVE + today if live else "") + extra +
             (_organize_block(organize) if organize and live else ""))
 
 
@@ -120,6 +161,16 @@ def _parse(raw: str, fallback_task: str, allow_ignore: bool = False, organize: d
     screen = bool(data.get("screen")) if allow_ignore else False    # (hands-free only)
     if intent == "IGNORE" and allow_ignore:
         return {"intent": "IGNORE", "index": None, "task": fallback_task, "screen": False}
+    if intent == "FIND" and allow_ignore:
+        find = data.get("find") if isinstance(data.get("find"), dict) else {}
+        return {"intent": "FIND", "index": None, "task": str(data.get("task") or fallback_task).strip(), "screen": False,
+                "find": find}
+    if intent.startswith("FIND_") and allow_ignore:      # (Shift+Z is never offered these: there it's NEW, as before)
+        if intent in ((organize or {}).get("allowed") or ()):
+            find = data.get("find") if isinstance(data.get("find"), dict) else {}
+            return {"intent": intent, "index": None, "task": str(data.get("task") or "").strip(), "screen": False,
+                    "find": find}
+        return {"intent": "IGNORE", "index": None, "task": fallback_task, "screen": False}   # (never a stray new chat)
     # (Windows: all of these only when hands-free. Shift+Z is never offered them and its answers stay exactly as
     # before — an unknown intent there is NEW, as it always was.)
     if intent.startswith("ORGANIZE_") and intent not in ("ORGANIZE_AUTO", "ORGANIZE_AUTO_OFF") and allow_ignore:
@@ -195,8 +246,12 @@ class IntentRouter:
             cwd.mkdir(parents=True, exist_ok=True)
         except Exception:
             cwd = None
+        # no-session-persistence: Claude Code saves NOTHING for the decider. Without it every sentence it heard
+        # became a saved chat (on this PC 114 of 166 saved Claude Code chats were the decider's — Mac 833d8ac): they
+        # crowded the History, the chat drawer and the chats voice can reach. Same flag Filect's file reading uses.
         opts = ClaudeAgentOptions(model=self._model, setting_sources=[], max_turns=1, cwd=cwd,
                                   system_prompt=_SYS, allowed_tools=[],
+                                  extra_args={"no-session-persistence": None},
                                   **({"cli_path": claude_cli_override()} if claude_cli_override() else {}))
         self._client = ClaudeSDKClient(options=opts)
         await self._client.__aenter__()
@@ -261,6 +316,11 @@ def classify_with_codex(text: str, focused_title: str | None, candidate_titles: 
                    "even one or two words ('go ahead', 'yeah that one', 'correct', 'nope', 'the last one', 'desktop', "
                    "'scrap that') — is one of " + ", ".join(organize["allowed"]) + "; it is NEVER IGNORE, FOLLOW_UP "
                    "or RESUME. Use NEW only for an unrelated request, IGNORE only for talk that isn't to the assistant.")
+    elif live and organize and organize.get("head") and set(organize.get("allowed", ())) - {"FIND_CLOSE"}:
+        prompt += ("\n\nFINAL CHECK: Filect is showing or asking about files it's finding (see above). A reply to it — even "
+                   "one or two words ('the Acme one', 'November', 'the second one', 'not those', 'my Downloads') — is one of "
+                   + ", ".join(organize["allowed"]) + "; it is NEVER IGNORE, FOLLOW_UP or RESUME. A new 'find …' request "
+                   "is FIND. Use NEW only for an unrelated request, IGNORE only for talk that isn't to the assistant.")
     d = _parse(complete(_SYS, prompt), text, allow_ignore=live, organize=organize)
     logger.info("[intent-router] codex %.2fs | heard=%r -> %s idx=%s task=%r",
                 time.time() - t0, text, d["intent"], d["index"], d["task"])
@@ -504,6 +564,200 @@ def organize_guard(decision: dict, text: str, organize: dict | None, folders=Non
         except Exception as e:
             logger.info("[intent-router] organize guard couldn't list folders: %s", e)
     return decision
+
+
+# ------------------------------------------------------------------ finding a file by voice: plain answers + a guard
+_FIND_CLOSE = re.compile(
+    r"(?:(?:no|nope|nah|actually|oh) )*(?:close(?: (?:it|this|that|the (?:panel|search|window|list|results)))?"
+    r"|never ?mind|forget (?:it|about it)|cancel|no|nope|nah|no thanks|no thank you|that's all|that's it|i'm done"
+    r"|i'm good|done|stop|none needed|don't bother|do not bother|no need|skip it|leave it|it's fine|that's fine"
+    r"|don't worry about it)")
+_FIND_LEAD = {"uh", "um", "umm", "erm", "oh", "ah", "hmm", "hm", "well", "so", "okay", "ok", "actually", "hey", "filect",
+              "just", "and", "alright"}
+_FIND_TAIL = {"please", "thanks", "thank you", "for me", "now"}
+_ORD = {"first": 1, "second": 2, "third": 3, "fourth": 4, "fifth": 5, "sixth": 6, "seventh": 7, "eighth": 8, "ninth": 9,
+        "tenth": 10, "eleventh": 11, "twelfth": 12, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
+        "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12, "top": 1}
+_NUM = r"(\d{1,2}(?:st|nd|rd|th)?|" + "|".join(sorted(_ORD, key=len, reverse=True)) + r"|last)"
+_YES = re.compile(r"(?:yes|yeah|yep|yup|sure|ok|okay|please|yes please|sure thing|go ahead|do it|go for it|absolutely"
+                  r"|definitely|of course|that's it|that's the one|that one|perfect)(?: (?:please|thanks|thank you))?")
+
+
+def _find_words(text: str) -> list:
+    words = _plain(text).split()
+    while words and words[0] in _FIND_LEAD:
+        words = words[1:]
+    t = " ".join(words)
+    for tail in sorted(_FIND_TAIL, key=len, reverse=True):
+        if t.endswith(" " + tail):
+            t = t[: -len(tail) - 1]
+    return t.split()
+
+
+def _which(token: str, n_rows: int) -> str:
+    """'second' / '2nd' / '2' / 'last' -> '2' (or the last row's number); '' if it isn't one of the rows."""
+    token = token.strip()
+    if token == "last":
+        return str(n_rows) if n_rows else ""
+    m = re.fullmatch(r"(\d{1,2})(?:st|nd|rd|th)?", token)
+    n = int(m.group(1)) if m else _ORD.get(token, 0)
+    return str(n) if 1 <= n <= max(n_rows, 0) else ""
+
+
+_POSITION = (set(_ORD) - {"one"}) | {"last", "bottom", "next", "previous", "final", "middle", "other"}
+_ROW_NOUNS = {"one", "file", "invoice", "pdf", "document", "doc", "photo", "picture", "contract", "receipt", "deck",
+              "spreadsheet", "recording", "video", "screenshot", "notes", "statement", "form", "letter"}
+
+
+def _row_named(t: str, find: dict) -> str:
+    """"the Northwind one" / "open the acme invoice": the one row on screen whose NAME has that word — but only when
+    nothing was asked (an answer to "which client?" narrows the list: the Mac's bug was opening a file there).
+    '' if it isn't exactly one row."""
+    if find.get("question"):
+        return ""
+    m = re.fullmatch(r"(?:yes |yeah |ok |okay )?(?:(open) )?(?:the |that )?(.+?)", t)
+    if not m:
+        return ""
+    words = m.group(2).split()
+    if not m.group(1) and (not words or words[-1] not in _ROW_NOUNS):
+        return ""                            # ("Acme" alone could be more detail: the decider reads that)
+    if any(w in _POSITION or re.fullmatch(r"\d{1,2}(?:st|nd|rd|th)?", w) for w in words):
+        return ""                            # ("the second one" is row 2, never a file NAMED "…second notice")
+    keys = [w for w in words if w not in _ROW_NOUNS and len(w) >= 3]
+    if not keys or len(keys) > 3:
+        return ""
+    names = [set(re.findall(r"[a-z0-9]+", (n or "").lower())) for n in find.get("names") or []]
+    hits = [i for i, toks in enumerate(names, 1) if all(k in toks for k in keys)]
+    return str(hits[0]) if len(hits) == 1 else ""
+
+
+def find_quick(text: str, find: dict | None):
+    """Answers to what the search panel shows or asks, said plainly enough to need no AI — or None (the decider reads
+    it). `find` is VoiceFindController.decider_state() (with "stage" and "rows"). Closing never depends on a model
+    (the Mac's decider ignored "Close it" about one time in ten); picking a row by its number is exact."""
+    if not find or not find.get("head") or not text:
+        return None
+    stage, allowed, n = find.get("stage"), set(find.get("allowed") or ()), int(find.get("rows") or 0)
+    words = _find_words(text)
+    t = " ".join(words)
+    if not t:
+        return None
+    if "FIND_CLOSE" in allowed and _FIND_CLOSE.fullmatch(t):
+        return _decision("FIND_CLOSE", "")
+    if stage in ("ask_deep", "ask_closest") and "FIND_GO" in allowed and (
+            _YES.fullmatch(t) or re.fullmatch(r"(?:yes |yeah |yep |sure |ok |okay |please )?(?:look through (?:them|those|it)"
+                                              r"|go through (?:them|those)|show (?:me|them|those|it)(?: (?:the closest"
+                                              r"(?: ones?)?|them|those))?|show (?:me )?the closest(?: ones?)?"
+                                              r"|read (?:them|those)|do it|go ahead)(?: please)?", t)):
+        return _decision("FIND_GO", "")
+    if stage != "results":
+        return None
+    if "FIND_ALL" in allowed and re.fullmatch(r"(?:(?:show|give|let me see|see) (?:me )?)?(?:all(?: of them| the files"
+                                              r"| files)?|everything|the rest(?: of them)?|more(?: of them)?|the whole list)"
+                                              r"|show more|see all|show all", t):
+        return _decision("FIND_ALL", "")
+    if "FIND_NOT" in allowed and re.fullmatch(r"(?:no )?(?:not (?:those|these|them|that one|this one|any of (?:them|those|"
+                                              r"these))|none of (?:them|those|these)|neither(?: of them)?|wrong (?:ones?|"
+                                              r"files?)|none of those are it|those aren't it|that's not it)", t):
+        return _decision("FIND_NOT", "")
+    m = re.fullmatch(r"(?:(?:can you |could you )?(?:show me |show |tell me )?where(?:(?:'s| is) (?:it|that|that file|the "
+                     r"file)(?: saved| stored| located)?| (?:it|that|that file|the file)(?: is|'s)(?: saved| stored)?)"
+                     r"|where(?:'s| is) (?:the )?" + _NUM + r"(?: one| file)?(?: saved| stored| located)?"
+                     r"|show (?:me )?(?:it )?in (?:the )?(?:file )?explorer|show (?:me )?(?:it )?in (?:the |its )?folder"
+                     r"|open (?:the |its )?(?:folder|file location)(?: it's in)?|reveal it"
+                     r"|show me where (?:the )?" + _NUM + r"(?: one)? is)", t)
+    if m and "FIND_SHOW" in allowed:
+        num = next((g for g in m.groups() if g), "")
+        which = _which(num, n) if num else ""
+        if num and not which:
+            return None
+        return _decision("FIND_SHOW", which)
+    if "FIND_OPEN" not in allowed:
+        return None
+    if re.fullmatch(r"(?:yes |yeah |sure |ok |okay )?open(?: it| that| this| that one| this one| the file)?", t):
+        return _decision("FIND_OPEN", "")
+    m = re.fullmatch(r"(?:yes |yeah |ok |okay )?(?:open |pick |choose |select |i want |i'll take |go with |let's go with )?"
+                     r"(?:the )?(?:number |option |file )?" + _NUM + r"(?: (?:result|" + "|".join(sorted(_ROW_NOUNS))
+                     + r"))?", t)            # (never a plural: "the two invoices" is both, not row 2)
+    if m:                                    # (a number first: it's exact, a name is a guess)
+        which = _which(m.group(1), n)
+        return _decision("FIND_OPEN", which) if which else None
+    row = _row_named(t, find)
+    if row:
+        return _decision("FIND_OPEN", row)
+    if n == 1 and _YES.fullmatch(t):                    # ("Found it… Want me to open it?" — "yes")
+        return _decision("FIND_OPEN", "1")
+    return None
+
+
+def find_guard(decision: dict, text: str, find: dict | None) -> dict:
+    """The decider's answer, unless it can't be right: while the search panel asks something in your own words, a
+    short reply read as a new chat / follow-up / old chat / noise is the answer (FIND_MORE)."""
+    if not find or not find.get("head"):
+        return decision
+    intent = decision.get("intent")
+    t = _plain(text)
+    words = t.split()
+    asking = find.get("stage") in ("ask_what", "ask_folder", "ask_narrow") or (
+        find.get("stage") == "results" and find.get("question"))
+    chatty = intent in ("NEW", "FOLLOW_UP", "RESUME", "IGNORE")
+    if asking and "FIND_MORE" in (find.get("allowed") or ()) and chatty and words and len(words) <= 6 and \
+            not _QUESTION.match(t):
+        return {**decision, "intent": "FIND_MORE", "index": None, "task": text.strip(), "find": {}}
+    if find.get("stage") == "ask_folder" and intent == "FIND" and "FIND_MORE" in (find.get("allowed") or ()) and \
+            words and len(words) <= 8 and not _FIND_VERB.match(t):
+        # ("Which folder should I look in?" — "the Clients folder on the desktop": Codex started a search FOR that
+        # folder. It's where to look.)
+        from app.core.file_finder import details_from_text
+        place = details_from_text(text)["folder"] or re.sub(r"^(?:the|my|in|in my|in the)\s+", "", text.strip(), flags=re.I)
+        return {**decision, "intent": "FIND_MORE", "index": None, "task": text.strip(), "find": {"folder": place}}
+    if find.get("stage") in ("ask_deep", "ask_closest") and "FIND_MORE" in (find.get("allowed") or ()) and chatty and \
+            words and len(words) <= 8 and not _QUESTION.match(t) and (
+                re.search(r"\b(?:january|february|march|april|may|june|july|august|september|october|november|december)\b",
+                          t) or re.search(r"\bfolder\b|\b(?:in|on) (?:my |the )?(?:desktop|downloads|documents|pictures)\b",
+                                          t)):
+        # ("I couldn't find one from November — show the closest?" "try October instead": Codex read it as noise)
+        from app.core.file_finder import details_from_text
+        return {**decision, "intent": "FIND_MORE", "index": None, "task": text.strip(), "find": details_from_text(text)}
+    return decision
+
+
+_FIND_VERB = re.compile(r"^(?:(?:hey|ok|okay|um|uh|so|filect|please|now|can you|could you|would you|i need you to|help me"
+                        r"|i need to|i want to) )*(?:find|locate|pull up|open|bring up|show me|look for|where(?:'s| is| did i "
+                        r"(?:save|put|leave)))\b")
+_FILE_NOUN = re.compile(r"\b(?:invoices?|bills?|receipts?|contracts?|agreements?|lease|pdfs?|photos?|pictures?|images?"
+                        r"|screenshots?|videos?|recordings?|spreadsheets?|excel|decks?|slides|presentations?|powerpoint"
+                        r"|documents?|docs?|docx|files?|resume|cv|statements?|tickets?|boarding pass|notes|reports?|forms?"
+                        r"|letters?|scans?|passport|certificate)\b")
+_NOT_A_FILE = re.compile(r"\b(?:bug|function|code|repo|repository|error|method|class|variable|web|internet|online|google"
+                         r"|restaurants?|flights?|hotels?|weather|chats?|conversations?|emails?|messages?|tabs?|websites?"
+                         r"|apps?|editing|vs code|terminal|line|duplicates?|columns?|rows?|cells?|formulas?|values?|typos?"
+                         r"|mistakes?|in this|this (?:spreadsheet|file|document|doc|pdf|page|sheet|deck|folder))\b")
+
+
+_LOOK_IN_FOR = re.compile(r"^(?:(?:hey|ok|okay|um|uh|so|filect|please|now|can you|could you|would you|i need you to"
+                          r"|help me) )*(?:look|search|check|go|dig) (?:in |inside |through |in through )?[^,.?!]{1,40}? "
+                          r"for\b")
+
+
+def find_request_guard(decision: dict, text: str) -> dict:
+    """With nothing on screen: a plain request to find a FILE (it names a kind of file, nothing about code, the web or a
+    chat) read as a new chat — measured on Codex: "find the cloudways invoice" -> NEW, a new agent chat. It becomes a
+    search, with details read from the words. Only used for Codex's answers (Claude: 66/66 measured)."""
+    t = _plain(text)
+    to_filect = re.match(r"^(?:hey |ok |okay |hi )?filect\b", t)    # ("Hey Filect, find…": Codex read it as IGNORE —
+    if decision.get("intent") not in ("NEW", "FOLLOW_UP") and not (     #  someone talking to ANOTHER assistant)
+            decision.get("intent") == "IGNORE" and to_filect):
+        return decision
+    question = _QUESTION.match(t) and not t.startswith("where")       # ("where's that contract?" is a request)
+    asks = _FIND_VERB.match(t) or _LOOK_IN_FOR.match(t)              # ("Look in my Downloads for the tax form")
+    if not asks or not _FILE_NOUN.search(t) or _NOT_A_FILE.search(t) or question:
+        return decision
+    from app.core.file_finder import details_from_text
+    d = details_from_text(text)
+    if not (d["words"] or d["kind"] or d["after"]):
+        return decision
+    return {**decision, "intent": "FIND", "index": None, "task": text.strip(), "find": d}
 
 
 def warm_up():

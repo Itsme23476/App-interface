@@ -1,4 +1,4 @@
-"""Talk to the agent from anywhere (Windows) — hold the agent chord (TEST: Shift+Z), speak, let go → the words
+"""Talk to the agent from anywhere (Windows) — hold the agent chord (Ctrl + Alt), speak, let go → the words
 become a task for the Agents tab (it routes them: new chat / continue the one in focus / "use my … chat").
 
 While holding the chord (ported from the Mac's dictation.py, same timings):

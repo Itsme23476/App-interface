@@ -130,6 +130,9 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "pinned_paths", [])
     monkeypatch.setattr(settings, "exclusion_patterns", settings._get_default_exclusions())
     monkeypatch.setattr(database, "file_index", database.FileIndex(tmp_path / "index.db"))   # throwaway index
+    # (files here count as written long ago for the still-being-written check: Phase B #2 is tested in
+    # test_organize_recovery.py)
+    monkeypatch.setattr(aw, "STILL_WRITING_SECS", -10 ** 9)
     from app.core import search
     monkeypatch.setattr(search, "SearchService", _FakeIndexer)
     _FakeIndexer.calls = []

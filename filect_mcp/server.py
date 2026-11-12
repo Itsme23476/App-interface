@@ -19,9 +19,13 @@ Run:  set QT_QPA_PLATFORM=offscreen && <venv>\\Scripts\\python -m filect_mcp
 (registered in Claude via claude config — see README.md)
 """
 import os
+import re
 import sys
 import logging
+import threading
+import time
 from pathlib import Path
+from typing import Dict, List, Optional, Union
 
 logger = logging.getLogger("filect_mcp")
 
@@ -80,7 +84,9 @@ server = MCPServer(
         "transcript), audio, PDFs, and documents (Word/PowerPoint/RTF/email/ebook/OpenDocument). "
         "search_files/get_file_details read the index; save_to_index stores your analysis so "
         "search can find the file. add_custom_words saves dictation words. The organize tools "
-        "MOVE files: generate_organization_plan previews, apply_organization_plan moves them, "
+        "MOVE files: generate_organization_plan previews (every file in the folder: ones Filect "
+        "hasn't read yet are read first; you design the plan from its files list, Filect checks it), "
+        "apply_organization_plan moves them, "
         "undo_last_organize reverses the most recent move; enable_auto_organize turns on background "
         "auto-sorting for a folder. Tools that change app settings (add_custom_words, "
         "enable_auto_organize) must be confirmed with the user first. Nothing deletes files. "
@@ -738,27 +744,298 @@ def _index_apply_moves(moves: list) -> dict:
             logger.warning("MCP apply_moves: index path update failed: %s", e)
     # Clean up folders the move left empty (mirrors the app's post-organize cleanup).
     removed_dirs = _prune_empty_dirs(Path(m["source_path"]).parent for m in moves if m.get("source_path"))
-    return {"success": success, "moved": len(moves) - len(errors),
-            "errors": errors[:10], "log_file": log_file,
-            "renamed_to_avoid_collision": renamed, "paths_updated": paths_updated,
-            "removed_empty_folders": removed_dirs}
+    out = {"success": success, "moved": len(moves) - len(errors),
+           "errors": errors[:10], "log_file": log_file,
+           "renamed_to_avoid_collision": renamed, "paths_updated": paths_updated,
+           "removed_empty_folders": removed_dirs}
+    if removed_dirs:
+        # (said plainly: Claude Desktop, live, told the person Filect "deleted a folder that wasn't in the plan")
+        out["removed_empty_folders_note"] = ("These folders had files that this organize moved out, which left them "
+                                             "empty, so Filect removed them. Nothing in them was deleted. "
+                                             "undo_last_organize moves the files back and recreates these folders.")
+    return out
 
 
-@server.tool(description="Preview how Filect would organize a folder. READ-ONLY — moves nothing. "
-                         "Returns a plan_id and the proposed folders (which files go where). Only "
-                         "files Filect has indexed can be planned; the result lists the ones that "
-                         "aren't (not_indexed) — analyze_file + save_to_index them first to include "
-                         "them. Review the plan, then call apply_organization_plan(plan_id) to "
-                         "actually move the files.")
-def generate_organization_plan(folder: str, instructions: str = "") -> dict:
+# ---- files Filect hasn't read yet (Mac bug 13: the plan used to skip them) ------------------------------------
+# Like organizing by voice: Filect reads them first, on the person's OWN Claude Code / Codex (organize_reader:
+# the cheapest model, no tools; if neither works, Filect's backend; at worst a file is indexed by its name), then
+# every file in the folder is planned. Reading carries on in the background between calls, because MCP clients
+# cut a tool call off after about a minute (Codex's tool_timeout_sec and Claude Desktop's default: 60 s).
+READ_WAIT_SECS = 25          # one call waits this long for the reading, then says how far it got (leaves room
+                             # in the ~60 s for the plan and its second pass: 200 files planned in ~15 s, live)
+_TRIED_KEEP_SECS = 900       # a file a finished read couldn't index isn't read again for this long (no loop)
+_READS = {}                  # folder (no case) -> the reading for it: running, or finished not long ago
+_READS_LOCK = threading.Lock()
+# Who designs the plan. Measured 2026-11-10 (200 files, 10 topics): Claude and Codex, given the file list, both filed
+# 100% into 12 clean folders; Filect's backend planner (gpt-5-mini) filed 21-65% in one call, 79-100% in two steps.
+# So the client — the model already in the conversation, on the user's own agent usage — plans by default; Filect
+# checks its plan and does the moves. A folder too big to hand over (or filect_plans=true) uses Filect's planner.
+CLIENT_PLAN_MAX = 400        # up to this many files the client designs the plan (~32 tokens per file listed)
+PAGE_ROWS = 120              # files listed per call (~4k tokens): Codex cuts a tool result at ~10k tokens (live: a
+                             # 350-file list arrived cut at 306 rows), so a long list comes in pages
+_SERVED = {}                 # folder -> {"pages": pages listed to the client, "total": files, "at": time}
+
+
+def _page_seen(fkey: str, total: int, page: int) -> None:
+    with _PLANS_LOCK:
+        s = _SERVED.get(fkey)
+        if s is None or s["total"] != total or time.time() - s["at"] > _TRIED_KEEP_SECS:
+            s = _SERVED[fkey] = {"pages": set(), "total": total, "at": time.time()}
+        s["pages"].add(page)
+        s["at"] = time.time()
+
+
+def _pages_unseen(fkey: str, total: int, pages: int) -> list:
+    """Pages of this folder's list the client hasn't fetched (only matters when the list has more than one page)."""
+    if pages <= 1:
+        return []
+    with _PLANS_LOCK:
+        s = _SERVED.get(fkey)
+        if s is None or s["total"] != total or time.time() - s["at"] > _TRIED_KEEP_SECS:
+            return list(range(1, pages + 1))
+        return [p for p in range(1, pages + 1) if p not in s["pages"]]
+_PLANS = {}                  # (folder, instructions) -> Filect's planning for it, running in the background
+_PLANS_LOCK = threading.Lock()
+
+
+def _nkey(p) -> str:
+    return os.path.normcase(os.path.normpath(str(p or "")))
+
+
+def _agent_order() -> list:
+    """The agent picked in Filect (Settings → Agent) first, then the other one."""
+    try:
+        from app.core.settings import settings
+        first = getattr(settings, "assistant_agent", "claude")
+    except Exception:
+        first = "claude"
+    first = first if first in ("claude", "codex") else "claude"
+    return [first, "codex" if first == "claude" else "claude"]
+
+
+def _reading(folder_key: str):
+    """The reading for this folder: running, or finished in the last _TRIED_KEEP_SECS. None otherwise."""
+    import time
+    with _READS_LOCK:
+        job = _READS.get(folder_key)
+        if job is not None and job["finished"].is_set() and time.time() - job["ended"] > _TRIED_KEEP_SECS:
+            _READS.pop(folder_key, None)
+            return None
+        return job
+
+
+def _start_reading(folder_key: str, paths: list) -> dict:
+    """Read `paths` into Filect's index on a background thread (one reading per folder at a time)."""
+    import threading
+    import time
+    with _READS_LOCK:
+        job = _READS.get(folder_key)
+        if job is not None and not job["finished"].is_set():
+            return job
+        job = {"total": len(paths), "done": 0, "tried": {_nkey(p) for p in paths}, "by": {}, "error": "",
+               "finished": threading.Event(), "ended": 0.0}
+        _READS[folder_key] = job
+
+    def progress(done, total):
+        job["done"] = done
+
+    def run():
+        try:
+            from app.core.organize_reader import read_files
+            order = _agent_order()
+            logger.info("MCP organize: reading %d file(s) Filect hasn't read yet, on %s", len(paths), order)
+            r = read_files(paths, order, progress=progress)
+            job["by"] = r.get("by") or {}
+        except Exception as e:
+            logger.warning("MCP organize: reading failed: %s", e)
+            job["error"] = str(e)
+        finally:
+            job["ended"] = time.time()
+            job["finished"].set()
+
+    threading.Thread(target=run, name="filect-mcp-read", daemon=True).start()
+    return job
+
+
+def _second_pass(plan: dict, files_by_id: dict, instructions: str, request_plan) -> tuple:
+    """The planner sometimes just forgets files in a big folder (found live in Claude Desktop: 53 of 200 notes left
+    out of 'sort the files by what's in them'). Ask it once more about ONLY those files, with the folders it already
+    made, and add what it places. Files the instructions really don't cover ('put the invoices in Billing': the
+    rest) it leaves out again, and they stay where they are. Returns (plan, how many it placed). Never raises."""
+    try:
+        placed = set()
+        for ids in (plan.get("folders") or {}).values():
+            for fid in ids or []:
+                try:
+                    placed.add(int(fid))
+                except (TypeError, ValueError):
+                    pass
+        left = [f for fid, f in files_by_id.items() if int(fid) not in placed]
+        if not left:
+            return plan, 0
+        names = list((plan.get("folders") or {}).keys())
+        ask = ((instructions or "Organize these files into sensible folders by content and type.").strip() +
+               "\n\nThese files were left out of the first plan for this folder. Folders it already made: " +
+               (", ".join(names[:60]) or "(none)") + ". Put each file in one of those folders when it fits there, "
+               "or in a new folder if these instructions call for one. Leave a file out ONLY if these instructions "
+               "don't cover it.")
+        more = request_plan(ask, left)
+        if not more or not isinstance(more.get("folders"), dict):
+            return plan, 0
+        wanted = {int(f["id"]) for f in left}
+        folders = {k: list(v or []) for k, v in (plan.get("folders") or {}).items()}
+        added, where = 0, {}
+        for name, ids in more["folders"].items():
+            for fid in ids or []:
+                try:
+                    fid = int(fid)
+                except (TypeError, ValueError):
+                    continue
+                if fid in wanted:
+                    wanted.discard(fid)          # (once each, whatever the reply says)
+                    folders.setdefault(name, []).append(fid)
+                    added += 1
+                    where.setdefault(name, []).append(files_by_id.get(fid, {}).get("file_name", fid))
+        if added:
+            logger.info("MCP organize: the planner had left %d file(s) out; a second pass placed %d: %s", len(left),
+                        added, {k: (v[:4] + ["..."] if len(v) > 4 else v) for k, v in where.items()})
+        return {**plan, "folders": folders}, added
+    except Exception as e:
+        logger.warning("MCP organize: second pass failed: %s", e)
+        return plan, 0
+
+
+_FILE_NAME_BAD = re.compile(r'[<>:"|?*\x00-\x1f]')
+_RESERVED = {"con", "prn", "aux", "nul", *(f"com{i}" for i in range(1, 10)), *(f"lpt{i}" for i in range(1, 10))}
+
+
+def _client_plan(folders, files_by_id: dict) -> tuple:
+    """The client's own plan ({folder name: [file ids or file names]}), checked: only files of THIS folder, each
+    once (first wins), folder names safe on Windows. Returns ({"folders": {...}}, problems). Never raises."""
+    by_name = {}
+    for fid, f in files_by_id.items():
+        by_name.setdefault((f.get("file_name") or "").lower(), []).append(fid)
+    plan, seen, ignored, dupes, renamed = {}, set(), [], 0, {}
+    items = folders.items() if isinstance(folders, dict) else []
+    for raw, ids in items:
+        name = _FILE_NAME_BAD.sub("", str(raw or "")).strip().rstrip(". ").strip()
+        if name.split("/")[-1].split("\\")[-1].strip().lower() in _RESERVED:
+            name += "_"
+        if not name:
+            ignored.extend(ids if isinstance(ids, list) else [ids])
+            continue
+        if name != str(raw):
+            renamed[str(raw)] = name
+        for v in (ids if isinstance(ids, list) else [ids]):
+            fid = None
+            try:
+                fid = int(str(v).replace("id:", "").strip())
+            except (TypeError, ValueError):
+                hit = by_name.get(str(v or "").strip().lower()) or []
+                fid = hit[0] if len(hit) == 1 else None
+            if fid is None or fid not in files_by_id:
+                ignored.append(v)
+                continue
+            if fid in seen:
+                dupes += 1
+                continue
+            seen.add(fid)
+            plan.setdefault(name, []).append(fid)
+    problems = {}
+    if ignored:
+        problems["ignored"] = [str(x) for x in ignored[:20]]
+        problems["ignored_note"] = ("Not files of this folder (or not on its list), so they were left out of the plan: "
+                                    "use the ids from the files list.")
+    if dupes:
+        problems["duplicates_dropped"] = dupes
+    if renamed:
+        problems["renamed_folders"] = renamed
+    return {"folders": plan}, problems
+
+
+def _plan_rows(files: list) -> list:
+    """One line per file for the client to plan with: id | name | subfolder | kind | what's in it."""
+    out = []
+    for f in sorted(files, key=lambda f: ((f.get("subfolder") or "."), (f.get("file_name") or "").lower())):
+        about = " ".join(str(f.get("caption") or "").split())[:100]
+        out.append(f"{f.get('id')} | {f.get('file_name')} | {f.get('subfolder') or '.'} | "
+                   f"{(f.get('label') or '').strip()[:30]} | {about}")
+    return out
+
+
+def _planning(pkey):
+    with _PLANS_LOCK:
+        job = _PLANS.get(pkey)
+        if job is not None and job["finished"].is_set() and time.time() - job["ended"] > _TRIED_KEEP_SECS:
+            _PLANS.pop(pkey, None)
+            return None
+        return job
+
+
+def _start_planning(pkey, instructions: str, files: list, files_by_id: dict) -> dict:
+    """Filect's own planner for this folder, on a background thread (a big folder takes longer than one call)."""
+    with _PLANS_LOCK:
+        job = _PLANS.get(pkey)
+        if job is not None and not job["finished"].is_set():
+            return job
+        job = {"plan": None, "error": "", "files": len(files), "finished": threading.Event(), "ended": 0.0}
+        _PLANS[pkey] = job
+
+    def run():
+        try:
+            from app.core.ai_organizer import (request_organization_plan, reconcile_plan,
+                                               catchall_folder_from_instruction, ensure_all_files_included)
+            plan = request_organization_plan(
+                instructions or "Organize these files into sensible folders by content and type.", files)
+            if plan and plan.get("folders"):
+                # The same clean-up organizing by voice does (never trust the AI): every file in exactly ONE folder,
+                # no invented ids, leftovers to the "everything else" folder they named. (Found live, 80 files: the
+                # planner put 3 files in two folders each: 83 moves, and the second move of each would have failed.)
+                plan = reconcile_plan(plan, files_by_id, None, catchall_folder_from_instruction(instructions or ""))
+                plan, again = _second_pass(plan, files_by_id, instructions, request_organization_plan)
+                if again:
+                    plan = reconcile_plan(plan, files_by_id, None, None)
+                if not (instructions or "").strip():
+                    # "Organize this folder": EVERY file gets a place (the app's own fill-in: its closest folder).
+                    plan = ensure_all_files_included(plan, set(files_by_id), files)
+                job["plan"] = plan
+            else:
+                job["error"] = "Could not generate a plan."
+        except Exception as e:
+            logger.warning("MCP organize: planning failed: %s", e)
+            job["error"] = f"plan failed: {e}"
+        finally:
+            job["ended"] = time.time()
+            job["finished"].set()
+
+    threading.Thread(target=run, name="filect-mcp-plan", daemon=True).start()
+    return job
+
+
+@server.tool(description="Organize a folder (step 1: the plan). Moves nothing. Covers EVERY file in the folder: "
+                         "files Filect hadn't read yet are read first, on the user's own Claude Code / Codex, and "
+                         "added to its search index. A big folder takes a while: status='reading' or "
+                         "status='planning' means call again with the same folder and instructions (the work goes "
+                         "on in the background). More than 300 unread files: it asks first "
+                         "(confirmation_required) — ask the user, then call again with read_new_files=true. "
+                         "status='plan_needed': YOU design the plan — the result lists every file (id | name | "
+                         "subfolder | kind | what's in it) with the rules, 120 per page (a longer list: get every page "
+                         "with page=2, 3, ... first); call this again with the same folder and "
+                         "folders={\"<folder name>\": [<file ids>]}. Filect checks it and returns a plan_id. Set "
+                         "filect_plans=true only if you want Filect's own planner instead. Show the user the plan, "
+                         "then apply_organization_plan(plan_id) moves the files.")
+def generate_organization_plan(folder: str, instructions: str = "", read_new_files: bool = False,
+                               folders: Optional[Dict[str, List[Union[int, str]]]] = None,
+                               filect_plans: bool = False, page: int = 1) -> dict:
+    call_started = time.monotonic()
     try:
         gate = _require_access()
         if gate:
             return gate
         import json as _json
         import uuid
-        from app.core.ai_organizer import request_organization_plan, plan_to_moves
-        from app.core.organize_reader import MAX_FILES, scan
+        from app.core.ai_organizer import plan_to_moves
+        from app.core.organize_reader import ASK_ABOVE, MAX_FILES, scan
         folder = str(folder or "").strip().strip("\"'").strip()
         # What's really in the folder, the way voice organize sees it: never inside code projects, apps, hidden or
         # linked folders, and only files still there (the index can remember deleted ones).
@@ -772,48 +1049,170 @@ def generate_organization_plan(folder: str, instructions: str = "") -> dict:
             return {"error": "That folder is a code project, so Filect won't organize it."}
         if err == "too_many":
             return {"error": f"That folder has more than {MAX_FILES:,} files. Pick a smaller folder."}
-        key = lambda p: os.path.normcase(os.path.normpath(str(p or "")))
+        key = _nkey
         on_disk = {key(p): p for p in found.get("files") or []}
         if not on_disk:
             return {"error": "That folder has no files Filect can organize."}
+        # Read what Filect hasn't read yet (new, changed, or indexed with nothing about it), so it's planned too.
+        fkey = key(folder)
+        job = _reading(fkey)
+        tried = job["tried"] if job is not None and job["finished"].is_set() else set()
+        unread = [p for p in found.get("unread") or [] if key(p) not in tried]
+        if unread or (job is not None and not job["finished"].is_set()):
+            if (job is None or job["finished"].is_set()) and len(unread) > ASK_ABOVE and not read_new_files:
+                return {"confirmation_required": True,
+                        "action": "read files",
+                        "folder": folder,
+                        "unread_files": len(unread),
+                        "warning": (f"{len(unread):,} files in this folder haven't been read by Filect yet. To plan "
+                                    "them it reads them first, on the user's own Claude Code / Codex, which could "
+                                    "use a lot of its limit. Ask the user; only if they agree, call again with "
+                                    "read_new_files=true. Nothing has been read or moved.")}
+            job = _start_reading(fkey, unread)
+            if not job["finished"].wait(READ_WAIT_SECS):
+                return {"status": "reading",
+                        "read": job["done"], "of": job["total"],
+                        "note": (f"Filect is reading the {job['total']:,} file{'s' if job['total'] != 1 else ''} it "
+                                 f"hadn't read yet ({job['done']:,} done) so they can be planned too. It keeps going "
+                                 "in the background: call generate_organization_plan again with the same folder "
+                                 "and instructions in about a minute. Nothing has been moved.")}
+            if job["error"]:
+                logger.warning("MCP organize: planning with what's indexed (reading failed: %s)", job["error"])
         files = [f for f in _files_under(folder) if key(f.get("file_path")) in on_disk]
         indexed = {key(f.get("file_path")) for f in files}
-        missing = [p for k, p in on_disk.items() if k not in indexed]
+        missing = [p for k, p in on_disk.items() if k not in indexed and os.path.exists(p)]
         left_out = {}
-        if missing:                          # (Mac bug 13: these were left out without a word)
+        if missing:                          # (couldn't be read even by name: never left out without a word)
             left_out = {
                 "not_indexed": len(missing),
                 "not_indexed_examples": [os.path.basename(p) for p in missing[:20]],
-                "how_to_include_them": "Filect hasn't indexed these, so a plan can't place them and they stay where "
-                                       "they are. To include them: analyze_file, then save_to_index, for each one "
-                                       "(or index the folder in the Filect app), then generate the plan again.",
+                "why": "Filect couldn't read these, so the plan can't place them and they stay where they are.",
             }
         if not files:
-            return {"error": f"None of the {len(on_disk)} files in that folder are in Filect's index yet, so there's "
+            return {"error": f"Filect couldn't read any of the {len(on_disk)} files in that folder, so there's "
                              "nothing to plan.", **left_out}
+        for f in files:                      # (each file's place in the folder: '.' = the folder itself)
+            try:
+                rel = os.path.relpath(os.path.dirname(f.get("file_path") or ""), folder)
+            except ValueError:
+                rel = "."
+            f["subfolder"] = "." if rel in (".", "") or rel.startswith("..") else rel.replace("\\", "/")
         files_by_id = {f["id"]: f for f in files}
-        plan = request_organization_plan(
-            instructions or "Organize these files into sensible folders by content and type.", files)
-        if not plan or not plan.get("folders"):
-            return {"error": "Could not generate a plan."}
-        moves = plan_to_moves(plan, files_by_id, Path(folder))
+        read_first = {}
+        if job is not None and job["finished"].is_set() and not job.get("reported"):
+            job["reported"] = True           # (said once: with the files list or the plan it was read for)
+            read_first = {"read_first": {"files": job["total"], "by": job["by"],
+                                         "note": "Filect hadn't read these yet: it read them first (claude / "
+                                                 "codex = the user's own Claude Code / Codex; backend = Filect's "
+                                                 "own analysis; name = by the file's name only) and added them "
+                                                 "to its search index."}}
+        problems, planned_by = {}, "filect"
+        pages = max(1, -(-len(files) // PAGE_ROWS))
+        if folders is not None:
+            # The client's own plan: checked, never trusted (only this folder's files, each once, safe names).
+            unseen = _pages_unseen(fkey, len(files), pages)
+            if unseen:
+                # (Found live: Codex cut a 350-file list at ~10k tokens; a plan from part of the list leaves the rest
+                # out. So the whole list must have been fetched first.)
+                return {"error": f"Not every file has been listed to you yet: fetch page(s) {unseen} first (call "
+                                 "generate_organization_plan with the same folder and instructions, and page=N, no "
+                                 "folders), then send the plan for ALL the files. Nothing has been moved.",
+                        "missing_pages": unseen, "pages": pages}
+            plan, problems = _client_plan(folders, files_by_id)
+            planned_by = "you"
+            if not plan["folders"]:
+                return {"error": "That plan has no files of this folder in it. Use the ids from the files list "
+                                 "(call generate_organization_plan again without folders to get it).", **problems}
+        elif not filect_plans and len(files) <= CLIENT_PLAN_MAX:
+            page = min(max(1, int(page or 1)), pages)
+            rows = _plan_rows(files)
+            _page_seen(fkey, len(files), page)
+            more = [p for p in range(1, pages + 1) if p not in _SERVED.get(fkey, {}).get("pages", set())]
+            return _jsonsafe({
+                "status": "plan_needed",
+                "folder": folder,
+                "instructions": instructions or "",
+                "total_files": len(files),
+                **({"page": page, "pages": pages,
+                    "files_on_this_page": f"{(page - 1) * PAGE_ROWS + 1}-{min(page * PAGE_ROWS, len(files))} of "
+                                          f"{len(files)}"} if pages > 1 else {}),
+                "files_columns": "id | file name | subfolder ('.' = the folder itself) | kind | what's in it",
+                "files": rows[(page - 1) * PAGE_ROWS:page * PAGE_ROWS],
+                **read_first,
+                **left_out,
+                "next_step": ((
+                    f"FIRST get the rest of the list: call generate_organization_plan again with the same folder and "
+                    f"instructions and page={more[0]} (pages still to fetch: {more}). Only when you have all "
+                    f"{len(files)} files, design the plan as below. ") if more else "") + (
+                    "Design the plan yourself from these files and the user's request, then call "
+                    "generate_organization_plan again with the same folder and instructions, and "
+                    "folders={\"<folder name>\": [<file ids>], ...}. Rules: group files by what they are about "
+                    "(topic, project, person, event or kind), using each file's 'what's in it', not its name or "
+                    "number; use the folder names the user gave, exactly as written; one level, plain names (no "
+                    "'/'), never a folder named like this folder; no catch-all 'misc' / 'other' unless the user asked "
+                    "or a few files truly fit nowhere. Put every file in exactly one folder; leave a file out only if "
+                    "the user's request doesn't cover it (\"just the invoices\") or says to keep it where it is — "
+                    "those stay put. Nothing moves until apply_organization_plan."),
+            })
+        else:
+            # Filect's own planner (a folder too big to hand over, or asked for): in the background, as one call
+            # may not be enough for a big folder.
+            pkey = (fkey, (instructions or "").strip().lower())
+            pjob = _planning(pkey) or _start_planning(pkey, instructions, files, files_by_id)
+            if not pjob["finished"].wait(max(1.0, READ_WAIT_SECS - (time.monotonic() - call_started))):
+                return {"status": "planning", "files": pjob["files"], **read_first,
+                        "note": (f"Filect is planning the {pjob['files']:,} files. It keeps going in the background: "
+                                 "call generate_organization_plan again with the same folder and instructions in "
+                                 "about a minute. Nothing has been moved.")}
+            with _PLANS_LOCK:
+                _PLANS.pop(pkey, None)       # (used once: asking again plans again)
+            if pjob["error"] or not pjob["plan"]:
+                return {"error": pjob["error"] or "Could not generate a plan."}
+            plan = pjob["plan"]
+        in_plan = set()
+        for ids in plan.get("folders", {}).values():
+            for fid in ids:
+                try:
+                    in_plan.add(int(fid))
+                except (TypeError, ValueError):
+                    pass
+        unplaced = [f for fid, f in files_by_id.items() if fid not in in_plan]
+        moves, seen = [], set()
+        for m in plan_to_moves(plan, files_by_id, Path(folder)):
+            if key(m["source_path"]) not in seen:   # (one move per file, whatever the plan says)
+                seen.add(key(m["source_path"]))
+                moves.append(m)
         if not moves:
-            return {"error": "The plan produced no moves."}
+            return {"error": "The plan produced no moves (every file is already where the plan puts it).",
+                    **problems}
         plan_id = uuid.uuid4().hex[:12]
         (_mcp_plans_dir() / f"plan-{plan_id}.json").write_text(_json.dumps(moves), encoding="utf-8")
         summary = {}
         for m in moves:
             folder_name = Path(m["destination_path"]).parent.name
             summary.setdefault(folder_name, []).append(Path(m["source_path"]).name)
+        left_why = ("your plan leaves out" if planned_by == "you" else "the instructions don't cover")
         return _jsonsafe({
             "plan_id": plan_id,
+            "planned_by": planned_by,
             "total_files": len(moves),
             "proposed_folders": {k: v[:20] for k, v in summary.items()},
+            **({"files_per_folder": {k: len(v) for k, v in summary.items()},
+                "proposed_folders_note": "proposed_folders lists up to 20 names per folder; files_per_folder has "
+                                         "the full counts."} if any(len(v) > 20 for v in summary.values()) else {}),
+            **read_first,
+            **problems,
             "note": "Nothing moved yet. Call apply_organization_plan(plan_id) to apply." + (
-                f" {len(missing)} file{'s' if len(missing) != 1 else ''} in the folder "
-                f"{'are' if len(missing) != 1 else 'is'}n't indexed and stay where they are: see not_indexed."
-                if missing else ""),
+                f" {len(missing)} file{'s' if len(missing) != 1 else ''} in the folder couldn't be read and "
+                f"stay{'s' if len(missing) == 1 else ''} where {'they are' if len(missing) != 1 else 'it is'}: "
+                "see not_indexed." if missing else "") + (
+                f" {len(unplaced)} file{'s' if len(unplaced) != 1 else ''} {left_why} "
+                f"stay{'s' if len(unplaced) == 1 else ''} where {'they are' if len(unplaced) != 1 else 'it is'}: see "
+                "left_where_they_are." if unplaced else ""),
             **left_out,
+            **({"left_where_they_are": len(unplaced),
+                "left_examples": [f.get("file_name") or os.path.basename(f.get("file_path") or "")
+                                  for f in unplaced[:20]]} if unplaced else {}),
         })
     except Exception as e:
         return {"error": f"plan failed: {e}"}
@@ -876,8 +1275,10 @@ def undo_last_organize() -> dict:
             return {"error": "No organize operation to undo."}
         latest = logs[-1]
         moves = _json.loads(latest.read_text(encoding="utf-8")).get("moves", [])
-        reverted, skipped, db_updates = 0, [], []
+        reverted, skipped, db_updates, recreated, done = 0, [], [], [], []
         for m in reversed(moves):
+            if m.get("back"):                    # (already put back by an earlier, partial undo)
+                continue
             src = Path(m.get("to", ""))      # file is currently at the destination
             dst = Path(m.get("from", ""))    # move it back to the original
             if not src.exists():
@@ -887,15 +1288,23 @@ def undo_last_organize() -> dict:
                 skipped.append(f"original occupied: {dst.name}")
                 continue
             try:
+                if not dst.parent.exists() and str(dst.parent) not in recreated:
+                    recreated.append(str(dst.parent))     # a folder the organize had emptied and removed
                 dst.parent.mkdir(parents=True, exist_ok=True)
-                shutil.move(str(src), str(dst))
+                from app.core.apply import move_file
+                move_file(src, dst)                  # (a file open elsewhere stays: never a half copy back)
                 reverted += 1
+                done.append(m)
                 # keep the index in sync: resolve id by the current (destination) path, point it back
                 rec = file_index.get_file_by_path(str(src))
                 if rec:
                     db_updates.append((rec["id"], str(dst)))
             except Exception as e:
-                skipped.append(f"{src.name}: {e}")
+                from app.core.apply import is_busy
+                skipped.append(f"open in another program, left where it is: {src.name}" if is_busy(e)
+                               else f"{src.name}: {e}")
+        from app.core.apply import mark_moves_back
+        mark_moves_back(str(latest), done)       # (History: reverted, or partly reverted with Revert kept)
         paths_updated = 0
         if db_updates:
             try:
@@ -904,9 +1313,15 @@ def undo_last_organize() -> dict:
                 logger.warning("MCP undo: index path update failed: %s", e)
         # Remove destination folders that undo left empty (mirrors the app's cleanup).
         removed_dirs = _prune_empty_dirs(Path(m.get("to", "")).parent for m in moves if m.get("to"))
-        return {"reverted": reverted, "skipped": skipped[:10],
-                "paths_updated": paths_updated, "from_log": latest.name,
-                "removed_empty_folders": removed_dirs}
+        out = {"reverted": reverted, "skipped": skipped[:10],
+               "paths_updated": paths_updated, "from_log": latest.name,
+               "removed_empty_folders": removed_dirs}
+        if recreated:
+            out["recreated_folders"] = recreated
+        if removed_dirs:
+            out["removed_empty_folders_note"] = ("The folders the organize had made, now empty again because "
+                                                 "their files went back. Nothing in them was deleted.")
+        return out
     except Exception as e:
         return {"error": f"undo failed: {e}"}
 

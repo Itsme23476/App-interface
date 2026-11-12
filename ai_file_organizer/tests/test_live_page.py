@@ -697,6 +697,28 @@ def test_assistant_tab_agent_choice():
     assert all("padding" in b.styleSheet() for b in tab.agent_btns.values())
 
 
+def test_the_30_second_age_tick_only_updates_the_ages():
+    """'now' → '5 min' on the rows every 30 s — without restyling them all (a full list of 100 froze the window
+    ~0.8 s every 30 s, measured)."""
+    _, tab, _ = _real_pair()
+    rows = [tab._row(i) for i in range(3)]
+    for i, r in enumerate(rows):
+        r.set_outcome("Opened it", "#B39DFF")
+        r.t0 = time.time() - 60 * (5 + i)
+    styled = []
+    for r in rows:
+        r.restyle = lambda r=r: styled.append(r)
+    tab._age_timer.stop()
+    tab._age_timer.setInterval(1)
+    tab._age_timer.start()
+    end = time.time() + 2
+    while time.time() < end and rows[0].when.text() != "5 min":
+        QApplication.processEvents()
+    tab._age_timer.stop()
+    assert [r.when.text() for r in rows] == ["5 min", "6 min", "7 min"]
+    assert styled == [], "the tick must not restyle every row"
+
+
 def test_agents_menu_switch_starts_a_new_chat():
     """The Agents page's agent menu: ✓ = the agent the box is using (the open chat's); the other row says it starts a
     new chat, and picking it does — even when it's already "new chats' agent" (that did NOTHING before: the user

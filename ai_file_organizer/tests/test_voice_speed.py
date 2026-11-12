@@ -990,3 +990,281 @@ def test_a_warm_claude_code_closed_the_moment_it_starts_never_crashes(monkeypatc
             app.processEvents()
     assert pump(6, lambda: not page._spare_threads), f"every spare's thread ended: {list(page._spare_threads)}"
     page.shutdown()
+
+
+# ---- A5 (2026-11-11): a request handed to a warm Claude Code that had just failed never hangs (Mac f2db4ea) ------
+class _DyingClaude:
+    """A warm Claude Code that can't start ("install" / out of usage): it fails as soon as it runs."""
+    made = []
+
+    def __init__(self, cwd, on_step=None, on_approval=None, on_result=None):
+        _DyingClaude.made.append(self)
+
+    async def run(self, prompt, wait_for=None, **kw):
+        raise ar.AgentSetupError("install")
+
+    async def interrupt(self):
+        pass
+
+
+def _spare_worker():
+    w = ap.AgentWorker("spare1", "C:/tmp", "", parked=True, agent="claude")
+    seen = {"done": [], "error": []}
+    w.done.connect(lambda k: seen["done"].append(k))
+    w.error.connect(lambda k, m: seen["error"].append((k, m)))
+    return w, seen
+
+
+def test_a_stopped_spare_refuses_the_request(monkeypatch):
+    monkeypatch.setattr(ar, "AgentRunner", _DyingClaude)
+    w, seen = _spare_worker()
+    t = threading.Thread(target=w.run)
+    t.start()
+    t.join(5)
+    app.processEvents()
+    assert w.ended and seen["done"] == ["spare1"] and seen["error"], seen
+    assert w.deliver("s7", "What is the capital of Canada?") is False, "nothing is waiting: it must say no"
+    assert w.key == "spare1", "a refused request doesn't take the worker over"
+
+
+def test_failing_while_the_request_is_handed_over_reaches_the_chat(monkeypatch):
+    """The live race: it fails, and the request is handed over before it has finished stopping. Its error must
+    reach the chat that took it (before: the error went out as "spare1" and the chat waited for good)."""
+    monkeypatch.setattr(ar, "AgentRunner", _DyingClaude)
+    w, seen = _spare_worker()
+    gate, inside = threading.Event(), threading.Event()
+    real_new = asyncio.new_event_loop
+
+    def held_loop():
+        loop = real_new()
+        real_close = loop.close
+
+        def close():                                 # (held between failing and finishing)
+            inside.set()
+            gate.wait(5)
+            real_close()
+        loop.close = close
+        return loop
+    monkeypatch.setattr(asyncio, "new_event_loop", held_loop)
+    t = threading.Thread(target=w.run)
+    t.start()
+    assert inside.wait(5)
+    accepted = w.deliver("s7", "What is the capital of Canada?")
+    gate.set()
+    t.join(5)
+    monkeypatch.setattr(asyncio, "new_event_loop", real_new)
+    app.processEvents()
+    assert accepted is True and seen["done"] == ["s7"], (accepted, seen)
+    assert seen["error"] and seen["error"][0][0] == "s7", ("the chat must hear why", seen["error"])
+
+
+def test_a_running_spare_gets_the_request(monkeypatch):
+    monkeypatch.setattr(ar, "AgentRunner", FakeClaude)
+    FakeClaude.made.clear()
+    w, seen = _spare_worker()
+    w.result.connect(lambda *a: None)
+    t = threading.Thread(target=w.run)
+    t.start()
+    assert pump(3, lambda: FakeClaude.made and FakeClaude.made[0].parked)
+    assert not w.ended
+    assert w.deliver("s8", "hello", ["img"]) is True
+    t.join(5)
+    app.processEvents()
+    assert FakeClaude.made[0].got == "hello" and w.key == "s8" and seen["done"] == ["s8"], (w.key, seen)
+
+
+def test_deliver_before_it_parks_still_arrives(monkeypatch):
+    monkeypatch.setattr(ar, "AgentRunner", FakeClaude)
+    FakeClaude.made.clear()
+    w, seen = _spare_worker()
+    w.result.connect(lambda *a: None)
+    assert w.deliver("s9", "early") is True          # (given before its loop even started)
+    t = threading.Thread(target=w.run)
+    t.start()
+    t.join(5)
+    app.processEvents()
+    assert FakeClaude.made[0].got == "early" and seen["done"] == ["s9"], seen
+
+
+def test_the_page_starts_the_chat_fresh_when_its_warm_claude_code_already_failed(monkeypatch):
+    """Through the real page: a warm Claude Code is ready, it fails, and a request arrives before its "done" has
+    been handled. The chat must start on a fresh Claude Code (and answer), never sit on "working"."""
+    page = _page(monkeypatch)
+    gate = threading.Event()
+
+    class _GatedDying(_DyingClaude):                 # fails only once the test says so
+        async def run(self, prompt, wait_for=None, **kw):
+            while not gate.is_set():
+                await asyncio.sleep(0.01)
+            raise ar.AgentSetupError("install")
+    monkeypatch.setattr(ar, "AgentRunner", _GatedDying)
+    _DyingClaude.made.clear()
+    page.set_hands_free(True)                        # a warm Claude Code starts…
+    assert pump(5, lambda: "new" in page._spares and _DyingClaude.made), "a warm Claude Code started"
+    w = page._spares["new"]["worker"]
+    gate.set()                                       # …and fails
+    end = time.time() + 5
+    while not w.ended and time.time() < end:         # (NO UI events here: its done stays queued, unhandled)
+        time.sleep(0.01)
+    assert w.ended and page._spares.get("new", {}).get("worker") is w, "it failed, and its done isn't handled yet"
+    # (its done is queued, not handled yet: exactly the moment the live test hit)
+    monkeypatch.setattr(ar, "AgentRunner", FakeClaude)
+    FakeClaude.made.clear()
+    spare = page._spares["new"]
+    sess = ap.AgentSession("s1", spare["sig"][0], "What is 2 plus 2?", "Math", spare["sig"][2],
+                           spare["sig"][3], spare["sig"][4])
+    page._sessions[sess.key] = sess
+    page._start_worker(sess, None)
+    assert sess.worker is not spare["worker"], "never the worker that had already ended"
+    assert pump(5, lambda: FakeClaude.made and FakeClaude.made[0].got), "a fresh Claude Code got the request"
+    assert FakeClaude.made[0].got.startswith("What is 2 plus 2?")
+    assert pump(5, lambda: not sess.running and sess.status != "working"),         f"and it finished (no endless 'working'): {sess.status}"
+    page.set_hands_free(False)
+    page.shutdown()
+
+
+# ---- A5, found by the live test (2026-11-11): a warm Claude Code that ENDS while it waits ------------------------
+# (killed / crashed while idle). Nothing noticed until the request was written to it: the chat said "Cannot write to
+# terminated process (exit code: 15)" instead of answering.
+from types import SimpleNamespace  # noqa: E402
+_RealRunner = ar.AgentRunner      # (taken at import: the autouse fixture swaps in _NeverRunner)
+
+
+def _loop_run(coro):
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
+
+
+def _client(code=None):
+    return SimpleNamespace(_transport=SimpleNamespace(_process=SimpleNamespace(returncode=code, pid=None)))
+
+
+def test_a_waiting_spare_notices_its_claude_code_ending():
+    c = _client()
+
+    async def never():
+        await asyncio.sleep(30)
+
+    async def go():
+        asyncio.get_running_loop().call_later(0.3, lambda: setattr(c._transport._process, "returncode", 15))
+        return await _RealRunner._await_request(c, never, every=0.05)
+    t0 = time.time()
+    with pytest.raises(ar.WarmStartGone) as ei:
+        _loop_run(go())
+    assert ei.value.code == 15 and time.time() - t0 < 2, "noticed within moments, not when a request is written"
+
+
+def test_a_waiting_spare_still_gets_its_request():
+    async def soon():
+        await asyncio.sleep(0.2)
+        return ("hi", [])
+    assert _loop_run(_RealRunner._await_request(_client(), soon, every=0.05)) == ("hi", [])
+
+
+class _GoneWhileWaiting:
+    """Its Claude Code ends while it waits for a request."""
+    made = []
+
+    def __init__(self, cwd, on_step=None, on_approval=None, on_result=None):
+        self.on_result, self.got, self.images, self.parked = on_result, None, None, None
+        _GoneWhileWaiting.made.append(self)
+
+    async def run(self, prompt, wait_for=None, **kw):
+        self.parked = wait_for is not None
+        if wait_for is not None:
+            raise ar.WarmStartGone(15)
+        self.got, self.images = prompt, kw.get("images")
+        self.on_result("sid-fresh", 0.0)
+        return "sid-fresh"
+
+    async def interrupt(self):
+        pass
+
+
+class _GoneOnRequest(_GoneWhileWaiting):
+    """Alive while it waits; ended by the time the request is written to it."""
+    async def run(self, prompt, wait_for=None, **kw):
+        if wait_for is not None:
+            self.parked = True
+            await wait_for()
+            raise ar.WarmStartGone(15)
+        return await super().run(prompt, **kw)
+
+
+def test_a_spare_whose_claude_code_ends_while_waiting_closes_quietly(monkeypatch):
+    monkeypatch.setattr(ar, "AgentRunner", _GoneWhileWaiting)
+    _GoneWhileWaiting.made.clear()
+    w, seen = _spare_worker()
+    t = threading.Thread(target=w.run)
+    t.start()
+    t.join(5)
+    app.processEvents()
+    assert w.ended and seen["done"] == ["spare1"] and not seen["error"], seen
+    assert w.deliver("s7", "What is 2 plus 2?") is False, "it takes no request now: the chat starts fresh"
+    assert len(_GoneWhileWaiting.made) == 1, "no fresh Claude Code started for nobody"
+
+
+def test_a_request_reaching_an_ended_warm_claude_code_runs_on_a_fresh_one(monkeypatch):
+    monkeypatch.setattr(ar, "AgentRunner", _GoneOnRequest)
+    _GoneWhileWaiting.made.clear()
+    w, seen = _spare_worker()
+    results = []
+    w.result.connect(lambda k, sid, c: results.append((k, sid)))
+    t = threading.Thread(target=w.run)
+    t.start()
+    assert pump(3, lambda: _GoneWhileWaiting.made and _GoneWhileWaiting.made[0].parked)
+    assert w.deliver("s8", "What is 2 plus 2?", ["shot.png"]) is True
+    t.join(5)
+    app.processEvents()
+    assert len(_GoneWhileWaiting.made) == 2, "the request went to a fresh Claude Code"
+    fresh = _GoneWhileWaiting.made[1]
+    assert fresh.got == "What is 2 plus 2?" and fresh.images == ["shot.png"] and not fresh.parked
+    assert seen["done"] == ["s8"] and not seen["error"] and results == [("s8", "sid-fresh")], (seen, results)
+
+
+class _DeadSDK:
+    """Stands in for claude_agent_sdk.ClaudeSDKClient whose claude.exe has exited (code 15): writing to it fails."""
+    def __init__(self, options=None):
+        self._transport = SimpleNamespace(_process=SimpleNamespace(returncode=15, pid=None))
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        return False
+
+    async def query(self, prompt):
+        raise RuntimeError("Cannot write to terminated process (exit code: 15)")
+
+    async def receive_response(self):
+        if False:
+            yield None
+
+
+def _runner_on_dead_sdk(monkeypatch):
+    import claude_agent_sdk
+    monkeypatch.setattr(claude_agent_sdk, "ClaudeSDKClient", _DeadSDK)
+    monkeypatch.setattr(ar, "claude_mcp_servers", lambda cwd="": {})
+
+    async def approve(req):
+        return True
+    return _RealRunner(tempfile.gettempdir(), on_step=lambda s: None, on_approval=approve,
+                          on_result=lambda *a: None)
+
+
+def test_the_runner_says_a_warm_start_was_gone_before_it_replied(monkeypatch):
+    r = _runner_on_dead_sdk(monkeypatch)
+
+    async def given():
+        return ("What is 2 plus 2?", [])
+    with pytest.raises(ar.WarmStartGone):
+        _loop_run(r.run("", wait_for=given))
+
+
+def test_a_cold_start_that_fails_is_still_a_real_error(monkeypatch):
+    r = _runner_on_dead_sdk(monkeypatch)
+    with pytest.raises(RuntimeError, match="terminated process"):
+        _loop_run(r.run("What is 2 plus 2?"))

@@ -61,7 +61,7 @@ _IMAGE_EXT = {".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".tif", ".gif", ".webp",
 _RAW_EXT = {".raw", ".cr2", ".nef", ".arw"}       # (Windows: nothing here converts these: labelled from the name)
 _OCR_EXT = {".csv", ".xlsx", ".xls", ".pdf", ".docx", ".pptx", ".rtf", ".eml", ".epub", ".odt", ".ods", ".odp"}
 
-_PDFIUM_LOCK = threading.Lock()   # (PDFium isn't thread-safe, and several batches are read at once)
+from app.core.text_extract import PDFIUM_LOCK as _PDFIUM_LOCK   # (PDFium isn't thread-safe: ONE lock app-wide)
 
 _SYSTEM = (
     "You label files for a file-search index and for sorting them into folders. You receive numbered files: "

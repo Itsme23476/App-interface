@@ -262,7 +262,10 @@ class SupabaseAuth:
             return {'success': False, 'error': 'Supabase not available'}
         
         try:
-            self._auth_client.sign_out()
+            # THIS device only. The library's default is {"scope": "global"}, which revokes every session the
+            # account has — signing out of Filect on Windows signed the user out on their Mac too (the Mac hit
+            # this first: Mac 17f844a). "local" ends just this session.
+            self._auth_client.sign_out({"scope": "local"})
             self._user = None
             self._session = None
             self._subscription = None

@@ -1357,3 +1357,76 @@ def test_folder_names_people_really_have(tmp_path):
     f = desk / "Old Stuff" / "a.txt"
     f.write_text("x")
     assert typed(f'"{f}"') == "", "a file's path isn't a folder"
+
+
+# ================================================================== 2026-11-10: sharing the panel with finding a file
+class _FakeFind:
+    """The search panel, as the Agents page sees it: one file on screen ("Found it… Want me to open it?")."""
+    def __init__(self):
+        self.said_at, self.opened, self.closed = 0.0, [], 0
+
+    def waiting_for_answer(self):
+        return True
+
+    def decider_state(self):
+        return {"head": "FILECT IS FINDING A FILE: ", "text": "One file is on screen.", "stage": "results",
+                "question": "", "rows": 1, "names": ["invoice.pdf"],
+                "allowed": ["FIND_OPEN", "FIND_SHOW", "FIND_ALL", "FIND_NOT", "FIND_MORE", "FIND_CLOSE"]}
+
+    def open(self, which=""):
+        self.opened.append(which)
+        return "find_opened"
+
+    def close(self):
+        self.closed += 1
+        return True
+
+
+def test_yes_goes_to_whatever_asked_last_a_chat_approval_or_the_search_panel(monkeypatch):
+    """(The review: a search panel left on screen took the "yes" meant for "Allow Bash?" and opened a file.)"""
+    page, org = _agents(monkeypatch)
+    finder = _FakeFind()
+    page.mw.voice_find = finder
+    decided = []
+    page._decide = lambda yn, key=None: decided.append((yn, key))
+    s = ap.AgentSession("k1", "C:/tmp", "count my files", "Count Files", True, "m", "high")
+    s.status, s.approval_req = "needs_you", type("Req", (), {"tool": "Bash", "tool_input": {}})()
+    page._sessions["k1"] = s
+    page._voice_target = lambda: s
+    finder.said_at, s.approval_at = time.time() - 60, time.time()          # the chat asked after the panel spoke
+    assert _say(page, "yes") == "approved" and decided == [(True, "k1")] and finder.opened == []
+    decided.clear()
+    s.approval_at = time.time() + 5
+    assert _say(page, "no") == "denied" and decided == [(False, "k1")] and finder.closed == 0
+    decided.clear()
+    s.approval_at, finder.said_at = time.time() - 120, time.time()         # the panel spoke last
+    assert _say(page, "yes") == "find_opened" and finder.opened == ["1"] and decided == []
+
+
+def test_organize_takes_the_panel_only_when_it_really_does():
+    d = _tmp()
+    c, mw, p = _auto(d)
+    stopped = []
+    mw.voice_find = type("F", (), {"stop": lambda self: stopped.append(1)})()
+    # "stop auto-organizing" shows its answer on the panel: a search there stops first
+    assert c.stop_auto("") == "auto_none" and stopped == [1]
+    c.overlay._on_dismiss()
+    # a plan open on the Organize page: organize doesn't take the panel, so the search's rows stay
+    stopped.clear()
+    p.moves = ["x"]
+    assert c.start_hands_free("organize it", how="by type") == "page_busy" and stopped == []
+    p.moves = []
+    # undo puts its answer on the panel: the search stops
+    c._undo_auto, c._undo_until, c._undo_info = r"C:\x\Inbox", time.monotonic() + 60, ("Inbox", 0, time.time())
+    assert c.undo() and stopped == [1]
+    c.overlay._on_dismiss()
+    # the organize hotkey still working out the folder: the panel is organize's (a search can't start over it)
+    assert not c.panel_busy()
+    c._resolve_worker = type("W", (), {"isRunning": lambda self: True})()
+    assert c.panel_busy() and not c.busy()
+    c._resolve_worker = type("W", (), {"isRunning": lambda self: False})()
+    p.working = True
+    assert c.panel_busy(), "a plan being made from the hotkey"
+    p.working = False
+    c._resolve_worker = None
+    assert not c.panel_busy()

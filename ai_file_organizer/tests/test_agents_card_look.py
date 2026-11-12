@@ -229,3 +229,38 @@ def test_hovering_the_pill_opens_the_bar(monkeypatch):
     assert ov._handle._pill_hidden and not ov._hover_in, "a fullscreen app: no pill, nothing to wake"
     ov.hide()
 
+
+
+@pytest.mark.skipif(not IS_WIN, reason="Windows stand-in for the notch")
+def test_new_chat_after_a_closed_chat_shows_no_old_question_or_timer():
+    """A6 (2026-11-11, Mac 331b229 — the same on Windows): a chat finishes, ✕ (or it tucks itself), then the drawer's
+    New chat. The blank card showed the OLD question and its timer: resting only HID the bubble, and opening the card
+    shows the bubble whenever it still has text. Checked on what's shown, not just the card's state."""
+    ov = _card()
+    _working(ov)
+    _pump(1.2)                                       # (the timer runs)
+    ov.show_done("sid-1", 0.0, "Make a landing page", "Done: landing.html")
+    _pump()
+    assert ov._transcript.text(), "(the finished chat's question is on the card)"
+    ov.rest_idle(force=True)                         # ✕ / Esc
+    _pump()
+    ov.show_new_chat()                               # the drawer's New chat
+    _pump(0.3)
+    assert ov._transcript.text() == "" and not ov._transcript.isVisible(), "no old question on the blank card"
+    assert ov._timer_label.text() == "", "no old timer"
+    ov.restore_panel()                               # (opening it again must not bring it back either)
+    _pump()
+    assert not ov._transcript.isVisible() and ov._timer_label.text() == ""
+    ov.close()
+
+
+@pytest.mark.skipif(not IS_WIN, reason="Windows stand-in for the notch")
+def test_new_chat_while_a_chat_is_still_working_starts_blank():
+    ov = _card()
+    _working(ov)
+    _pump(1.2)
+    assert ov._timer_label.text(), "(the working chat's timer shows)"
+    ov.show_new_chat()                               # (the working chat keeps running in the drawer)
+    _pump(1.2)
+    assert ov._transcript.text() == "" and ov._timer_label.text() == "", "blank: no question, no ticking timer"
+    ov.close()

@@ -143,6 +143,98 @@ class _TypeBox(QLineEdit):
         super().mousePressEvent(e)
 
 
+# ---- finding a file by voice (the design pack: filect-search-panel-design-for-windows) ----------------------------
+_F_ROW_BG = "#111119"
+_F_ROW_BRD = "#1C1C28"
+_F_TEXT = "#E8E8F0"
+_F_SUB = "#B0B0C0"
+_F_MUTED = "#7A7A90"
+_F_PURPLE = "#7C4DFF"
+_F_LIGHT = "#B39DFF"
+_F_ROW_H = 58
+_F_GAP = 8
+_F_LIST_H = 362                  # five and a half rows: plain that the list goes on
+_F_SCROLL_ROOM = 12              # kept free for the scroll bar, so it never sits on a row
+
+
+class _ResultRow(QFrame):
+    """One file the voice search found: number, picture (or its type), name, where and when, and a folder icon.
+    Click it to open it; the folder icon shows where it is. Hover: purple border."""
+
+    def __init__(self, n: int, info: dict, opened, revealed, width: int):
+        super().__init__()
+        self._n, self._opened = n, opened
+        self.setObjectName("ovResultRow")
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFixedHeight(_F_ROW_H)
+        self.setStyleSheet(f"QFrame#ovResultRow{{background:{_F_ROW_BG}; border:1px solid {_F_ROW_BRD}; "
+                           f"border-radius:12px;}} QFrame#ovResultRow:hover{{border-color:{_F_PURPLE};}}")
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(10, 7, 8, 7)
+        lay.setSpacing(10)
+        num = QLabel(str(n))
+        num_w = 22 if n > 9 else 10
+        num.setFixedWidth(num_w)
+        num.setStyleSheet(f"color:{_F_LIGHT}; font-size:12px; background:transparent; border:none;")
+        lay.addWidget(num)
+        self.thumb = QLabel(str(info.get("ext") or "")[:4])
+        self.thumb.setFixedSize(34, 42)
+        self.thumb.setAlignment(Qt.AlignCenter)
+        self.thumb.setStyleSheet(f"background:{_F_TEXT}; color:#0B0B10; font-size:9px; font-weight:700; "
+                                 "border-radius:5px; border:none;")
+        lay.addWidget(self.thumb)
+        self._text_w = max(60, width - 2 - 10 - 8 - num_w - 34 - 28 - 3 * 10)
+        col = QVBoxLayout()
+        col.setContentsMargins(0, 0, 0, 0)
+        col.setSpacing(1)
+        self.name = self._line(info.get("name") or "", f"color:{_F_TEXT}; font-size:13px; font-weight:600;",
+                               Qt.ElideMiddle)
+        self.sub = self._line(info.get("sub") or "", f"color:{_F_SUB}; font-size:12px;", Qt.ElideRight)
+        col.addStretch(1)
+        col.addWidget(self.name)
+        col.addWidget(self.sub)
+        col.addStretch(1)
+        lay.addLayout(col, 1)
+        self.folder = QPushButton()
+        self.folder.setObjectName("ovResultFolder")
+        self.folder.setFixedSize(28, 28)
+        self.folder.setCursor(Qt.PointingHandCursor)
+        self.folder.setToolTip("Show where it is")
+        self._icon_off = QIcon(line_pixmap("folder", 16, _F_SUB))
+        self._icon_on = QIcon(line_pixmap("folder", 16, _F_LIGHT))
+        self.folder.setIcon(self._icon_off)
+        self.folder.setIconSize(QSize(16, 16))
+        self.folder.setStyleSheet("QPushButton#ovResultFolder{background:transparent; border:none; border-radius:8px;}"
+                                  f"QPushButton#ovResultFolder:hover{{background:{_F_ROW_BRD};}}")
+        self.folder.installEventFilter(self)
+        self.folder.clicked.connect(lambda: revealed.emit(n - 1))
+        lay.addWidget(self.folder)
+
+    def eventFilter(self, obj, e):
+        from PySide6.QtCore import QEvent
+        if obj is self.folder and e.type() in (QEvent.Enter, QEvent.Leave):
+            self.folder.setIcon(self._icon_on if e.type() == QEvent.Enter else self._icon_off)
+        return False
+
+    def _line(self, text: str, style: str, elide) -> QLabel:
+        lab = QLabel()
+        lab.setTextFormat(Qt.PlainText)      # (a file's name is never markup)
+        lab.setStyleSheet(style + " background:transparent; border:none;")
+        lab.ensurePolished()
+        lab.setText(lab.fontMetrics().elidedText(str(text), elide, self._text_w))
+        lab.setToolTip(str(text))
+        lab.setFixedWidth(self._text_w)
+        return lab
+
+    def mousePressEvent(self, e):
+        e.accept()                           # (a click on a row never tucks the panel away)
+
+    def mouseReleaseEvent(self, e):
+        if e.button() == Qt.LeftButton and self.rect().contains(e.position().toPoint()):
+            self._opened.emit(self._n - 1)
+        e.accept()
+
+
 class OrganizeOverlay(QWidget):
     refine_requested = Signal()
     organize_clicked = Signal()
@@ -152,6 +244,10 @@ class OrganizeOverlay(QWidget):
     confirm_clicked = Signal()       # the confirm page's main button
     choice_made = Signal(str)        # one of the choice page's answers (its key)
     text_submitted = Signal(str)     # typed into the choice page's box, Return pressed
+    result_opened = Signal(int)      # voice search: a result row clicked (its index)
+    result_revealed = Signal(int)    # voice search: a row's folder icon
+    result_chip = Signal(str)        # voice search: a quick answer to its question
+    results_all = Signal()           # voice search: Show all
 
     _BIG_PLAN = 30                   # moving this many files needs a 2nd click
     _MAX_NAMES = 200                 # file names listed per folder in the preview
@@ -179,6 +275,11 @@ class OrganizeOverlay(QWidget):
         self.choice_field = None
         self.plan_field = None
         self.choice_buttons = {}
+        self.result_rows = []
+        self.result_list = None
+        self.result_chips = {}
+        self.result_field = None
+        self.result_all_btn = None
 
         outer = QVBoxLayout(self)
         # Small top margin so the card sits flush against the top of the screen
@@ -204,7 +305,7 @@ class OrganizeOverlay(QWidget):
 
         # ---- persistent header: "+ Organize"  …  × ----
         header = QHBoxLayout()
-        htitle = QLabel("+ Organize")
+        htitle = self._brand = QLabel("+ Organize")     # (voice search swaps it to "+ Find": take_over)
         htitle.setStyleSheet(f"color:{_ACCENT_HD}; font-size:14px; font-weight:700; background:transparent;")
         header.addWidget(htitle)
         header.addStretch()
@@ -239,6 +340,7 @@ class OrganizeOverlay(QWidget):
         self._page_error = self._make_error_page()
         self._page_confirm = self._make_confirm_page()
         self._page_choice = self._new_page(spacing=8)      # refilled per question
+        self._page_results = self._new_page(spacing=_F_GAP)  # voice search: refilled per answer
 
     # ----- Win32 non-activation -----
     def showEvent(self, e):
@@ -357,6 +459,7 @@ class OrganizeOverlay(QWidget):
         if self._tab is None:
             self._tab = _CollapsedTab()
             self._tab.clicked.connect(self._expand)
+        self._tab.set_text(self._brand.text())
 
     def _collapse(self):
         self._end_typing()
@@ -829,16 +932,138 @@ class OrganizeOverlay(QWidget):
         # for Undo. Cancellable so a new request within the window isn't closed by this stale timer.
         self._start_dismiss_timer(20000 if undo else max(4000, min(9000, 2500 + len(msg) * 55)))
 
-    def show_error(self, msg, allow_pick_folder=False, question=False):
-        """`question`: it's asking you something (an accent "?"), not failing (the ⚠)."""
+    def show_error(self, msg, allow_pick_folder=False, question=False, buttons=True):
+        """`question`: it's asking you something (an accent "?"), not failing (the ⚠). `buttons` False: just the message
+        (voice search's "I couldn't find that.", which closes by itself)."""
         self._ensure_expanded()
         self._set_glyph(self._error_glyph, "question" if question else "warn")
         self._error_label.setText(msg or "Something went wrong.")
         self._fit_text(self._error_label, _ROW_TEXT_W)
-        self._error_pick_btn.setVisible(bool(allow_pick_folder))
-        self._error_close_btn.setVisible(not allow_pick_folder)
+        self._error_pick_btn.setVisible(bool(allow_pick_folder) and buttons)
+        self._error_close_btn.setVisible(not allow_pick_folder and buttons)
         self._error_close_btn.setText("Cancel" if question else "Close")
         self._show_page(self._page_error, "error")
+
+    # ----- voice search: the same panel, "+ Find" -----
+    def take_over(self, brand: str) -> None:
+        """Another job is using the panel: its name at the top (and on the tucked handle), and nothing left counting
+        down to close it."""
+        self._cancel_dismiss_timer()
+        self._brand.setText(brand)
+        if self._tab is not None:
+            self._tab.set_text(brand)
+
+    def minimize(self) -> None:
+        """Tuck it away into the handle at the top edge (the Mac's name)."""
+        if self.isVisible() and not self._collapsed:
+            self._collapse()
+
+    def show_results(self, message, rows, chips=(), show_all=False, scroll=False, field=""):
+        """Files it found: rows = [{"name", "sub", "ext"}, ...]. `chips`: short answers to the question in `message`
+        (at most 3, never wider than the panel). `scroll`: the whole list ("Show all"), scrolling after five and a half
+        rows. `field`: a typing box (only when it asked something in your own words)."""
+        self._ensure_expanded()
+        self._end_typing()
+        pg = self._page_results
+        lay = pg.layout()
+        self._clear_layout(lay)
+        q = self._label(message or "", color=_QUESTION, size=14)
+        q.setTextFormat(Qt.PlainText)
+        self._fit_text(q, _INNER_W)
+        lay.addWidget(q)
+        lay.addSpacing(4)
+        self._results_message = q
+        self.result_rows, self.result_list, self.result_chips = [], None, {}
+        self.result_field = self.result_all_btn = None
+        rows = list(rows or [])
+        target, width = lay, _INNER_W
+        if scroll and len(rows) * (_F_ROW_H + _F_GAP) - _F_GAP > _F_LIST_H:
+            area = self.result_list = QScrollArea()
+            area.setWidgetResizable(True)
+            area.setFrameShape(QFrame.NoFrame)
+            area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+            area.setFixedHeight(_F_LIST_H)
+            area.setStyleSheet(
+                "QScrollArea{border:none; background:transparent;}"
+                "QScrollBar:vertical{background:transparent; width:6px; margin:0;}"
+                f"QScrollBar::handle:vertical{{background:{_F_MUTED}; border-radius:3px; min-height:30px;}}"
+                "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical{height:0;}"
+                "QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical{background:transparent;}")
+            host = QWidget()
+            host.setObjectName("ovResultHost")
+            host.setStyleSheet("QWidget#ovResultHost{background:transparent;}")
+            target = QVBoxLayout(host)
+            target.setContentsMargins(0, 0, _F_SCROLL_ROOM, 0)
+            target.setSpacing(_F_GAP)
+            area.setWidget(host)
+            lay.addWidget(area)
+            width = _INNER_W - _F_SCROLL_ROOM
+        for n, info in enumerate(rows, 1):
+            row = _ResultRow(n, info, self.result_opened, self.result_revealed, width)
+            target.addWidget(row)
+            self.result_rows.append(row)
+        if self.result_list is not None:
+            target.addStretch(1)
+        foot = QHBoxLayout()
+        foot.setContentsMargins(0, 2, 0, 0)
+        foot.setSpacing(8)
+        room = _INNER_W - ((self._foot_button("Show all").sizeHint().width() + 8) if show_all else 0)
+        for label in list(chips or ())[:3]:
+            b = self._foot_button(str(label), chip=True)
+            need = b.sizeHint().width() + 8
+            if need > room:                  # (never wider than the panel)
+                b.deleteLater()
+                break
+            room -= need
+            b.clicked.connect(lambda _=False, t=str(label): self.result_chip.emit(t))
+            foot.addWidget(b, 0)
+            self.result_chips[str(label)] = b
+        if self.result_chips:
+            foot.addStretch(1)
+        if show_all:
+            self.result_all_btn = self._foot_button("Show all")
+            self.result_all_btn.clicked.connect(self.results_all.emit)
+            foot.addWidget(self.result_all_btn, 0 if self.result_chips else 1)
+        if not self.result_chips:
+            close = self._foot_button("Close")
+            close.clicked.connect(self._on_dismiss)
+            foot.addWidget(close, 1)
+        lay.addLayout(foot)
+        if field:
+            self.result_field = self._typing_box(field)
+            lay.addWidget(self.result_field)
+        self._show_page(pg, "results")
+
+    def _foot_button(self, text, chip=False):
+        b = QPushButton(text)
+        b.setObjectName("ovFindChip" if chip else "ovFindFoot")
+        b.setCursor(Qt.PointingHandCursor)
+        b.setFixedHeight(34)
+        color, border = (_F_LIGHT, _F_PURPLE) if chip else (_F_TEXT, _F_ROW_BRD)
+        sel = f"QPushButton#{b.objectName()}"
+        b.setStyleSheet(f"{sel}{{background:{_F_ROW_BG}; color:{color}; border:1px solid {border}; border-radius:10px; "
+                        f"font-size:12px; font-weight:600; padding:0 14px;}}"
+                        f"{sel}:hover{{border-color:{_F_LIGHT};}}")
+        b.ensurePolished()
+        return b
+
+    def set_result_thumb(self, i, path):
+        """A row's small picture, once it's made (a background thread makes them)."""
+        rows = self.result_rows or []
+        try:
+            if 0 <= i < len(rows):
+                pm = QPixmap(path)
+                if not pm.isNull():
+                    dpr = max(1.0, float(self.devicePixelRatioF()))
+                    target = QSize(int(34 * dpr), int(42 * dpr))
+                    pm = pm.scaled(target, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                    pm.setDevicePixelRatio(dpr)
+                    th = rows[i].thumb
+                    th.setText("")
+                    th.setStyleSheet(f"background:{_F_ROW_BRD}; border-radius:5px; border:none;")
+                    th.setPixmap(pm)
+        except RuntimeError:                 # (the panel moved on)
+            pass
 
     def show_confirm(self, message, button):
         """A question, Cancel (closes it, like ✕) and one main button (emits confirm_clicked)."""
@@ -1036,7 +1261,7 @@ class _CollapsedTab(QWidget):
         row.setContentsMargins(12, 2, 12, 5)
         row.setSpacing(6)
         row.addStretch()
-        t = QLabel("+ Organize")
+        t = self._text = QLabel("+ Organize")
         t.setStyleSheet(f"color:{_ACCENT_HD}; font-size:12px; font-weight:700; background:transparent;")
         row.addWidget(t)
         cv = QLabel("▾")
@@ -1057,6 +1282,10 @@ class _CollapsedTab(QWidget):
             u.SetWindowLongW(hwnd, GWL_EXSTYLE, ex | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW)
         except Exception:
             pass
+
+    def set_text(self, text):
+        """The job using the panel ("+ Organize" / "+ Find")."""
+        self._text.setText(text)
 
     def present(self):
         try:

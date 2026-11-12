@@ -54,7 +54,7 @@ except ImportError:                      # running this file directly (self-chec
 
 
 def _voice_key_label() -> str:
-    """The agent chord as the user presses it ("Shift+Z" while testing; fn ⌃ on the Mac)."""
+    """The agent chord as the user presses it ("Ctrl+Alt" on Windows; fn ⌃ on the Mac)."""
     if not IS_WIN:
         return "fn ⌃"
     try:
@@ -62,7 +62,7 @@ def _voice_key_label() -> str:
         from app.ui.agent_hotkey import label, DEFAULT_SHORTCUT
         return label(getattr(settings, "assistant_voice_shortcut", "") or DEFAULT_SHORTCUT)
     except Exception:
-        return "Shift+Z"
+        return "Ctrl+Alt"
 
 # --- palette (VoiceOS-style: soft near-black card, muted greys, Claude-orange accent) ----
 C = {
@@ -1281,6 +1281,9 @@ class ClaudeOverlay(QWidget):
         self._done_timer.stop()
         self.set_state("idle")
         self._set_status("", C["text_muted"])
+        # CLEARED, not just hidden: opening the card again shows the bubble whenever it has text
+        # (_apply_minimized_chrome), so a hidden old question came back on the next blank card (Mac 331b229).
+        self._transcript.setText("")
         self._transcript.setVisible(False)
         self._set_task_title("")
         self._reset_details()
@@ -1307,10 +1310,14 @@ class ClaudeOverlay(QWidget):
 
     def show_new_chat(self) -> None:
         """Rail "New chat": the notch opens on a blank Ready card with the type box focused. Unlike
-        rest_idle this also leaves a working chat's view — that chat keeps running in the rail."""
+        rest_idle this also leaves a working chat's view — that chat keeps running in the rail.
+        The old question and timer are CLEARED (they came back on the blank card: Mac 331b229, the same on Windows)."""
         self._done_timer.stop()
         self.set_state("idle")
         self._set_status("", C["text_muted"])
+        self._stop_elapsed()
+        self._timer_label.setText("")
+        self._transcript.setText("")
         self._transcript.setVisible(False)
         self._set_task_title("")
         self._reset_details()

@@ -66,6 +66,24 @@ def _win_down() -> bool:
     return _key_down(_VK_LWIN) or _key_down(_VK_RWIN)
 
 
+_VK_MASK = 0xE8   # an unassigned key: "something else went down with Alt / Win" (AutoHotkey's menu mask key)
+
+
+def _mask_menu_keys() -> None:
+    """Press and let go of an unassigned key while Win / Alt are held for the shortcut. Without it, letting go of
+    Alt counts as a lone Alt tap in the app in front: it opens that app's menu (Word: the ribbon's key tips), and the
+    menu swallows the next keys you type — live test 2026-11-12, with Filect closed too: ' eggs, milk' typed after
+    Ctrl+Win+Alt arrived as 'ggs, milk'; with this key sent while the chord was held, nothing was lost (3 of 3).
+    (A lone Win release opening Start is stopped the same way.)"""
+    try:
+        import ctypes
+        u = ctypes.windll.user32
+        u.keybd_event(_VK_MASK, 0, 0, 0)
+        u.keybd_event(_VK_MASK, 0, 0x0002, 0)        # KEYEVENTF_KEYUP
+    except Exception:
+        pass
+
+
 class DictationHotkey(QObject):
     """Polls the trigger key and emits start/stop for hold-to-talk dictation."""
 
@@ -80,6 +98,7 @@ class DictationHotkey(QObject):
         self._down_frames = 0
         self._active = False
         self._mode = "dictate"
+        self._masked_win = self._masked_alt = False   # (the mask key was sent for this press's Win / Alt)
         self.set_trigger(trigger)
         self._timer = QTimer(self)
         self._timer.setInterval(self._poll_ms)
@@ -147,15 +166,28 @@ class DictationHotkey(QObject):
             return "organize"
         return "dictate"
 
+    def _mask_if_needed(self):
+        """While the shortcut is active: once Win, and once Alt, is part of it, send the mask key (see
+        _mask_menu_keys) — so letting go opens neither Start nor the front app's menu. A quick tap never gets here."""
+        win, alt = _win_down(), _key_down(_VK_ALT)
+        if (win and not self._masked_win) or (alt and not self._masked_alt):
+            self._masked_win = self._masked_win or win
+            self._masked_alt = self._masked_alt or alt
+            _mask_menu_keys()
+
     def _poll(self):
         down = self._trigger_down()
         if down:
             self._down_frames += 1
             if self._down_frames == self._hold_frames and not self._active:
                 self._active = True
+                self._masked_win = self._masked_alt = False
                 self._mode = self._current_mode()
                 logger.info(f"[DICTATION HOTKEY] start mode={self._mode}")
+                self._mask_if_needed()
                 self.dictate_start.emit(self._mode)
+            elif self._active:
+                self._mask_if_needed()                  # (Alt pressed a moment after the start)
         else:
             if self._active:
                 self._active = False

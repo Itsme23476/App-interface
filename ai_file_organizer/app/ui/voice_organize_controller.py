@@ -237,6 +237,8 @@ class VoiceOrganizeController(QObject):
         op = self.organize_page
         op.voice_plan_ready.connect(self._on_plan_ready, Qt.QueuedConnection)
         op.voice_plan_error.connect(self._on_plan_error, Qt.QueuedConnection)
+        if hasattr(op, "voice_plan_replaced"):
+            op.voice_plan_replaced.connect(self._on_plan_replaced)
         op.voice_apply_done.connect(self._on_apply_done, Qt.QueuedConnection)
         op.voice_apply_error.connect(self._on_apply_error, Qt.QueuedConnection)
         op.voice_status.connect(self._on_status, Qt.QueuedConnection)
@@ -286,6 +288,7 @@ class VoiceOrganizeController(QObject):
         """A NEW organize recording just started (before the transcript exists): clear the previous panel now, so
         the old 'pick a folder' card doesn't linger, and drop any resolve still in flight."""
         try:
+            self._stop_finding()
             self._req_id += 1
             self._hf_stop()
             self._plan_active = False
@@ -299,6 +302,7 @@ class VoiceOrganizeController(QObject):
         """The organize hotkey's transcript: open the panel, let the AI pick the folder from what was said, then
         build the plan."""
         try:
+            self._stop_finding()
             self._hf_stop()
             text = (text or "").strip()
             logger.info(f"[VOICE ORGANIZE] start_from_transcript: {text!r}")
@@ -425,9 +429,17 @@ class VoiceOrganizeController(QObject):
                 show()
 
     # ------------------------------------------------------------------ engine results
+    def _on_plan_replaced(self):
+        """A newer plan took over from one still being worked out, so that one's result will never arrive (the Mac's
+        trap: counted as "still coming", the NEXT real plan was taken for it and thrown away)."""
+        self._hf_dead_plans = max(0, self._hf_dead_plans - 1)
+
     def _on_plan_ready(self, payload):
         if self._hf_dead_plans:              # for a voice-assistant run you cancelled while it was planning
             self._hf_dead_plans -= 1
+            self._start_next()
+            return
+        if self._hf_next is not None and self._hf is None:    # (a voice request took over while this was planning)
             self._start_next()
             return
         if self._hf is not None:
@@ -441,6 +453,9 @@ class VoiceOrganizeController(QObject):
     def _on_plan_error(self, msg):
         if self._hf_dead_plans:
             self._hf_dead_plans -= 1
+            self._start_next()
+            return
+        if self._hf_next is not None and self._hf is None:    # (the plan it waited for failed: it starts anyway)
             self._start_next()
             return
         self._plan_active = False
@@ -515,10 +530,29 @@ class VoiceOrganizeController(QObject):
         self._hf_stop()
 
     # ================================================================== voice assistant (hands-free)
+    def _stop_finding(self):
+        """Organizing takes the shared panel: a search on it stops (voice_find_controller)."""
+        finder = getattr(self.main_window, "voice_find", None) if self.main_window is not None else None
+        if finder is not None:
+            try:
+                finder.stop()
+            except Exception as e:
+                logger.info(f"[VOICE ORGANIZE] couldn't stop the search: {e}")
+
     def busy(self) -> bool:
         """Something is using the panel: this flow, or a plan open from the organize hotkey."""
         return bool((self._hf is not None and self._hf["stage"] not in ("done", "failed"))
                     or self._plan_active or self._recorder is not None)
+
+    def panel_busy(self) -> bool:
+        """The panel is organize's: busy(), or the organize hotkey still working out the folder or the plan (a search
+        started then would be drawn over when the plan arrives)."""
+        w = self._resolve_worker
+        try:
+            resolving = w is not None and w.isRunning()
+        except RuntimeError:                 # (its C++ side is gone: it's done)
+            resolving = False
+        return self.busy() or resolving or self._page_working()
 
     def _page_working(self) -> bool:
         page = self.organize_page
@@ -542,14 +576,16 @@ class VoiceOrganizeController(QObject):
             self.overlay.set_hands_free(True)
         if replace and (self._page_working() or self._hf_dead_plans):
             # A plan is still being worked out. Replacing its worker mid-run would crash, so this starts when it ends.
+            self._stop_finding()             # (organizing takes the panel from a search)
             self._hf_next = (text, how, kind, mode)
             self.overlay.show_thinking("One moment…")
             return "started"
         if self.busy() or self._page_working() or self._hf_dead_plans:
-            return "busy"
+            return "busy"                    # (a search on the panel stays: organize isn't taking it)
         has_plan = getattr(page, "has_plan", None)
         if callable(has_plan) and has_plan() and not getattr(page, "_voice_plan_owned", False):
             return "page_busy"
+        self._stop_finding()                 # (organizing takes the panel from a search)
         from app.core.settings import settings
         tucked = not getattr(settings, "assistant_auto_open", True)
         self._hf = {"stage": "finding", "text": (text or "").strip(), "how": (how or "").strip(), "folder": "",
@@ -567,11 +603,19 @@ class VoiceOrganizeController(QObject):
         self._hf_find_folder(self._hf["text"])
         return "started"
 
-    def _start_next(self):
-        if self._hf_next is not None and not self._hf_dead_plans:
-            text, how, kind, mode = self._hf_next
-            self._hf_next = None
-            self.start_hands_free(text, how=how, kind=kind, mode=mode)
+    def _start_next(self, tries: int = 20):
+        """The voice request that waited for a plan to end starts now (Mac fix 5: before, it waited only for a
+        CANCELLED hands-free plan — after any other it said "started" and never ran). A plan's result arrives a
+        moment before its thread ends: while it's still running it tries again every 100 ms (up to 2 s)."""
+        if self._hf_next is None or self._hf_dead_plans:
+            return
+        if self._page_working() and tries:
+            QTimer.singleShot(100, lambda: self._start_next(tries - 1))
+            return
+        text, how, kind, mode = self._hf_next
+        self._hf_next = None
+        self._plan_active = False            # (it took over from whatever plan was up)
+        self.start_hands_free(text, how=how, kind=kind, mode=mode)
 
     def _keep(self, thread):
         """A QThread destroyed while running aborts the app: hold it until it's finished."""
@@ -954,6 +998,7 @@ class VoiceOrganizeController(QObject):
         from app.core.settings import settings
         if self._hf is not None and self._hf["stage"] == "applying":
             return "organize_busy"
+        self._stop_finding()                 # (whatever it says next goes on the panel: a search there stops)
         watcher = getattr(self.organize_page, "auto_watcher", None)
         entries = [] if watcher is not None and not watcher.is_running else [     # (only what's actually running)
             f["path"] for f in settings.auto_organize_folders if f.get("path") and not f.get("paused")]
@@ -1215,6 +1260,7 @@ class VoiceOrganizeController(QObject):
         """Put the last hands-free organize back: the Undo button, or saying "undo"."""
         if not self.can_undo():
             return False
+        self._stop_finding()                 # (the panel shows the undo now)
         log, self._undo_log = self._undo_log, ""
         auto, self._undo_auto = self._undo_auto, ""
         self._undone_auto = bool(auto)
@@ -1263,6 +1309,7 @@ class VoiceOrganizeController(QObject):
         if hf is not None and hf["stage"] == "planning":
             self._hf_dead_plans += 1
         self._hf = None
+        self._hf_next = None                 # (the hotkey / a close is newer than whatever was waiting)
         try:
             self.overlay.set_hands_free(False)
         except Exception:

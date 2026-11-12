@@ -35,15 +35,18 @@ SYSTEM_PROMPT = f"""You are a file organization assistant. Given a user's instru
 CRITICAL: FOLLOW USER INSTRUCTIONS LITERALLY
 - The user's instruction is the PRIMARY directive - follow it EXACTLY
 - If user says "move all files to X" or "put all files in X", put ALL files in folder "X" - no exceptions
-- Do NOT organize by file type unless the user specifically asks for it
-- Do NOT create additional folders beyond what the user requested
+- Do NOT organize by file type unless the user asks for it (or gives no instruction and the files are a random mix)
+- When the user NAMES the folders to use, do NOT create additional folders beyond those
+- When the user names NO folders ("sort these by what's in them", "organize this folder"), design the folders
+  yourself from what the files are about (their label / tags / caption): one folder per topic, project, person or
+  kind — never by file name or number, and no catch-all 'misc' / 'other' for files that have a clear topic
 
 FRESH START ON EVERY REQUEST:
 - Each instruction is a NEW organization request
 - Files may currently be in subfolders - their current folder is shown in the "folder" field
 - Use the current folder information ONLY when the user asks to preserve specific folders
 - Otherwise, RECLASSIFY every file into the folders the user asked for — do NOT keep a file in its current subfolder just because that's where it is now
-- Create ONLY the folders the user named. Do not add extra folders (e.g. if the user asks for "animals" and "paintings", return EXACTLY those two — never a third)
+- When the user names the folders, create ONLY those. Do not add extra folders (e.g. if the user asks for "animals" and "paintings", return EXACTLY those two — never a third)
 
 FILE INFORMATION PROVIDED:
 - id: unique file identifier (use this in your response)
@@ -394,10 +397,9 @@ def _apply_tag_safety_net(
 
 PLAN_CHUNK_THRESHOLD = 250  # above this, split the request into chunks
 
-# The organize PLAN runs on the sturdier gpt-5-mini (cleaner plans: ~100% file
-# coverage, no id double-placement). High-volume tagging/vision stays on nano
-# (cheap, 0 failures) by simply sending no model. Split is enforced per-call.
-PLAN_MODEL = "gpt-5-mini"
+# The organize PLAN names the model it runs on: gpt-6-luna, like every Filect AI call since 2026-11-11 (gpt-5-mini,
+# which it used before, is shut off Dec 11, 2026; the proxy runs every call on gpt-6-luna whatever is asked).
+from .vision import FILECT_MODEL as PLAN_MODEL  # noqa: E402
 _PLAN_CHUNK_RETRIES = 3  # a single gpt-5 call occasionally returns a bad/empty plan
 
 
@@ -466,12 +468,468 @@ def _fallback_plan_by_category(files: List[Dict[str, Any]]) -> Optional[Dict[str
     return {"folders": folders} if folders else None
 
 
+# ─────────────────────────────────────────────────────────────
+# BIG FOLDERS: design the folders first, then sort the files into them
+# ─────────────────────────────────────────────────────────────
+# Measured (2026-11-10, 200 and 120 files, 3 runs each): asked for the whole plan in ONE answer, with no thinking
+# (the proxy's 'minimal'), the planner took shortcuts on a big folder — one 150-file "Notes" folder, a 102-file
+# "misc", folders by file NUMBER ("Numbered 000-099 (batch)"), or 69 files simply left out: 21-65% of files well
+# filed. Designing the folders first (it sees every file, no ids to track), then sorting the files into THOSE
+# folders in small groups in parallel (a simple choice per file) filed 79-100%. Small folders keep the one call.
+BIG_PLAN_FILES = 50          # above this many files, plan in two steps
+_ASSIGN_CHUNK = 40           # files per sorting request (sent in parallel)
+_DESIGN_LIST_MAX = 600       # the design step sees at most this many files (a spread-out sample beyond)
+DESIGN_EFFORT = "low"        # thinking for the design step (the proxy allow-lists none / low / medium)
+ASSIGN_EFFORT = "low"        # thinking for each sorting request
+
+_DESIGN_SYSTEM = """You design the folder structure for a file organizer. You see a folder's files (name, current
+subfolder, kind, what's in each) and the user's request. You do NOT list files: you only name the folders and say
+what goes in each. Reply with JSON only, exactly:
+{"folders": [{"name": "<folder name>", "holds": "<what goes in it, one short line>"}]}"""
+
+_ASSIGN_SYSTEM = """You sort files into a FIXED list of folders for a file organizer. Reply with JSON only, exactly:
+{"assign": {"<file id>": "<folder name, copied exactly from the list>"}, "leave": [<file ids to leave where they are>]}
+Every file id you are given appears exactly once: in "assign" or (only when the rules allow it) in "leave"."""
+
+
+def _plan_mode(user_instruction: str) -> str:
+    """Which of the planner's modes an instruction is. (auto_watcher's "only the folders already there" instruction
+    starts "[AUTO-ORGANIZE - EXISTING FOLDERS ONLY]" and carries its own rules: only those folders, a catch-all or the
+    closest one for a file that fits none, never a file left out.)"""
+    ui = user_instruction or ""
+    if ui.startswith("[AUTO-ORGANIZE"):
+        if "EXISTING FOLDERS ONLY" in ui:
+            return "auto_existing"
+        return "auto_instruction" if "User's specific instructions:" in ui else "auto"
+    return "manual" if ui.strip() else "manual_none"
+
+
+def _file_line(f: Dict[str, Any], with_id: bool) -> str:
+    name = (f.get("file_name") or "unknown")
+    ext = name[name.rfind("."):].lower() if "." in name else ""
+    tags = [t for t in (f.get("tags") or [])[:6] if t] + _infer_file_type_hints(name)
+    out = (f"{'id:' + str(f.get('id')) + ' | ' if with_id else ''}{name[:60]} | folder:{f.get('subfolder') or '.'} | "
+           f"ext:{ext} | kind:{(f.get('label') or '')[:30]} | tags:[{', '.join(tags)}]")
+    cap = (f.get("caption") or "").strip()
+    return out + (f" | about:{cap[:110]}" if cap else "")
+
+
+def _design_rules(mode: str) -> str:
+    common = """- Group files that are about the same thing: by topic, project, person, client, event or kind — whatever fits
+  THESE files best. Read each file's kind / tags / about, not just its name.
+- NEVER group by file name, number or position ("batch 1", "notes 000-099", "late", "remaining").
+- No catch-all folder ("misc", "other", "general", "unsorted") unless the user asked for one, or a few files truly
+  fit nowhere else. A big group of similar files with different topics gets one folder per topic, but only for topics with
+  several files: never a folder for a single file when a broader folder fits it (12 class assignments in 12
+  subjects: one "School" folder, not 12 — measured 2026-11-11 on gpt-6-luna, 139 files x3: 18-44 folders with
+  3-27 one-file folders before this line, 16-21 with 2-7 after).
+- Specific, short, plain folder names. One level only: never put "/" or "\\" in a name.
+- Never a folder named like the folder being organized, and never an empty one."""
+    if mode == "auto_existing":
+        return ""     # (not used: the folders are the existing ones)
+    if mode == "auto_instruction":
+        return f"""- FOLLOW the user's specific instructions EXACTLY: every file they are about goes in the folder they name,
+  using the EXACT folder names the user typed. Only those files go there ("put the bills in Money": only bills).
+- A file the instruction doesn't cover gets the closest folder the user named only if that folder clearly fits it;
+  otherwise a new folder with a short clear name for its type or topic — never 'misc', 'other' or 'unsorted'.
+{common}"""
+    if mode == "auto":
+        return f"""- Choose the BEST organization for these files: by project, client/person, topic, event, or — for a random
+  mix of types — by file type. Never everything in one folder.
+{common}"""
+    if mode == "manual":
+        return f"""- FOLLOW the user's instruction. Use the EXACT folder names the user typed (same spelling and capitals).
+- If the user says to move everything to one folder, that one folder is the whole plan.
+- If the user names the folders to use, create those; only the files the instruction is about go in a folder it
+  names ("put the bills in Money": only bills, never a recipe or a photo).
+- Files the instruction doesn't cover go in OTHER folders by type or topic, with real names — not 'misc' or
+  'other' unless the user asked for one.
+- If the user says to keep / preserve / not touch a folder, do NOT design a folder for its files (they stay put).
+- If the user wants everything else in a named folder ("the rest in Stuff"), include that folder.
+{common}"""
+    return f"""- Choose the BEST organization for these files: by project, client/person, topic, event, or — for a random mix of
+  types — by file type. Never everything in one folder.
+{common}"""
+
+
+def _assign_rules(mode: str) -> str:
+    if mode == "auto_existing":
+        return """- These are the folder's EXISTING folders: use only them, choosing by the instruction's own rules above (match
+  the file's tags / kind / about to a folder's last name part; prefer the most specific nested folder; a file that
+  matches none goes to a catch-all folder if there is one, else the most similar folder).
+- Do not use "leave": every file goes in one of the folders. Copy the folder name exactly as listed."""
+    leave = ("- \"leave\" is ONLY for files the user's instruction says to keep where they are (keep / preserve / don't "
+             "touch that folder). Every other file goes in a folder.") if mode == "manual" else \
+            "- Do not use \"leave\": every file goes in one of the folders."
+    return f"""- Put each file in the ONE folder whose description fits what the file is about (its kind / tags / about first,
+  then its name). Copy the folder name exactly as listed.
+- Follow the user's instruction: a folder the user named for something gets only that thing ("Money" for bills
+  gets only bills).
+{leave}"""
+
+
+def _ask_planner(system: str, user: str, max_tokens: int, effort: Optional[str]) -> Optional[Dict[str, Any]]:
+    from .vision import _call_openai_proxy
+    resp = _call_openai_proxy("chat", [{"role": "system", "content": system}, {"role": "user", "content": user}],
+                              max_tokens=max_tokens, temperature=0.1, model=PLAN_MODEL, reasoning_effort=effort)
+    try:
+        content = (resp or {}).get("choices", [{}])[0].get("message", {}).get("content", "") or ""
+    except Exception:
+        content = ""
+    return _parse_json(content) if content else None
+
+
+def _design_folders(user_instruction: str, files: List[Dict[str, Any]], mode: str) -> List[Dict[str, str]]:
+    shown = files
+    if len(files) > _DESIGN_LIST_MAX:      # a spread-out sample (sorted by kind so every kind is in it)
+        ordered = sorted(files, key=lambda f: ((f.get("label") or ""), f.get("file_name") or ""))
+        step = len(ordered) / _DESIGN_LIST_MAX
+        shown = [ordered[int(i * step)] for i in range(_DESIGN_LIST_MAX)]
+    listing = "\n".join("- " + _file_line(f, with_id=False) for f in shown)
+    note = "" if shown is files else f" (a spread-out sample of {len(shown)} of them)"
+    user = (f'User instruction: "{user_instruction or "(none: organize this folder)"}"\n\n'
+            f"The folder holds {len(files)} files{note}:\n{listing}\n\n"
+            f"RULES:\n{_design_rules(mode)}\n\nDesign the folders. Return JSON only.")
+    for attempt in range(2):
+        out = _ask_planner(_DESIGN_SYSTEM, user, 3000, DESIGN_EFFORT)
+        seen, folders = set(), []
+        for d in (out or {}).get("folders") or []:
+            if isinstance(d, str):
+                d = {"name": d}
+            if not isinstance(d, dict):
+                continue
+            name = re.sub(r"[/\\]+", " - ", str(d.get("name") or "")).strip().strip(".")
+            if name and name.lower() not in seen:
+                seen.add(name.lower())
+                folders.append({"name": name, "holds": str(d.get("holds") or "")[:200]})
+        if folders:
+            return folders
+        logger.warning(f"[plan] folder design attempt {attempt + 1} gave no folders")
+    return []
+
+
+def _assign_chunk(user_instruction: str, menu: str, names: Dict[str, str], chunk: List[Dict[str, Any]],
+                  mode: str) -> Tuple[Dict[int, str], set]:
+    """One sorting request: {file id: folder name} and the ids to leave. Ids not answered are simply missing."""
+    rows = "\n".join(_file_line(f, with_id=True) for f in chunk)
+    user = (f'User instruction: "{user_instruction or "(none: organize this folder)"}"\n\nFOLDERS:\n{menu}\n\n'
+            f"FILES ({len(chunk)}):\n{rows}\n\nRULES:\n{_assign_rules(mode)}\n\nSort every file. Return JSON only.")
+    out = _ask_planner(_ASSIGN_SYSTEM, user, 2500, ASSIGN_EFFORT) or {}
+    ids = {int(f["id"]) for f in chunk}
+    got: Dict[int, str] = {}
+    raw = out.get("assign") if isinstance(out.get("assign"), dict) else {}
+    for k, v in raw.items():
+        try:
+            fid = int(str(k).replace("id:", "").strip())
+        except (TypeError, ValueError):
+            continue
+        name = names.get(str(v or "").strip().lower())
+        if fid in ids and name and fid not in got:
+            got[fid] = name
+    leave = set()
+    if mode == "manual":                 # (only a person's instruction can ask to keep a folder as it is)
+        for v in out.get("leave") or []:
+            try:
+                fid = int(v)
+            except (TypeError, ValueError):
+                continue
+            if fid in ids and fid not in got:
+                leave.add(fid)
+    return got, leave
+
+
+def _plan_two_step(user_instruction: str, files: List[Dict[str, Any]],
+                   folders: Optional[List[Dict[str, str]]] = None,
+                   info: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+    """Design the folders (or use the ones given), then sort the files into them in parallel groups; files a group
+    didn't answer are asked about once more. Returns {"folders": {name: [ids]}} (files left out stay put; the
+    callers' safety nets — reconcile_plan / ensure_all_files_included — finish the job) or None."""
+    from concurrent.futures import ThreadPoolExecutor
+    mode = _plan_mode(user_instruction)
+    files = [f for f in files if f.get("id") is not None]
+    if not files:
+        return None
+    if folders is None:
+        folders = _design_folders(user_instruction, files, mode)
+    if not folders:
+        return None
+    names = {d["name"].strip().lower(): d["name"] for d in folders}
+    menu = "\n".join(f"- {d['name']}" + (f": {d['holds']}" if d.get("holds") else "") for d in folders)
+    logger.info(f"[plan] {len(files)} files: designed {len(folders)} folders: {[d['name'] for d in folders][:40]}")
+    placed: Dict[int, str] = {}
+    leave: set = set()
+    todo = list(files)
+    for round_no in range(2):                     # the first pass, then once more for anything not answered
+        chunks = [todo[i:i + _ASSIGN_CHUNK] for i in range(0, len(todo), _ASSIGN_CHUNK)]
+        with ThreadPoolExecutor(max_workers=min(6, len(chunks))) as ex:
+            for got, keep in ex.map(lambda c: _assign_chunk(user_instruction, menu, names, c, mode), chunks):
+                placed.update(got)
+                leave |= keep
+        todo = [f for f in files if int(f["id"]) not in placed and int(f["id"]) not in leave]
+        if not todo:
+            break
+        logger.warning(f"[plan] sorting round {round_no + 1} left {len(todo)} file(s) unanswered"
+                       + ("; asking again" if round_no == 0 else ""))
+    plan: Dict[str, List[int]] = {}
+    for d in folders:
+        ids = [int(f["id"]) for f in files if placed.get(int(f["id"])) == d["name"]]
+        if ids:
+            plan[d["name"]] = ids
+    if not plan:
+        return None
+    if leave:
+        logger.info(f"[plan] {len(leave)} file(s) left where they are, as asked")
+        if info is not None:
+            info["leave"] = set(leave)                # (plan_and_fill never asks about these again)
+    plan = {"folders": plan}
+    try:
+        plan = _apply_tag_safety_net(plan, files, user_instruction,
+                                     existing_folders_only=(mode == "auto_existing"))
+    except Exception as e:
+        logger.warning(f"[SafetyNet] Skipped due to error: {e}")
+    return plan
+
+
+def _existing_folders_in(user_instruction: str) -> List[str]:
+    """The folder names an [AUTO-ORGANIZE - EXISTING FOLDERS ONLY] instruction lists — auto_watcher writes them as
+    "EXISTING FOLDERS YOU CAN USE: 'A', 'B/C'". [] when there's no such line (the caller then plans the old way)."""
+    m = re.search(r"EXISTING FOLDERS YOU CAN USE:\s*(.+)", user_instruction or "")
+    if not m:
+        return []
+    out = []
+    for name in re.findall(r"'([^'\n]+)'", m.group(1)):
+        name = name.strip()
+        if name and name not in out and len(name) <= 120:
+            out.append(name)
+    return out
+
+
 def request_organization_plan(
     user_instruction: str,
     files: List[Dict[str, Any]],
 ) -> Optional[Dict[str, Any]]:
+    """Plan an organization for `files`: {"folders": {name: [file_id, ...]}} or None on failure. Every path plans
+    through here (the Organize page and voice via PlanWorker, Auto-Organize, the MCP tools): plan_and_fill."""
+    return plan_and_fill(user_instruction, files)[0]
+
+
+def plan_and_fill(user_instruction: str, files: List[Dict[str, Any]]) -> Tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
+    """The plan, plus what happened to files the planner left out (Mac plan_and_fill, 2026-11-10/11). The planner
+    forgets some files in its answer on big folders; those are asked about once more, alone, with the folders the
+    plan already has, so they're placed by what they are like the rest. Anything still missing gets the closest
+    folder by its tags and name. Files a two-step plan was TOLD to leave where they are (your instruction kept them)
+    are never asked about again. A plan made in independent batches gets one tidy pass (_tidy_batches). Every plan
+    ends with each file in one folder only (deduplicate_plan).
+    Report: {"left_out", "placed_on_second_ask", "guessed": [names], "tidy"?}."""
+    report: Dict[str, Any] = {"left_out": 0, "placed_on_second_ask": 0, "guessed": []}
+    info: Dict[str, Any] = {"batched": False, "leave": set()}
+    plan = _plan_all(user_instruction, files, info)
+    if not plan or not plan.get("folders"):
+        return plan, report
+    with_id = [f for f in files if f.get("id") is not None]
+    leave = info["leave"]
+    missing = [f for f in _missing_files(plan, with_id) if int(f["id"]) not in leave]
+    report["left_out"] = len(missing)
+    if missing:
+        second = _ask_about_missing(user_instruction, missing, list(plan["folders"]))
+        report["placed_on_second_ask"] = _merge_into(plan, second, missing)
+        still = [f for f in _missing_files(plan, with_id) if int(f["id"]) not in leave]
+        if still:
+            report["guessed"] = [f.get("file_name", "?") for f in still]
+            placed = _ids_in(plan)
+            plan = ensure_all_files_included(plan, placed | {int(f["id"]) for f in still}, with_id,
+                                             existing_folders_only="EXISTING FOLDERS ONLY" in (user_instruction or ""))
+        logger.info(f"Plan left out {len(missing)} of {len(with_id)} files: asked again, "
+                    f"{report['placed_on_second_ask']} placed by the planner, {len(still)} by tags and name "
+                    f"{report['guessed'][:10]}")
+    if info["batched"]:                                            # (planned in batches: tidy the folder names)
+        report["tidy"] = _tidy_batches(user_instruction, plan, with_id)
+    plan = deduplicate_plan(plan)                                  # (every caller: no file in two folders)
+    return plan, report
+
+
+def _ids_in(plan: Optional[Dict[str, Any]]) -> set:
+    out = set()
+    for ids in ((plan or {}).get("folders") or {}).values():
+        for fid in ids if isinstance(ids, (list, tuple)) else []:
+            try:
+                out.add(int(fid))
+            except (TypeError, ValueError):
+                pass
+    return out
+
+
+def _missing_files(plan: Dict[str, Any], files: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    placed = _ids_in(plan)
+    return [f for f in files if int(f["id"]) not in placed]
+
+
+def _name_set(name: str) -> frozenset:
+    """A folder name's words, however it's spelled ("Pet Photos" = "pet-photos" = "photos_pet")."""
+    return frozenset(_name_words(name))
+
+
+def _ask_about_missing(user_instruction: str, missing: List[Dict[str, Any]],
+                       folders: List[str], only_existing: Optional[bool] = None) -> Dict[str, List[Any]]:
+    """One more request, about only the files the plan left out (or a catch-all's files, for the tidy). Merged
+    answers of every chunk; {} if it failed. only_existing: no new folder may be made (default: when the instruction
+    is an "EXISTING FOLDERS ONLY" one)."""
+    from .settings import settings
+    if only_existing is None:
+        only_existing = "EXISTING FOLDERS ONLY" in (user_instruction or "")
+    out: Dict[str, List[Any]] = {}
+    for ci in range(0, len(missing), PLAN_CHUNK_THRESHOLD):
+        chunk = missing[ci:ci + PLAN_CHUNK_THRESHOLD]
+        message = f"""These files were left out of an organization plan. Put each one in a folder.
+
+The plan's instruction: "{user_instruction}"
+Folders the plan already has: {json.dumps(folders[:200], ensure_ascii=False)}
+
+Files ({len(chunk)} total):
+{build_file_summary(chunk)}
+
+RULES:
+- Put each file in the folder from the list that it belongs in, judged by what the file is (its name, type, label, tags and caption), following the instruction
+- Use the folder's exact name from the list
+- {"Use ONLY folders from the list" if only_existing else "Only if no folder in the list fits it, make a new folder for it"}
+- You MUST include EVERY file_id ({len(chunk)} total), each exactly once
+
+Return JSON only: {{"folders": {{"folder name": [file_id, ...]}}}}"""
+        for _attempt in range(_PLAN_CHUNK_RETRIES):
+            reply = _request_ollama(message) if settings.ai_provider == "local" else _request_openai(message)
+            reply = _normalize_plan_shape(reply)
+            if reply and reply.get("folders"):
+                for name, ids in reply["folders"].items():
+                    if isinstance(ids, (list, tuple)):
+                        out.setdefault(name, []).extend(ids)
+                break
+    return out
+
+
+def _merge_into(plan: Dict[str, Any], second: Dict[str, List[Any]], missing: List[Dict[str, Any]]) -> int:
+    """Add the second answer's files to the plan: only files that were missing, each once, under the plan's own
+    folder name when the answer spelled it a little differently. Returns how many it placed."""
+    wanted = {int(f["id"]) for f in missing}
+    by_words = {_name_set(n): n for n in plan["folders"]}
+    placed = 0
+    for name, ids in second.items():
+        home = name if name in plan["folders"] else by_words.get(_name_set(name), name)
+        for fid in ids:
+            try:
+                fid = int(fid)
+            except (TypeError, ValueError):
+                continue
+            if fid in wanted:
+                plan["folders"].setdefault(home, []).append(fid)
+                wanted.discard(fid)
+                placed += 1
+    return placed
+
+
+_TIDY_SYSTEM = "You tidy file organization plans. Reply with JSON only."
+
+
+def _tidy_batches(user_instruction: str, plan: Dict[str, Any], files: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """A big folder planned in batches that never see each other's folder names (the chunk path) gets folders that
+    mean the same thing ("pet-photos", "photos-pets") and catch-alls ("financial-documents" next to "invoices", "tax"
+    and "receipts"). One look at just the folder names (sizes, 4 example files each) says which to fold together and
+    which are catch-alls; the catch-alls' files then go into the specific folders through the same "place these
+    files" ask as left-out files, existing folders only (Mac _tidy_batches, 2026-11-11: 1,200 files, purity 0.81 ->
+    0.96-1.00, files in two folders 16 -> 0). Names in your instruction are never folded or emptied, a file it can't
+    place stays where it was, and NOTHING is folded into or out of a catch-all (the Mac's trap: "invoices", "tax" and
+    "receipts" folded INTO "financial-documents", which was then spread — those files ended up in "contracts").
+    Changes `plan` in place; any failure, or a change in which files the plan holds, leaves it as it was."""
+    from .settings import settings
+    from .vision import _call_openai_proxy
+    done: Dict[str, Any] = {"folded": {}, "catch_alls": [], "moved": 0}
+    folders = plan.get("folders") or {}
+    if len(folders) < 3 or "EXISTING FOLDERS ONLY" in (user_instruction or "") or settings.ai_provider == "local":
+        return done
+    by_id = {}
+    for f in files:
+        try:
+            by_id[int(f["id"])] = f
+        except (TypeError, ValueError, KeyError):
+            pass
+    lines = []
+    for name, ids in folders.items():
+        examples = [by_id[i].get("file_name", "?") for i in sorted(_ids_in({"folders": {name: ids}}))[:4] if i in by_id]
+        lines.append(f"- {json.dumps(name, ensure_ascii=False)}: {len(ids)} files, e.g. {', '.join(examples)}")
+    message = f"""An organization plan was made in batches that didn't see each other's folder names. So some folders mean the same thing, and some are catch-alls whose files belong in more specific folders that also exist.
+
+The plan's instruction: "{user_instruction}"
+
+Folders (name: number of files, example files):
+{chr(10).join(lines)}
+
+Return JSON only: {{"same": {{"folder to fold away": "folder to keep"}}, "catch_all": ["folder", ...]}}
+- "same": folders that mean the same thing (e.g. "pet-photos" and "photos-pets"). Keep the clearer name. Use exact names from the list, never a new name.
+- "catch_all": a broad folder whose files belong in two or more of the more specific folders in the list (e.g. "documents" when "invoices" and "contracts" exist). Never list a folder whose files have nowhere more specific to go.
+- Leave every other folder out. If nothing needs changing return {{"same": {{}}, "catch_all": []}}."""
+    try:
+        resp = _call_openai_proxy("chat", [{"role": "system", "content": _TIDY_SYSTEM},
+                                           {"role": "user", "content": message}], max_tokens=1500, temperature=0,
+                                  model=PLAN_MODEL)
+        reply = _parse_json(resp["choices"][0]["message"]["content"]) if resp else None
+    except Exception as e:
+        logger.warning(f"Plan tidy: no answer ({e}); plan kept as it was")
+        return done
+    if not isinstance(reply, dict):
+        return done
+    said = (user_instruction or "").lower()
+    protected = {n for n in folders if n.lower() in said}          # (a name you gave is never folded away)
+    named_catch = {c for c in (reply.get("catch_all") or []) if isinstance(c, str)}
+    same = reply.get("same") if isinstance(reply.get("same"), dict) else {}
+    fold = {a: b for a, b in same.items() if isinstance(a, str) and isinstance(b, str) and a in folders
+            and b in folders and a != b and a not in protected and a not in named_catch and b not in named_catch}
+
+    def home(name: str) -> str:                                    # (follows a -> b -> c, never loops)
+        seen = set()
+        while name in fold and name not in seen:
+            seen.add(name)
+            name = fold[name]
+        return name
+    before = _ids_in(plan)
+    out: Dict[str, List[Any]] = {}
+    for name, ids in folders.items():
+        out.setdefault(home(name), []).extend(ids)
+    done["folded"] = {a: home(a) for a in fold if home(a) != a}
+    catch = [c for c in named_catch if c in out and c not in protected]
+    specific = [n for n in out if n not in catch]
+    if catch and len(specific) >= 2:
+        loose = [by_id[i] for c in catch for i in sorted(_ids_in({"folders": {c: out[c]}})) if i in by_id]
+        # (the catch-alls are offered too: a file with no better home stays in its own, never forced elsewhere)
+        answer = _ask_about_missing(user_instruction, loose, specific + catch, only_existing=True)
+        loose_ids = {int(f["id"]) for f in loose}
+        by_words = {_name_set(n): n for n in specific}
+        moved = set()
+        for name, ids in answer.items():
+            target = name if name in specific else by_words.get(_name_set(name))
+            if target is None:
+                continue                                           # (a catch-all or a new name: those stay put)
+            for fid in (_ids_in({"folders": {name: ids}}) & loose_ids) - moved:
+                out[target].append(fid)
+                moved.add(fid)
+        for c in catch:
+            out[c] = [x for x in out[c] if not (str(x).lstrip("-").isdigit() and int(x) in moved)]
+        done["catch_alls"], done["moved"] = catch, len(moved)
+    out = {n: ids for n, ids in out.items() if ids}
+    if _ids_in({"folders": out}) != before:                        # (never lose or invent a file)
+        logger.error("Plan tidy changed which files are in the plan; kept the plan as it was")
+        return {"folded": {}, "catch_alls": [], "moved": 0}
+    plan["folders"] = out
+    logger.info(f"Plan tidy: folded {done['folded']}, catch-alls {catch} -> {done['moved']} files into specific folders")
+    return done
+
+
+def _plan_all(
+    user_instruction: str,
+    files: List[Dict[str, Any]],
+    info: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
     """Dispatcher: one AI request for a normal folder, chunked requests for a big
-    one.
+    one. (`info`, when given, is told how: info["batched"] = planned in independent chunks; info["leave"] = ids a
+    two-step plan was told to leave where they are.)
 
     For <= PLAN_CHUNK_THRESHOLD files this calls ``_request_plan_single`` and
     returns its result UNCHANGED — i.e. behaviour for normal folders is byte-for-
@@ -486,10 +944,29 @@ def request_organization_plan(
     folder's planning from taking N sequential AI calls' worth of wall-clock.
     The merged plan has the exact same shape (``{"folders": {name: [file_id,…]}}``)
     the single path returns, so everything downstream is unchanged.
+
+    More than BIG_PLAN_FILES files: planned in two steps instead (_plan_two_step — design the folders, then sort
+    the files into them in parallel groups, with more thinking). An auto-organize into EXISTING folders skips the
+    design (its folders are given). If the two-step plan fails, the one-call planner below is the fallback.
     """
     if not files:
         logger.warning("No files provided for organization")
         return None
+
+    if len(files) > BIG_PLAN_FILES:
+        mode = _plan_mode(user_instruction)
+        given = None
+        if mode == "auto_existing":
+            names = _existing_folders_in(user_instruction)
+            given = [{"name": n, "holds": ""} for n in names] if names else None
+        if mode != "auto_existing" or given:
+            try:
+                plan = _plan_two_step(user_instruction, files, given, info)
+                if plan and plan.get("folders"):
+                    return plan
+            except Exception as e:
+                logger.warning(f"[plan] two-step planning failed: {e}")
+            logger.warning(f"[plan] two-step planning gave no plan for {len(files)} files; planning in one call")
 
     if len(files) <= PLAN_CHUNK_THRESHOLD:
         return _plan_with_retries(user_instruction, files, 0, 1)
@@ -497,6 +974,8 @@ def request_organization_plan(
     chunks = [files[i:i + PLAN_CHUNK_THRESHOLD]
               for i in range(0, len(files), PLAN_CHUNK_THRESHOLD)]
     logger.info(f"Large organize ({len(files)} files): planning {len(chunks)} chunks in parallel")
+    if info is not None:
+        info["batched"] = True
 
     # Text-only calls on background threads — no RAM spike, only a handful at
     # once (capped at 6). Each chunk retries via _plan_with_retries. We drop
@@ -580,7 +1059,9 @@ def _request_plan_single(
     file_summary = build_file_summary(files)
     
     # Detect auto-organize mode vs specific instruction mode
-    is_auto_organize = user_instruction.startswith("[AUTO-ORGANIZE]")
+    # "[AUTO-ORGANIZE" without the closing bracket: the existing-folders instruction starts
+    # "[AUTO-ORGANIZE - EXISTING FOLDERS ONLY]", so with the bracket its rules never reached the planner (Mac fix 9).
+    is_auto_organize = user_instruction.startswith("[AUTO-ORGANIZE")
 
     # Check for different auto-organize modes
     is_existing_folders_only = "EXISTING FOLDERS ONLY" in user_instruction
@@ -652,7 +1133,7 @@ CRITICAL RULES:
 - DO NOT put all files in a single folder - create a logical structure
 - You MUST include EVERY file_id in your response ({len(files)} total)
 - Each file_id must appear in exactly ONE folder
-- Create 2-5 folders depending on how the files naturally group
+- Create as many folders as the files naturally need (a handful for a small mixed folder; one per topic when the files have clear topics) — never one folder per file
 
 Examples:
 - Project files: {{"folders": {{"website-redesign": [1,2,3], "mobile-app": [4,5], "marketing": [6,7,8]}}}}
@@ -730,7 +1211,7 @@ CRITICAL RULES:
 - DO NOT put all files in a single folder - create a logical structure
 - You MUST include EVERY file_id in your response ({len(files)} total)
 - Each file_id must appear in exactly ONE folder
-- Create 2-5 folders depending on how the files naturally group
+- Create as many folders as the files naturally need (a handful for a small mixed folder; one per topic when the files have clear topics) — never one folder per file
 
 NESTED-FOLDER SYNTAX (max 2 levels):
 - To create a nested folder, put a forward slash IN THE FOLDER NAME (e.g. "Photos/Vacation").
@@ -804,6 +1285,7 @@ Apply the user's requested changes to the current plan.
 First work out every file the feedback refers to: check each file's name, label and tags. "The invoice and the receipt"
 means every file matching either word. Return JSON with "files_mentioned": [every such file_id] FIRST, then "folders".
 Each file in files_mentioned must end up where the feedback says, under the folder name it gives.
+If the feedback renames or merges whole folders, also return "folders_renamed": {{"old folder name": "new folder name"}}.
 Return the complete updated plan as JSON only."""
 
     provider = settings.ai_provider
@@ -815,17 +1297,94 @@ Return the complete updated plan as JSON only."""
             plan = _request_openai(user_message + "\n\nYour last answer did not change the plan. "
                                                   "The user asked for a change: make it.") or plan
         plan = _gather_mentioned(plan, current_plan, feedback)
-        if isinstance(plan, dict):
-            plan.pop("files_mentioned", None)      # (only there to make it list them first: measured 18/18 vs 3/6)
-        return plan
+        return _only_mentioned_move(current_plan, plan, feedback)
     elif provider == 'local':
         plan = _gather_mentioned(_request_ollama(user_message), current_plan, feedback)
-        if isinstance(plan, dict):
-            plan.pop("files_mentioned", None)      # (the same prompt asks for it: never let it reach the plan)
-        return plan
+        return _only_mentioned_move(current_plan, plan, feedback)
     else:
         logger.warning("No AI provider configured")
         return None
+
+
+# A change about the WHOLE plan (not a few files): the new plan is taken as it is.
+_WHOLE_PLAN_WORDS = re.compile(
+    r"\b(?:start over|from scratch|re-?do|redo it|reorgani[sz]e|all (?:the |my )?files|every(?:thing| file)|"
+    r"fewer folders|more folders|less folders|different(?:ly)?|by (?:type|date|topic|year|month|kind)|"
+    r"split|separate them)\b", re.I)
+
+
+def _ids_of(folders) -> Dict[str, set]:
+    out = {}
+    for name, ids in (folders or {}).items():
+        s = set()
+        for fid in ids if isinstance(ids, (list, tuple)) else []:
+            try:
+                s.add(int(fid))
+            except (TypeError, ValueError):
+                pass
+        out[name] = s
+    return out
+
+
+def _only_mentioned_move(current_plan: Optional[Dict[str, Any]], new_plan: Optional[Dict[str, Any]],
+                         feedback: str = "") -> Optional[Dict[str, Any]]:
+    """A change moves only the files it's about ("files_mentioned"); every other file keeps the folder it had in the
+    plan the person saw. (Mac 26e1a3b; the same bug was live on Windows: "put the recipes in a folder called Food"
+    came back with nearly every file in Food, and "go ahead" moved them all.)
+    A rename can't be told from "move just these" by the plan's shape (a plan that dumped every file into the named
+    folder looks like a merge — the Food bug), so the answer SAYS it: "folders_renamed" {"old": "new"} (Mac
+    09e83da) — every file of a renamed folder goes with it, named or not. The whole new plan is taken when the AI
+    listed no files, or the words are about the whole plan ("start over", "by type", "fewer folders"). Either way,
+    a file the new plan forgot keeps its folder (a change never silently drops files out of the plan)."""
+    if not isinstance(new_plan, dict):
+        return new_plan
+    fr = new_plan.pop("folders_renamed", None)
+    renamed = ({str(k): v.strip() for k, v in fr.items() if isinstance(v, str) and v.strip()}
+               if isinstance(fr, dict) else {})
+    mentioned = set()
+    for fid in new_plan.pop("files_mentioned", None) or []:
+        try:
+            mentioned.add(int(fid))
+        except (TypeError, ValueError):
+            pass
+    if not isinstance(new_plan.get("folders"), dict) or not isinstance(current_plan, dict):
+        return new_plan
+    old = _ids_of(current_plan.get("folders"))
+    new = _ids_of(new_plan.get("folders"))
+    whole = not mentioned or bool(_WHOLE_PLAN_WORDS.search(feedback or ""))
+    if whole:
+        placed = set().union(*new.values()) if new else set()
+        forgot = [(name, i) for name, ids in old.items() for i in sorted(ids) if i not in placed]
+        if forgot:
+            folders = {k: list(v) for k, v in new_plan["folders"].items()}
+            for name, i in forgot:
+                folders.setdefault(name, []).append(i)
+            logger.info(f"Plan change: kept {len(forgot)} file(s) the new plan forgot in their folders")
+            return {**new_plan, "folders": folders}
+        return new_plan
+    new_home: Dict[int, str] = {}
+    for name, ids in new.items():
+        for i in ids:
+            new_home.setdefault(i, name)
+    out: Dict[str, List[int]] = {}
+    seen = set()
+    for name, ids in (current_plan.get("folders") or {}).items():
+        for fid in ids:
+            try:
+                i = int(fid)
+            except (TypeError, ValueError):
+                continue
+            if i in seen:
+                continue
+            seen.add(i)
+            out.setdefault(new_home.get(i, name) if i in mentioned else renamed.get(name, name), []).append(i)
+    for i in sorted(mentioned - seen):                    # (named, but not in the plan before)
+        if i in new_home:
+            out.setdefault(new_home[i], []).append(i)
+    moved = sum(1 for ids in out.values() for i in ids if i in mentioned)
+    logger.info(f"Plan change: {len(mentioned)} file(s) named by the change, {moved} placed by it; "
+                f"the other {len(seen) - len(mentioned & seen)} kept their folders")
+    return {**{k: v for k, v in new_plan.items() if k != "folders"}, "folders": {k: v for k, v in out.items() if v}}
 
 
 _KEEP_WORDS = re.compile(r"\b(?:leave|keep|stay|stays|except|but not|not the|apart from|other than)\b", re.I)

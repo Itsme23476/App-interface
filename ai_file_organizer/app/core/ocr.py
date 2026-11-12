@@ -66,9 +66,11 @@ def extract_text_from_pdf(pdf_path: Path, lang: str = "eng", max_pages: int = 3)
         from .vision import render_pdf_page                        # scanned: render (no poppler)
         try:
             import pypdfium2 as pdfium
-            _doc = pdfium.PdfDocument(str(pdf_path))
-            n_pages = len(_doc)
-            _doc.close()
+            from .text_extract import PDFIUM_LOCK       # (PDFium isn't thread-safe: one lock for the whole app)
+            with PDFIUM_LOCK:
+                _doc = pdfium.PdfDocument(str(pdf_path))
+                n_pages = len(_doc)
+                _doc.close()
         except Exception:
             n_pages = 1
         pages = [im for im in (render_pdf_page(pdf_path, i, 2000) for i in range(min(n_pages, max_pages)))

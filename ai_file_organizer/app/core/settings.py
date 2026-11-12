@@ -10,6 +10,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Any, Optional
 
+# Test-only keys used on the Parallels dev box (Shift+letter: they'd type a capital letter for everyone else).
+# A saved one is put back to the real shortcut when settings load.
+_TEST_KEYS = {'shift+a', 'shift+z', 'shift+m'}
+
 
 class Settings:
     """Application settings manager."""
@@ -21,10 +25,10 @@ class Settings:
         # AI Provider: 'openai' (default, recommended), 'local' (Ollama), or 'none'
         self.ai_provider: str = 'openai'  # OpenAI is now the default - no local setup needed!
         self.openai_api_key: str | None = os.environ.get('OPENAI_API_KEY')
-        self.openai_vision_model: str = os.environ.get('OPENAI_VISION_MODEL', 'gpt-4o-mini')  # Cost-effective default
+        self.openai_vision_model: str = 'gpt-6-luna'   # (a label only: the proxy picks the model — vision.FILECT_MODEL)
         # Search rerank option (ChatGPT)
         self.use_openai_search_rerank: bool = False
-        self.openai_search_model: str = 'gpt-4o-mini'
+        self.openai_search_model: str = 'gpt-6-luna'
         # Local AI model settings (Ollama)
         # Qwen 2.5-VL handles BOTH text AND vision in one model
         self.local_model: str = 'qwen2.5vl:3b'
@@ -92,9 +96,9 @@ class Settings:
         self.live_organize_preview: bool = True     # "organize my Downloads": show the plan first (Off: moves at once)
         self.live_tour_seen: bool = False          # Assistant page: its tour button stands out until opened once
         self.live_settings_collapsed: bool = False  # Assistant page: the Settings panel (right) hidden
-        # Hold to talk to the agent from anywhere. TEST keybind for the Parallels dev box — swap for the real
-        # one before release (see the project's test-keybind list).
-        self.assistant_voice_shortcut: str = 'shift+z'
+        # Hold to talk to the agent from anywhere: hold Ctrl + Alt (the owner's pick, 2026-11-12 — the Mac's
+        # fn + ⌃ has no Windows twin). agent_hotkey watches it (left Alt only, alone, after 0.3 s).
+        self.assistant_voice_shortcut: str = 'ctrl+alt'
 
         # ======= AUTO-ORGANIZE WATCHER SETTINGS =======
         # List of folders with per-folder instructions: [{path: str, instruction: str}, ...]
@@ -262,7 +266,7 @@ class Settings:
         self._save_config()
 
     def set_openai_vision_model(self, model: str) -> None:
-        model = (model or '').strip() or 'gpt-4o-mini'
+        model = (model or '').strip() or 'gpt-6-luna'
         self.openai_vision_model = model
         os.environ['OPENAI_VISION_MODEL'] = model
         self._save_config()
@@ -323,6 +327,8 @@ class Settings:
         qs = data.get('quick_search_shortcut')
         if isinstance(qs, str) and qs.strip():
             self.quick_search_shortcut = qs.strip().lower()
+        if self.quick_search_shortcut in _TEST_KEYS:          # (a dev-box test key, never a real one)
+            self.quick_search_shortcut = 'ctrl+alt+h'
         self.quick_search_autopaste = bool(data.get('quick_search_autopaste', self.quick_search_autopaste))
         self.quick_search_auto_confirm = bool(data.get('quick_search_auto_confirm', self.quick_search_auto_confirm))
         qsg = data.get('quick_search_geometry')
@@ -404,6 +410,8 @@ class Settings:
         vs = data.get('assistant_voice_shortcut')
         if isinstance(vs, str) and vs.strip():
             self.assistant_voice_shortcut = vs.strip().lower()
+        if self.assistant_voice_shortcut in _TEST_KEYS:       # (Shift+Z was the dev box's test key)
+            self.assistant_voice_shortcut = 'ctrl+alt'
         rm = data.get('assistant_router_model')
         if isinstance(rm, str) and rm.strip():
             self.assistant_router_model = rm.strip()
@@ -836,6 +844,12 @@ class Settings:
         if entry is not None:
             entry.update(flags)
             self._save_config()
+
+    def auto_organize_only_new(self, folder_path: str) -> bool:
+        """Set up by voice as "only the folders already there": the files already in it stay where they are, the
+        same as "only new files" (Mac fix 6). The Organize tab's As-Is still sorts what's there."""
+        entry = self._auto_organize_entry(folder_path)
+        return bool(entry and entry.get('only_new'))
 
     def auto_organize_skip_known(self, folder_path: str) -> bool:
         """True once a day's auto-organize was reverted here: files Filect already knows stay where they are."""

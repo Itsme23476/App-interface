@@ -357,6 +357,7 @@ def test_merged_only_when_filect_chose_the_names(monkeypatch):
         ids = [f["id"] for f in chunk]
         return {"folders": {"invoices-northwind" if idx == 0 else "invoices": ids}}
     monkeypatch.setattr(ai_organizer, "_plan_with_retries", fake)
+    monkeypatch.setattr(ai_organizer, "_plan_two_step", lambda *a, **k: None)   # (the one-call planner's chunks)
     got = ai_organizer.request_organization_plan("[AUTO-ORGANIZE] Organize ALL files into logical folders", files)
     assert list(got["folders"]) == ["invoices-northwind"] and len(got["folders"]["invoices-northwind"]) == 300
     for said in ("[AUTO-ORGANIZE] User's specific instructions: invoices in invoices",
@@ -372,11 +373,13 @@ def test_refine_asks_again_when_nothing_changed(monkeypatch):
 
     def same_then_new(message):
         calls.append(message)
-        return {"folders": {"a": [1, 2]}} if len(calls) == 1 else {"files_mentioned": [1], "folders": {"b": [1, 2]}}
+        return ({"folders": {"a": [1, 2]}} if len(calls) == 1 else       # (a rename is SAID: folders_renamed)
+                {"files_mentioned": [1], "folders_renamed": {"a": "b"}, "folders": {"b": [1, 2]}})
     monkeypatch.setattr(ai_organizer, "_request_openai", same_then_new)
     monkeypatch.setattr(settings, "ai_provider", "openai")
     got = ai_organizer.request_plan_refinement("x", old, "rename it b", [{"id": 1, "file_name": "n"}])
-    assert got == {"folders": {"b": [1, 2]}} and len(calls) == 2 and "make it" in calls[1]
+    assert {k: sorted(v) for k, v in got["folders"].items()} == {"b": [1, 2]} and len(got) == 1
+    assert len(calls) == 2 and "make it" in calls[1]
     assert '"files_mentioned"' in calls[0] and "FIRST" in calls[0], "it must list the files first"
 
 

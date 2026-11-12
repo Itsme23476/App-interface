@@ -1,6 +1,6 @@
 """Reusable 'suggest Custom Words from your field' panel.
 
-The user types their niche -> we ask the AI (gpt-5-mini, via the proxy, on a background
+The user types their niche -> we ask the AI (gpt-6-luna, via the proxy, on a background
 thread so the UI never freezes) for DISTINCTIVE terms -> they're shown as selectable chips
 -> the user picks which to add (plus can type their own). Added terms go to
 `settings.dictation_custom_terms` (Grok key-term biasing). Used by the Custom Words settings

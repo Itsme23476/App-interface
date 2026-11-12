@@ -6,7 +6,8 @@ through its own `codex mcp add/remove/get` CLI (which writes ~/.codex/config.tom
 the Codex CLI *and* the ChatGPT/Codex desktop app both read). Other servers are left untouched.
 
 Windows adaptations of the macOS original (Mac 8f062de): the Claude Desktop config lives under
-%APPDATA%\\Claude; the launch command uses the console python (python.exe, never pythonw.exe, so
+%APPDATA%\\Claude for the installer version, but elsewhere for the Microsoft Store version (see
+claude_config_path); the launch command uses the console python (python.exe, never pythonw.exe, so
 stdio pipes work); Codex binary is resolved via PATH + .exe/.cmd fallbacks (config is still the
 cross-platform ~/.codex/config.toml).
 """
@@ -21,12 +22,61 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 SERVER_KEY = "filect"
+_CLAUDE_CFG = "claude_desktop_config.json"
+
+
+def _local() -> Path:
+    return Path(os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local"))
+
+
+def _roaming() -> Path:
+    return Path(os.environ.get("APPDATA") or str(Path.home() / "AppData" / "Roaming"))
+
+
+def _store_claude_ids() -> list:
+    """The package ids of a Microsoft Store Claude Desktop (%LOCALAPPDATA%\\Packages\\Claude_<id>)."""
+    try:
+        return sorted(p.name.split("_", 1)[1] for p in (_local() / "Packages").glob("Claude_*")
+                      if p.is_dir() and "_" in p.name)
+    except OSError:
+        return []
 
 
 def claude_config_path() -> Path:
-    """Claude Desktop's config file on Windows (%APPDATA%\\Claude\\claude_desktop_config.json)."""
-    appdata = os.environ.get("APPDATA") or str(Path.home() / "AppData" / "Roaming")
-    return Path(appdata) / "Claude" / "claude_desktop_config.json"
+    """The claude_desktop_config.json that the installed Claude Desktop actually reads.
+
+    * The installer version reads %APPDATA%\\Claude\\claude_desktop_config.json.
+    * The Microsoft Store version never reads that file (a known Claude bug: its "Edit Config"
+      even opened it). Newer Store versions keep their data in %LOCALAPPDATA%\\Claude-Data\\claude_<id>;
+      older ones in the package's private %APPDATA% (Packages\\Claude_<id>\\LocalCache\\Roaming\\Claude
+      — left behind with a ".user-data-left" marker once the data has moved).
+    Writing only %APPDATA%\\Claude made 'Connect' look done while the Store Claude never started Filect."""
+    for pid in _store_claude_ids():
+        moved = _local() / "Claude-Data" / f"claude_{pid.lower()}"
+        if moved.is_dir():
+            return moved / _CLAUDE_CFG
+        virt = _local() / "Packages" / f"Claude_{pid}" / "LocalCache" / "Roaming" / "Claude"
+        try:
+            if virt.is_dir() and not any(virt.glob(".user-data-left*")):
+                return virt / _CLAUDE_CFG
+        except OSError:
+            pass
+    return _roaming() / "Claude" / _CLAUDE_CFG
+
+
+def _all_claude_config_paths() -> list:
+    """Every Claude config Filect may have written (the one in use first), for a clean Disconnect."""
+    out = [claude_config_path(), _roaming() / "Claude" / _CLAUDE_CFG]
+    for pid in _store_claude_ids():
+        out += [_local() / "Claude-Data" / f"claude_{pid.lower()}" / _CLAUDE_CFG,
+                _local() / "Packages" / f"Claude_{pid}" / "LocalCache" / "Roaming" / "Claude" / _CLAUDE_CFG]
+    seen, uniq = set(), []
+    for p in out:
+        k = os.path.normcase(str(p))
+        if k not in seen:
+            seen.add(k)
+            uniq.append(p)
+    return uniq
 
 
 def _python_exe() -> str:
@@ -58,8 +108,8 @@ def mcp_command():
     }
 
 
-def _load_config() -> dict:
-    p = claude_config_path()
+def _load_config(p=None) -> dict:
+    p = p or claude_config_path()
     if p.exists():
         try:
             return json.loads(p.read_text(encoding="utf-8")) or {}
@@ -77,7 +127,7 @@ def connect():
     try:
         p = claude_config_path()
         p.parent.mkdir(parents=True, exist_ok=True)
-        cfg = _load_config()
+        cfg = _load_config(p)
         cmd, args, env = mcp_command()
         entry = {"command": cmd}
         if args:
@@ -86,7 +136,7 @@ def connect():
             entry["env"] = env
         cfg.setdefault("mcpServers", {})[SERVER_KEY] = entry
         p.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
-        logger.info("Filect MCP server added to Claude Desktop config")
+        logger.info(f"Filect MCP server added to Claude Desktop config ({p})")
         return True, "Connected. Quit and reopen Claude Desktop to finish."
     except Exception as e:
         logger.error(f"MCP connect failed: {e}")
@@ -94,14 +144,17 @@ def connect():
 
 
 def disconnect():
-    """Remove only the Filect server from Claude Desktop's config. (ok, message)."""
+    """Remove only the Filect server from Claude Desktop's config — from every config Filect may
+    have written (an older Filect wrote %APPDATA%\\Claude even for the Store Claude). (ok, message)."""
     try:
-        p = claude_config_path()
-        cfg = _load_config()
-        servers = cfg.get("mcpServers") or {}
-        if SERVER_KEY in servers:
-            del servers[SERVER_KEY]
-            p.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+        for p in _all_claude_config_paths():
+            if not p.exists():
+                continue
+            cfg = _load_config(p)
+            servers = cfg.get("mcpServers") or {}
+            if SERVER_KEY in servers:
+                del servers[SERVER_KEY]
+                p.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
         return True, "Disconnected. Quit and reopen Claude Desktop to apply."
     except Exception as e:
         logger.error(f"MCP disconnect failed: {e}")
@@ -210,12 +263,36 @@ def _codex_toml_connect():
             for k, v in env.items():
                 envt[k] = v
             entry["env"] = envt
+        entry["startup_timeout_sec"] = CODEX_STARTUP_TIMEOUT
         servers[SERVER_KEY] = entry
         p.write_text(tomlkit.dumps(doc), encoding="utf-8")
         return True, "Connected. Restart the Codex / ChatGPT desktop app to finish."
     except Exception as e:
         logger.error(f"Codex TOML connect failed: {e}")
         return False, f"Could not update the Codex config: {e}"
+
+
+# The installed Filect.exe is one file that unpacks itself on every start: measured 26-31 s before it answers as
+# an MCP server (2026-11-11). Codex gives a server 10 s by default and then drops it for the session ("no Filect
+# tool"), so Filect's entry asks Codex to wait longer — the same setting Codex's own bundled tools use (120 s).
+CODEX_STARTUP_TIMEOUT = 120
+
+
+def _codex_set_startup_timeout() -> bool:
+    """Add startup_timeout_sec to the Filect entry `codex mcp add` wrote (the CLI has no flag for it)."""
+    try:
+        import tomlkit
+        p = codex_config_path()
+        doc = tomlkit.parse(p.read_text(encoding="utf-8"))
+        entry = (doc.get("mcp_servers") or {}).get(SERVER_KEY)
+        if entry is None:
+            return False
+        entry["startup_timeout_sec"] = CODEX_STARTUP_TIMEOUT
+        p.write_text(tomlkit.dumps(doc), encoding="utf-8")
+        return True
+    except Exception as e:
+        logger.warning(f"Couldn't set Codex's startup wait for Filect: {e}")
+        return False
 
 
 def codex_connect():
@@ -231,6 +308,7 @@ def codex_connect():
         _run_codex(["mcp", "remove", SERVER_KEY])
         r = _run_codex(add)
         if r and r.returncode == 0:
+            _codex_set_startup_timeout()
             return True, "Connected. Restart the Codex / ChatGPT desktop app (or start a new Codex session)."
         err = ((r.stderr or r.stdout).strip() if r else "codex not runnable") or "unknown error"
         logger.error(f"Codex connect failed: {err}")
@@ -270,10 +348,12 @@ def codex_disconnect():
 
 
 if __name__ == "__main__":
-    # offline self-check against a temp config (never touches the real one)
+    # offline self-check against a temp config (never touches the real one: APPDATA/LOCALAPPDATA
+    # point into a temp folder, so even Disconnect's sweep of every location stays inside it)
     import tempfile
-    tmp = Path(tempfile.mkdtemp()) / "claude_desktop_config.json"
-    globals()["claude_config_path"] = lambda: tmp
+    _t = Path(tempfile.mkdtemp())
+    os.environ["APPDATA"], os.environ["LOCALAPPDATA"] = str(_t / "Roaming"), str(_t / "Local")
+    tmp = claude_config_path()
     assert is_connected() is False
     ok, _ = connect(); assert ok and is_connected()
     cfg = json.loads(tmp.read_text()); assert "filect" in cfg["mcpServers"]

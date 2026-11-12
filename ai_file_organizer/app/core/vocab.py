@@ -7,7 +7,7 @@ nouns) — never ordinary words. The user then picks which to add. Chosen terms 
 improves raw transcription regardless of the AI Cleanup toggle) and the cleanup pinning.
 
 Design notes:
-  * One cheap gpt-5-mini call via the existing proxy (entitlement-gated). No new backend.
+  * One cheap gpt-6-luna call via the existing proxy (entitlement-gated). No new backend.
   * Two guards keep biasing SAFE — the prompt forbids common words, AND _is_distinctive()
     drops any plain dictionary word the model slips in (biasing common words is useless and
     can skew normal speech). Everything is opt-in: the user selects what to add.
@@ -87,7 +87,7 @@ def suggest_terms_for_niche(niche: str, max_terms: int = MAX_TERMS) -> list:
     if not niche:
         return []
     try:
-        from .vision import _call_openai_proxy
+        from .vision import _call_openai_proxy, FILECT_MODEL
         system = (
             "You build a key-term biasing list for a speech-to-text dictation app, for someone "
             "who works in a given field. List DISTINCTIVE terms the transcriber is likely to GET "
@@ -104,7 +104,7 @@ def suggest_terms_for_niche(niche: str, max_terms: int = MAX_TERMS) -> list:
         resp = _call_openai_proxy(
             "chat",
             [{"role": "system", "content": system}, {"role": "user", "content": user}],
-            max_tokens=500, model="gpt-5-mini",
+            max_tokens=500, model=FILECT_MODEL,
         )
         if not resp:
             return []

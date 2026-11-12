@@ -3239,6 +3239,14 @@ class MainWindow(QMainWindow):
                     logger.info("[VOICE] organize controller wired")
             except Exception as e:
                 logger.error(f"[VOICE] organize controller init failed: {e}")
+            # Find a file by voice (Filect Assistant): the same top panel as organizing.
+            try:
+                if getattr(self, "voice_organize", None) is not None:
+                    from app.ui.voice_find_controller import VoiceFindController
+                    self.voice_find = VoiceFindController(self, self.voice_organize)
+                    logger.info("[VOICE] find controller wired")
+            except Exception as e:
+                logger.error(f"[VOICE] find controller init failed: {e}")
             self.dictation_controller.start()
             logger.info("[VOICE] page ready, controller started (hotkey trigger)")
         except Exception as e:

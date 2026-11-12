@@ -12,10 +12,12 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from datetime import datetime
-from typing import Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set
 from collections import defaultdict
 
 from PySide6.QtCore import QCoreApplication, QObject, Qt, Signal, QTimer, QThread
+
+from .apply import is_busy, move_file
 
 logger = logging.getLogger(__name__)
 
@@ -160,6 +162,11 @@ class AutoWatcherWorker(QThread):
     error_occurred = Signal(str, str)  # file_path, error_message
     finished_processing = Signal(list)  # Emitted when done, with list of all processed file paths
     limit_reached = Signal(dict)  # emitted once when the monthly index limit is hit
+    # Files this batch could NOT deal with — never marked done, so they're tried again later (the watcher spaces the
+    # tries out). Before 2026-11-11 every failure path marked the whole batch done: one offline moment and those
+    # files were never sorted that session.
+    not_done = Signal(list, str)        # file paths, why ("no plan" / "plan failed" / "move failed")
+    busy = Signal(list)                 # file paths open in another program: left untouched, tried once they're free
     
     def __init__(self, file_paths: List[str], folder: str, instruction: str, 
                  folder_instructions: Dict[str, str] = None,
@@ -243,6 +250,9 @@ class AutoWatcherWorker(QThread):
         # Track all files we process (for marking as organized)
         all_processed_files = []
         history_moves = []     # (from, to) of every file this batch moved: goes in History at the end
+        busy_files = []        # open in another program: untouched, tried again once free
+        failed_moves = []      # a move that failed for another reason: tried again later
+        crashed = False
 
         if not self.file_paths:
             self.finished_processing.emit(all_processed_files)
@@ -414,9 +424,9 @@ class AutoWatcherWorker(QThread):
             plan = request_organization_plan(self.instruction, files_info)
 
             if not plan:
-                logger.warning("[Worker] No plan returned from AI")
-                all_processed_files = list(self.file_paths)
-                self.finished_processing.emit(all_processed_files)
+                logger.warning("[Worker] No plan returned from AI: the files wait and are tried again later")
+                self.not_done.emit(list(self.file_paths), "no plan")
+                self.finished_processing.emit([])
                 return
 
             # Belt-and-suspenders: run the deterministic tag-based safety net
@@ -450,9 +460,9 @@ class AutoWatcherWorker(QThread):
             
             is_valid, errors = validate_plan(plan, {f['id'] for f in files_info})
             if not is_valid:
-                logger.warning(f"[Worker] Plan validation failed: {errors}")
-                all_processed_files = list(self.file_paths)
-                self.finished_processing.emit(all_processed_files)
+                logger.warning(f"[Worker] Plan validation failed: {errors} — the files are tried again later")
+                self.not_done.emit(list(self.file_paths), "no plan")
+                self.finished_processing.emit([])
                 return
             
             # Filter plan to only include files we're processing.
@@ -506,6 +516,9 @@ class AutoWatcherWorker(QThread):
                 + (f"; {len(left_in_place_ids)} file(s) left in place"
                    if left_in_place_ids else "")
             )
+            for _fid in left_in_place_ids:       # (decided: they stay. Not done, they were planned again every few s)
+                if files_by_id.get(_fid):
+                    all_processed_files.append(files_by_id[_fid])
             if left_in_place_ids:
                 self.status_changed.emit(
                     f"As-Is: left {len(left_in_place_ids)} file(s) in place "
@@ -565,7 +578,7 @@ class AutoWatcherWorker(QThread):
                             counter += 1
                     
                     try:
-                        shutil.move(file_path, dest_path)
+                        move_file(file_path, dest_path)     # (never a half copy of a file open elsewhere)
                         moved_count += 1
                         history_moves.append((file_path, dest_path))
                         all_processed_files.append(dest_path)  # Track new location
@@ -589,8 +602,14 @@ class AutoWatcherWorker(QThread):
                             logger.warning(f"[Worker] Could not update index for moved file: {e}")
                             
                     except Exception as e:
-                        logger.error(f"[Worker] Error moving {file_path}: {e}")
-                        self.error_occurred.emit(file_path, str(e))
+                        if is_busy(e):
+                            busy_files.append(file_path)
+                            logger.info(f"[Worker] {os.path.basename(file_path)} is open in another program: left "
+                                        f"where it is, tried again once it's free")
+                        else:
+                            failed_moves.append(file_path)
+                            logger.error(f"[Worker] Error moving {file_path}: {e}")
+                            self.error_occurred.emit(file_path, str(e))
             
             if skipped_count > 0:
                 logger.info(f"[Worker] Skipped {skipped_count} file(s) already in correct location")
@@ -603,14 +622,61 @@ class AutoWatcherWorker(QThread):
         except Exception as e:
             logger.error(f"[Worker] Error in organization: {e}")
             self.error_occurred.emit("", str(e))
+            crashed = True
 
         _record_auto_moves(self.folder, history_moves)   # (one write per batch, on this background thread)
 
-        # Mark all files as processed (including those that weren't moved)
-        if not all_processed_files:
-            all_processed_files = list(self.file_paths)
-        
+        # Only what this batch really dealt with counts as done (moved, already in place, or deliberately left).
+        # (It marked EVERY file done when nothing was — a batch whose files were all open elsewhere, or whose plan
+        # failed, was never tried again.)
+        handled = {os.path.normcase(os.path.normpath(p)) for p in all_processed_files}
+        handled |= {os.path.normcase(os.path.normpath(src)) for src, _ in history_moves}
+        if busy_files:
+            self.busy.emit(list(busy_files))
+        waiting = {os.path.normcase(os.path.normpath(p)) for p in busy_files}
+        rest = [p for p in self.file_paths if os.path.normcase(os.path.normpath(p)) not in handled | waiting
+                and os.path.exists(p)]
+        if crashed:
+            if rest:
+                self.not_done.emit(rest, "plan failed")
+        else:
+            failed = {os.path.normcase(os.path.normpath(p)) for p in failed_moves}
+            retry = [p for p in rest if os.path.normcase(os.path.normpath(p)) in failed]
+            if retry:
+                self.not_done.emit(retry, "move failed")
+            # (the plan said nothing about the others and the fill-in placed them nowhere: they stay, like As-Is)
+            all_processed_files.extend(p for p in rest if os.path.normcase(os.path.normpath(p)) not in failed)
         self.finished_processing.emit(all_processed_files)
+
+
+STILL_WRITING_SECS = 5    # a file changed (or created) this recently, or still growing, waits: it's being written
+RETRY_AFTER = (60, 300, 1800)    # a file whose plan / move failed is tried again after 1, 5 and 30 min, then left
+                                 # until the next start (the Mac's ladder, 5946868)
+
+
+def _can_move(path: str) -> bool:
+    """Could Filect move this file right now? False only when another program has it open in a way that blocks
+    moving (Word, a recorder, a download still being written): Windows then refuses to rename it. A cheap check
+    (opening the file for DELETE access, sharing everything else), so a file open elsewhere waits with NO AI call
+    instead of being planned every few seconds and failing to move each time."""
+    if os.name != "nt":
+        return True
+    try:
+        import ctypes
+        from ctypes import wintypes
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.CreateFileW.restype = wintypes.HANDLE
+        k32.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
+                                    wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+        k32.CloseHandle.argtypes = [wintypes.HANDLE]
+        DELETE, SHARE_ALL, OPEN_EXISTING, BACKUP_SEMANTICS = 0x00010000, 0x7, 3, 0x02000000
+        h = k32.CreateFileW(str(path), DELETE, SHARE_ALL, None, OPEN_EXISTING, BACKUP_SEMANTICS, None)
+        if h is None or h == wintypes.HANDLE(-1).value:
+            return ctypes.get_last_error() not in (32, 33)          # sharing / lock violation: it's open elsewhere
+        k32.CloseHandle(h)
+        return True
+    except Exception:
+        return True
 
 
 class AutoOrganizeWatcher(QObject):
@@ -682,6 +748,9 @@ class AutoOrganizeWatcher(QObject):
         # Queue stores (folder, instruction, existing_folders) - we re-scan folder when processing
         self._worker_queue: List[tuple] = []
         self._current_batch: List[str] = []     # the files the running batch was given
+        # (path key) -> (failed tries, when the next try may start): files whose plan or move failed
+        self._retries: Dict[str, tuple] = {}
+        self._waiting_busy: Set[str] = set()    # (path keys) open in another program: noted once, waiting
         
         # Track files that have been successfully organized
         # This prevents re-processing the same files and unnecessary AI calls
@@ -698,6 +767,8 @@ class AutoOrganizeWatcher(QObject):
         # scan loop so we never re-hash or re-evaluate the same pre-existing
         # files again.
         self._left_in_place_paths: Set[str] = set()
+        self._sizes: Dict[str, tuple] = {}       # path key -> (size, mtime) last seen: a write in progress shows
+        self._old_workers: List[Any] = []        # finished workers whose threads are still ending (never collected)
 
     @property
     def is_running(self) -> bool:
@@ -873,6 +944,8 @@ class AutoOrganizeWatcher(QObject):
         self._tick_busy = False
         self._processed_files.clear()
         self._pending_files.clear()
+        self._retries.clear()
+        self._waiting_busy.clear()
         # Reset Organize-New-Only state every start() so the baseline reflects
         # the folder contents at THIS moment.
         self._baseline_hashes.clear()
@@ -952,6 +1025,8 @@ class AutoOrganizeWatcher(QObject):
         
         # Clear queues
         self._pending_files.clear()
+        self._retries.clear()
+        self._waiting_busy.clear()
         self._worker_queue.clear()
         
         self.status_changed.emit("Watcher stopped")
@@ -1024,7 +1099,7 @@ class AutoOrganizeWatcher(QObject):
                         dest_path = os.path.join(folder_path, f"{base} ({counter}){ext}")
                         counter += 1
                 
-                shutil.move(file_path, dest_path)
+                move_file(file_path, dest_path)          # (never a half copy of a file open elsewhere)
                 moved_count += 1
                 flattened.append((file_path, dest_path))
                 logger.info(f"Flattened: {file_path} -> {dest_path}")
@@ -1411,8 +1486,7 @@ class AutoOrganizeWatcher(QObject):
         """The Organize New Only baseline for `folder` (see _capture_baseline), or None if the folder isn't
         Organize New Only (or can't be walked). Safe off the UI thread: changes nothing on the watcher."""
         from app.core.settings import settings
-        ORGANIZE_NEW_ONLY = 3
-        if settings.get_auto_organize_action(folder) != ORGANIZE_NEW_ONLY:
+        if not self._only_new_files(folder):
             return None
 
         try:
@@ -1590,10 +1664,9 @@ class AutoOrganizeWatcher(QObject):
         For other folders, returns ``candidate_paths`` unchanged.
         """
         from app.core.settings import settings
-        ORGANIZE_NEW_ONLY = 3
         folder_n = os.path.normpath(folder)
         skip_known = self._skip_known(folder_n)
-        if settings.get_auto_organize_action(folder_n) != ORGANIZE_NEW_ONLY and not skip_known:
+        if not self._only_new_files(folder_n) and not skip_known:
             return list(candidate_paths)
 
         baseline = self._baseline_hashes.get(folder_n, set())
@@ -1709,10 +1782,10 @@ class AutoOrganizeWatcher(QObject):
             folder = os.path.normpath(folder)
             if not os.path.isdir(folder):
                 continue
-            if settings.get_auto_organize_action(folder) == ORGANIZE_NEW_ONLY:
+            if self._only_new_files(folder):
                 logger.info(
                     f"[OrganizeNewOnly] Skipping existing-files pass for {folder} "
-                    "(action=3, pre-existing files stay in place)"
+                    "(only new files: pre-existing files stay in place)"
                 )
                 continue
 
@@ -2042,11 +2115,39 @@ class AutoOrganizeWatcher(QObject):
                 keys.update(_path_key(p) for p in item[3])
         return keys
 
+    @staticmethod
+    def _only_new_files(folder: str) -> bool:
+        """The files already in `folder` stay where they are: "only new files" (action 3), or "only the folders
+        already there" (2) set up by voice (its `only_new` flag). Never Re-organize All (1). (Mac fix 6.)"""
+        from app.core.settings import settings
+        try:
+            entry = settings._auto_organize_entry(folder)          # (compared the way Windows does: no case)
+            action = entry.get('action', 3) if entry else settings.get_auto_organize_action(folder)
+            return action == 3 or (action == 2 and bool(entry and entry.get('only_new')))
+        except Exception:
+            return False
+
+    def _ready(self, path: str) -> bool:
+        """Not being written any more (Mac fix 2, Windows way): changed or created in the last STILL_WRITING_SECS,
+        or a different size / time than the last check, = still being written: it waits for a later check. (On
+        Windows st_ctime is the CREATION time, so a write is seen by st_mtime + the size between checks; a program
+        that sets the date back is still caught by the size growing, and a fresh file by its creation time.)"""
+        try:
+            st = os.stat(path)
+        except OSError:
+            return False
+        now = time.time()
+        key = _path_key(path)
+        seen, self._sizes[key] = self._sizes.get(key), (st.st_size, st.st_mtime)
+        if now - st.st_mtime < STILL_WRITING_SECS or now - st.st_ctime < STILL_WRITING_SECS:
+            return False
+        return seen is not None and seen == (st.st_size, st.st_mtime)
+
     def _needs_hash(self, folder: str) -> bool:
         """New files here are told apart from known ones by their content (Organize New Only, skip_known)."""
         from app.core.settings import settings
         try:
-            return settings.get_auto_organize_action(folder) == 3 or self._skip_known(folder)
+            return self._only_new_files(folder) or self._skip_known(folder)
         except Exception:
             return False
 
@@ -2146,12 +2247,31 @@ class AutoOrganizeWatcher(QObject):
                     if item_path.lower() in self._left_in_place_paths or item_path in self._processed_files \
                             or item_path in self._organized_files or _path_key(item_path) in busy:
                         continue
+                    retry = self._retries.get(_path_key(item_path))
+                    if retry and current_time < retry[1]:
+                        continue                         # (its plan / move failed: waits for its next try)
                     # Track pending files for debounce
                     if item_path not in self._pending_files:
                         self._pending_files[item_path] = current_time
+                        self._ready(item_path)               # (its size now: the next check compares)
                         logger.debug(f"New file detected: {item_path}")
                     elif current_time - self._pending_files[item_path] >= self._debounce_seconds:
-                        ready.append(item_path)      # (stable long enough)
+                        if self._ready(item_path):
+                            ready.append(item_path)      # (stable long enough, and not being written)
+                    else:
+                        self._ready(item_path)           # (remember its size: the next check compares)
+                # Open in another program (Word, a recorder, a download still running): it stays pending -- checked
+                # again every few seconds for free -- and is planned only once it can actually be moved.
+                still_open = [x for x in ready if not _can_move(x)]
+                if still_open:
+                    for x in still_open:
+                        if _path_key(x) not in self._waiting_busy:
+                            self._waiting_busy.add(_path_key(x))
+                            logger.info(f"[AutoOrganize] {os.path.basename(x)} is open in another program: "
+                                        f"waiting until it's closed")
+                    ready = [x for x in ready if x not in still_open]
+                for x in ready:
+                    self._waiting_busy.discard(_path_key(x))
                 if not ready:
                     continue
                 for item_path in ready:
@@ -2266,6 +2386,13 @@ class AutoOrganizeWatcher(QObject):
         """Start a background worker to process files."""
         logger.info(f"Starting background worker for {len(file_paths)} files")
         self._current_batch = list(file_paths)
+        old = self._current_worker
+        if old is not None and old.isRunning():
+            # Its result arrived a moment before its thread ended. Replacing the last reference to a running QThread
+            # crashes ("QThread: Destroyed while thread is still running"): keep it until it has ended (Mac fix 8).
+            old.setParent(self)
+            self._old_workers.append(old)
+        self._old_workers = [w for w in self._old_workers if w.isRunning()]
 
         self._current_worker = AutoWatcherWorker(
             file_paths, folder, instruction, self.folder_instructions, existing_folders
@@ -2277,6 +2404,8 @@ class AutoOrganizeWatcher(QObject):
         self._current_worker.status_changed.connect(self._on_worker_status)
         self._current_worker.error_occurred.connect(self._on_worker_error)
         self._current_worker.limit_reached.connect(self._on_worker_limit_reached)
+        self._current_worker.not_done.connect(self._on_worker_not_done)
+        self._current_worker.busy.connect(self._on_worker_busy)
         self._current_worker.finished_processing.connect(self._on_worker_finished_with_files)
         
         self._current_worker.start()
@@ -2289,6 +2418,8 @@ class AutoOrganizeWatcher(QObject):
     def _on_worker_file_organized(self, source: str, dest: str, category: str):
         """Handle file organized from worker."""
         self._indexed_here.discard(_path_key(source))   # (put back there by a revert, it's a known file)
+        self._retries.pop(_path_key(source), None)
+        self._waiting_busy.discard(_path_key(source))
         self._processed_files.add(source)
         self._processed_files.add(dest)
         # Track the destination as an organized file (prevents re-processing)
@@ -2303,12 +2434,49 @@ class AutoOrganizeWatcher(QObject):
         """Handle error from worker."""
         self.error_occurred.emit(file_path, error)
 
+    def _on_worker_not_done(self, paths: list, why: str):
+        """Files the batch couldn't plan or move: tried again after 1, 5 and 30 min, then left until the next start."""
+        now = time.time()
+        later, given_up = [], []
+        for p in paths:
+            k = _path_key(p)
+            tries = self._retries.get(k, (0, 0.0))[0] + 1
+            if tries <= len(RETRY_AFTER):
+                self._retries[k] = (tries, now + RETRY_AFTER[tries - 1])
+                later.append(p)
+            else:
+                self._retries.pop(k, None)
+                self._organized_files.add(os.path.normpath(p))        # (left where it is until the next start)
+                given_up.append(p)
+        if later:
+            wait = RETRY_AFTER[self._retries[_path_key(later[0])][0] - 1]
+            when = f"{wait // 60} min" if wait >= 60 else f"{wait} s"
+            logger.warning(f"[AutoOrganize] {len(later)} file(s) not sorted ({why}): trying again in {when}: "
+                           f"{[os.path.basename(p) for p in later[:10]]}")
+            self.status_changed.emit(f"Couldn't sort {len(later)} file(s) just now ({why}). Trying again in {when}.")
+        if given_up:
+            logger.warning(f"[AutoOrganize] {len(given_up)} file(s) still not sorted after {len(RETRY_AFTER)} tries: "
+                           f"left where they are until Filect starts again: "
+                           f"{[os.path.basename(p) for p in given_up[:10]]}")
+            self.status_changed.emit(f"{len(given_up)} file(s) couldn't be sorted. Left where they are.")
+
+    def _on_worker_busy(self, paths: list):
+        """Open in another program: left untouched; sorted once the program lets go (no AI call meanwhile)."""
+        for p in paths:
+            self._waiting_busy.add(_path_key(p))
+        names = ", ".join(os.path.basename(p) for p in paths[:3]) + ("..." if len(paths) > 3 else "")
+        self.status_changed.emit(f"{names} {'is' if len(paths) == 1 else 'are'} open in another program. "
+                                 f"Sorted once closed.")
+
     def _on_worker_limit_reached(self, info: dict):
         """Forward the index-limit signal so the UI can show the upgrade popup."""
         self.limit_reached.emit(info or {})
 
     def _on_worker_finished_with_files(self, processed_files: list):
         """Handle worker finished with list of processed files."""
+        w = self.sender()
+        if w is not None:
+            w._reported_done = True               # (its thread may still be ending: the next job may start now)
         # Add all processed files to _organized_files to prevent re-processing
         for file_path in processed_files:
             self._organized_files.add(os.path.normpath(file_path))
@@ -2391,8 +2559,10 @@ class AutoOrganizeWatcher(QObject):
 
     def _continue_queue(self, folder, instruction, existing_folders, file_paths) -> None:
         """A dequeued request's files are ready: start its batch, or move on to the next one."""
-        if file_paths and self._current_worker is not None and self._current_worker.isRunning():
-            # (another batch started while this one was being looked through: it waits its turn)
+        if (file_paths and self._current_worker is not None and self._current_worker.isRunning()
+                and not getattr(self._current_worker, "_reported_done", False)):
+            # (another batch started while this one was being looked through: it waits its turn. One that already
+            # reported its result is only ending: waiting for it here stalled the queue for good — Mac fix 8)
             self._worker_queue.insert(0, (folder, instruction, existing_folders, list(file_paths)))
             return
 
@@ -2516,8 +2686,8 @@ class AutoOrganizeWatcher(QObject):
                         self._processed_files.add(source_path)
                         continue
                     
-                    # Move the file
-                    shutil.move(source_path, dest_path)
+                    # Move the file (never a half copy of a file open elsewhere)
+                    move_file(source_path, dest_path)
                     moved_count += 1
                     
                     # Track as processed

@@ -50,7 +50,15 @@ def _get_auth_token() -> Optional[str]:
         return None
 
 
-def _call_openai_proxy(endpoint: str, messages: List[Dict], max_tokens: int = 500, temperature: float = 0.2, model: str = None) -> Optional[Dict[str, Any]]:
+# The one model every Filect AI call runs on (2026-11-11: gpt-5-nano and gpt-5-mini are shut off Dec 11, 2026).
+# The server decides — openai-proxy v18 runs EVERY chat/vision call on its own CHAT_MODEL whatever the app asks for, so
+# older versions keep working — and this names it here so a request (and the label saved with a file) says what runs.
+# The next retirement: change it here AND in openai-proxy (+ clean-transcript / distill-query).
+FILECT_MODEL = "gpt-6-luna"
+
+
+def _call_openai_proxy(endpoint: str, messages: List[Dict], max_tokens: int = 500, temperature: float = 0.2, model: str = None,
+                       reasoning_effort: str = None) -> Optional[Dict[str, Any]]:
     """Call OpenAI via the Supabase Edge Function proxy.
 
     Args:
@@ -58,10 +66,12 @@ def _call_openai_proxy(endpoint: str, messages: List[Dict], max_tokens: int = 50
         messages: OpenAI-format messages array.
         max_tokens: Response token cap.
         temperature: Sampling temperature.
-        model: Optional model override. Only sent to the proxy when provided;
-            the proxy allow-lists it (gpt-5-nano / gpt-5-mini) and defaults to
-            nano when absent. Tagging/vision/resolve/rerank send none (-> nano);
-            the organize planner sends gpt-5-mini.
+        model: Optional model name, sent only when given. The proxy runs every call on gpt-6-luna
+            (FILECT_MODEL) whatever is sent; tagging/vision/resolve/rerank send none, the planner, video
+            summary and custom words send FILECT_MODEL.
+        reasoning_effort: Optional thinking level ('none' | 'low' | 'medium'). Only sent when given; the
+            proxy allow-lists it and defaults to 'none' (gpt-6-luna rejects the old 'minimal' — the proxy
+            treats it as 'none'). The big-folder planner sends 'low'.
 
     Returns:
         OpenAI response JSON (choices/message/content shape) or None on failure.
@@ -82,13 +92,15 @@ def _call_openai_proxy(endpoint: str, messages: List[Dict], max_tokens: int = 50
             "max_tokens": max_tokens,
             "temperature": temperature,
         }
-        # Only forward a model when explicitly requested; the proxy defaults to
-        # nano otherwise. Keeps every existing (model-less) caller on nano.
+        # Only forward a model when explicitly requested (the proxy runs gpt-6-luna either way).
         if model:
             payload["model"] = model
+        if reasoning_effort:
+            payload["reasoning_effort"] = reasoning_effort
 
-        logger.info(f"Calling OpenAI proxy: endpoint={endpoint}" + (f", model={model}" if model else ""))
-        response = requests.post(OPENAI_PROXY_URL, json=payload, headers=headers, timeout=120)
+        logger.info(f"Calling OpenAI proxy: endpoint={endpoint}" + (f", model={model}" if model else "")
+                    + (f", reasoning={reasoning_effort}" if reasoning_effort else ""))
+        response = requests.post(OPENAI_PROXY_URL, json=payload, headers=headers, timeout=180 if reasoning_effort else 120)
 
         if response.status_code == 401:
             logger.error("OpenAI proxy: 401 (auth invalid — session may have expired; please sign in again)")
@@ -127,7 +139,7 @@ def get_text_model() -> str:
 
 def get_openai_vision_model() -> str:
     """Get the current OpenAI vision model from settings."""
-    return settings.openai_vision_model or os.environ.get("OPENAI_VISION_MODEL", "gpt-4o-mini")
+    return FILECT_MODEL         # (the proxy decides; an old saved 'gpt-4o-mini' no longer means anything)
 
 
 # Legacy constants for backward compatibility (use getters in new code)
@@ -221,15 +233,17 @@ def render_pdf_page(file_path: Path, index: int = 0, max_side: int = 1024) -> Op
     to install); poppler (pdf2image) only as a fallback, since Windows doesn't have it."""
     try:
         import pypdfium2 as pdfium
-        doc = pdfium.PdfDocument(str(file_path))
-        try:
-            page = doc[index]
-            w, h = page.get_size()                        # PDF points (1/72 in)
-            scale = max(0.2, min(4.0, max_side / max(w, h, 1)))
-            img = page.render(scale=scale).to_pil().convert("RGB")
-            page.close()
-        finally:
-            doc.close()
+        from .text_extract import PDFIUM_LOCK           # (PDFium isn't thread-safe: one lock for the whole app)
+        with PDFIUM_LOCK:
+            doc = pdfium.PdfDocument(str(file_path))
+            try:
+                page = doc[index]
+                w, h = page.get_size()                        # PDF points (1/72 in)
+                scale = max(0.2, min(4.0, max_side / max(w, h, 1)))
+                img = page.render(scale=scale).to_pil().convert("RGB")
+                page.close()
+            finally:
+                doc.close()
         img.thumbnail((max_side, max_side))
         return img
     except Exception as e:

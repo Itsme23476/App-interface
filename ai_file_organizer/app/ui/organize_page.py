@@ -2518,6 +2518,7 @@ class HistoryDialog(QDialog):
             formatted_date = timestamp_str[:19] if timestamp_str else "Unknown date"
 
         is_reverted = bool(item.get("reverted", False))
+        is_partly = bool(item.get("partly_reverted", False)) and not is_reverted
 
         # Date row carries an optional "Reverted" badge inline so the user
         # can spot already-undone operations at a glance.
@@ -2547,12 +2548,24 @@ class HistoryDialog(QDialog):
                 padding: 2px 6px;
             """)
             date_row.addWidget(reverted_badge)
+        elif is_partly:                       # (some files went back; Revert stays for the rest)
+            partly_badge = QLabel("Partly reverted")
+            partly_badge.setStyleSheet("""
+                font-family: "Segoe UI", sans-serif;
+                font-size: 10px;
+                font-weight: 600;
+                color: white;
+                background: #E0902F;
+                border-radius: 4px;
+                padding: 2px 6px;
+            """)
+            date_row.addWidget(partly_badge)
 
         date_row.addStretch()
         info_layout.addLayout(date_row)
 
         files_count = item.get("successful_moves", item.get("total_files", 0))
-        reverted_suffix = " (reverted)" if is_reverted else ""
+        reverted_suffix = " (reverted)" if is_reverted else " (partly reverted)" if is_partly else ""
         what = (f"auto-organized in {os.path.basename(str(item.get('folder', '')).rstrip(chr(92) + '/'))}"
                 if item.get("source") == "auto" else "organized")
         details_label = QLabel(f"{files_count} file(s) {what}{reverted_suffix}")
@@ -4812,7 +4825,8 @@ class WatchConfigDialog(QDialog):
                 # Get existing action if any
                 existing_action = settings.get_auto_organize_action(path)
                 _old = settings._auto_organize_entry(path) or {}
-                new_folders.append({k: _old[k] for k in ('paused', 'skip_known', 'watching_since') if k in _old})
+                new_folders.append({k: _old[k] for k in ('paused', 'skip_known', 'watching_since', 'only_new')
+                                    if k in _old})
                 new_folders[-1].update({
                     'path': path,
                     'instruction': instruction,
@@ -5093,10 +5107,12 @@ class _VoiceIndexWorker(QThread):
             from app.core.database import file_index
             root = Path(self.folder)
 
-            # 1) Collect ALL UNINDEXED media (recursive). Stable order.
+            # 1) Collect ALL UNINDEXED files (recursive). Stable order. Every kind, not just media: a folder of new
+            # documents came back "That folder has nothing I can organize" from the organize hotkey (found live
+            # 2026-11-11; the Mac indexes the whole folder first). Only media counts against the quota.
             todo = []
             for p in sorted(root.rglob('*'), key=lambda x: str(x).lower()):
-                if not p.is_file() or not is_media_file(p):
+                if not p.is_file() or p.name.lower() in ("desktop.ini", "thumbs.db", ".ds_store"):
                     continue
                 try:
                     rel_parts = p.relative_to(root).parts
@@ -5111,15 +5127,17 @@ class _VoiceIndexWorker(QThread):
             # 2) Enforce the subscription index quota (same ceiling the manual
             # tab applies via _check_index_limit). If over, index only what's
             # left in the plan and tell the user the rest was blocked.
-            if todo:
+            media = [p for p in todo if is_media_file(p)]
+            if media:
                 try:
-                    limit = search_service._check_index_limit(len(todo))
+                    limit = search_service._check_index_limit(len(media))
                 except Exception:
                     limit = {"allowed": True}
                 if not limit.get("allowed", True):
                     allowed_n = max(0, int(limit.get("remaining", 0) or 0))
-                    remaining += len(todo) - allowed_n
-                    todo = todo[:allowed_n]
+                    remaining += len(media) - allowed_n
+                    blocked = set(media[allowed_n:])
+                    todo = [p for p in todo if p not in blocked]     # (documents never count against it)
                     logger.warning(f"[VOICE ORGANIZE] index quota hit: "
                                    f"plan={limit.get('plan')} remaining={allowed_n} "
                                    f"blocked={remaining}")
@@ -5215,6 +5233,7 @@ class OrganizePage(QWidget):
     # results instead of showing dialogs, so the floating overlay can drive it.
     voice_plan_ready = Signal(dict)    # {summary, folders, target_folder, file_count, folder_count}
     voice_plan_error = Signal(str)
+    voice_plan_replaced = Signal()     # a newer plan took over from one still being worked out (its result: dropped)
     voice_apply_done = Signal(str)     # revert hint
     voice_apply_error = Signal(str)
     voice_status = Signal(str)
@@ -5222,6 +5241,9 @@ class OrganizePage(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.current_plan = None
+        self._voice_worker = None          # the plan / refine being worked out now (newest wins)
+        self._voice_index_worker = None
+        self._voice_old_workers = []       # replaced ones still running: kept until they end
         self.current_moves = []
         self.files_by_id = {}
         self.destination_path = None
@@ -6642,7 +6664,10 @@ class OrganizePage(QWidget):
         else:
             settings.add_auto_organize_folder(path, instruction or "")
         settings.update_auto_organize_action(path, action)
-        settings.set_auto_organize_flags(path, paused=False, skip_known=False, watching_since=time.time())
+        # (only_new: "only the folders already there" set up by voice leaves what's already there in place, like
+        # "only new files" — before, a file left at the top was picked up again at every start. Mac fix 6.)
+        settings.set_auto_organize_flags(path, paused=False, skip_known=False, watching_since=time.time(),
+                                         only_new=(action == 2))
         was_stopped = settings.auto_organize_paused
         settings.set_auto_organize_paused(False)    # (the Organize tab's Start / Stop state: on)
         self._was_manually_stopped = False
@@ -7548,14 +7573,18 @@ class OrganizePage(QWidget):
             if not _after_index:
                 # Index unindexed media BEFORE planning, then retry.
                 self.voice_status.emit("Indexing new files…")
-                self._voice_index_worker = _VoiceIndexWorker(folder)
-                self._voice_index_worker.progress.connect(
-                    lambda d, t: self.voice_status.emit(
+                self._voice_drop_running()          # (a newer request: what was still running for the old one is dropped)
+                w = _VoiceIndexWorker(folder)
+                self._voice_index_worker = w
+                w.progress.connect(
+                    lambda d, t, w=w: w is self._voice_index_worker and self.voice_status.emit(
                         "Analyzing your files…" if d == 0 else f"Analyzing files… {d}/{t}"))
-                self._voice_index_worker.quota_exceeded.connect(self._voice_on_quota)
-                self._voice_index_worker.done.connect(
-                    lambda n, rem: self._voice_after_index(folder, instruction, n, rem))
-                self._voice_index_worker.start()
+                w.quota_exceeded.connect(self._voice_on_quota)
+                w.done.connect(
+                    lambda n, rem, w=w: self._voice_after_index(folder, instruction, n, rem)
+                    if w is self._voice_index_worker else
+                    logger.info("[VOICE ORGANIZE] a replaced request's indexing ended: ignored"))
+                w.start()
                 return
 
             files, err = self._voice_prepare_files(max_files)
@@ -7585,12 +7614,66 @@ class OrganizePage(QWidget):
                         f"(auto_organize={self._voice_auto})")
             self.voice_status.emit(f"Planning {len(files)} files…")
             self._voice_plan_worker = PlanWorker(plan_instruction, files)
-            self._voice_plan_worker.finished.connect(self._voice_on_plan)
-            self._voice_plan_worker.error.connect(self.voice_plan_error)
-            self._voice_plan_worker.start()
+            self._voice_start_worker(self._voice_plan_worker)
         except Exception as e:
             logger.error(f"[VOICE ORGANIZE] voice_generate failed: {e}")
             self.voice_plan_error.emit(str(e))
+
+    # ---- a new plan while one is still being built (Mac fix 1) ------------------------------------------------
+    # Asking again (the organize hotkey, a change, the voice assistant) while a plan / refine / indexing is still
+    # running REPLACED its worker: destroying a running QThread aborts the app ("QThread: Destroyed while thread is
+    # still running"), and the old result could land on top of the new request. Now the newest wins: a replaced one
+    # carries on in the background, kept alive until it ends, and its result is ignored.
+    def _keep_running(self, worker) -> bool:
+        """Destroying a running thread aborts the app, so one that's being replaced is kept until it ends."""
+        try:
+            if worker is None or not worker.isRunning():
+                return False
+        except RuntimeError:                  # (its Qt side is already gone)
+            return False
+        worker.setParent(self)
+        alive = []
+        for w in self._voice_old_workers:
+            try:
+                if w.isRunning():
+                    alive.append(w)
+            except RuntimeError:
+                pass
+        self._voice_old_workers = alive + [worker]
+        return True
+
+    def _voice_start_worker(self, worker, error_text: str = ""):
+        """Newest plan wins: one still being worked out carries on in the background and its result is ignored.
+        Results go to BOUND methods (a lambda has no receiver: Qt would run it on the worker thread)."""
+        if self._keep_running(self._voice_worker):
+            logger.info("[VOICE ORGANIZE] a newer request replaced a plan still being worked out: its result is dropped")
+            self.voice_plan_replaced.emit()
+        self._voice_worker = worker
+        self._voice_error_text = error_text
+        worker.finished.connect(self._voice_on_plan)
+        worker.error.connect(self._voice_on_error)
+        worker.start()
+
+    def _voice_drop_running(self, keep_plan: bool = False):
+        """A newer request: indexing (and, unless keep_plan, a plan) still running for an older one is dropped — kept
+        alive until it ends, its result ignored."""
+        self._keep_running(self._voice_index_worker)
+        self._voice_index_worker = None
+        if not keep_plan and self._keep_running(self._voice_worker):
+            logger.info("[VOICE ORGANIZE] a newer request replaced a plan still being worked out: its result is dropped")
+            self.voice_plan_replaced.emit()
+            self._voice_worker = None
+
+    def _voice_stale(self) -> bool:
+        """This result is from a plan / refine a newer one replaced (or one already dropped)."""
+        s = self.sender()
+        return s is not None and s is not self._voice_worker
+
+    def _voice_on_error(self, error):
+        if self._voice_stale():
+            logger.info(f"[VOICE ORGANIZE] a replaced plan failed: ignored ({error})")
+            return
+        self.voice_plan_error.emit(self._voice_error_text or error)
 
     def _voice_on_quota(self, limit: dict):
         """The subscription index quota blocked some files (parity with the
@@ -7632,9 +7715,8 @@ class OrganizePage(QWidget):
             self.voice_status.emit("Refining the plan…")
             self._voice_refine_worker = RefineWorker(
                 self.original_instruction, self.current_plan, feedback, files)
-            self._voice_refine_worker.finished.connect(self._voice_on_plan)
-            self._voice_refine_worker.error.connect(self.voice_plan_error)
-            self._voice_refine_worker.start()
+            self._voice_drop_running(keep_plan=True)
+            self._voice_start_worker(self._voice_refine_worker)
         except Exception as e:
             logger.error(f"[VOICE ORGANIZE] voice_refine failed: {e}")
             self.voice_plan_error.emit(str(e))
@@ -7678,6 +7760,9 @@ class OrganizePage(QWidget):
 
     def _voice_on_plan(self, plan):
         """Validate a plan (no dialogs) and emit voice_plan_ready."""
+        if self._voice_stale():               # (a newer plan replaced this one: files_by_id is already the newer one's)
+            logger.info("[VOICE ORGANIZE] a replaced plan arrived: ignored")
+            return
         try:
             if not plan or not plan.get("folders"):
                 # Lapsed subscription -> honest resubscribe message; entitled user
@@ -8878,15 +8963,18 @@ Caption: {file_info.get('caption', 'none')}
                 source_path = Path(move["source"])
                 
                 source_path.parent.mkdir(parents=True, exist_ok=True)
-                
-                shutil.move(str(dest_path), str(source_path))
-                
+
+                from app.core.apply import move_file
+                move_file(dest_path, source_path)       # (a file open elsewhere stays: never a half copy back)
+
                 file_index.update_file_path(move["file_id"], str(source_path))
-                
+
                 success_count += 1
                 logger.info(f"Undo: {dest_path} -> {source_path}")
             except Exception as e:
-                errors.append(f"{dest_path.name}: {e}")
+                from app.core.apply import is_busy
+                errors.append(f"{dest_path.name} is open in another program, so it stayed. Close it and undo again."
+                              if is_busy(e) else f"{dest_path.name}: {e}")
                 logger.error(f"Undo failed for {move['destination']}: {e}")
         
         self.progress_bar.setVisible(False)

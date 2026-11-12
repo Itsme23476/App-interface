@@ -1036,7 +1036,9 @@ class LivePage(QScrollArea):
         self._count_timer.timeout.connect(self._count_text)
         self._age_timer = QTimer(self)                    # "now" → "2 min" on the rows
         self._age_timer.setInterval(30000)
-        self._age_timer.timeout.connect(lambda: [r.restyle() for r in self._rows.values()])
+        # Only the age changes with time (everything else is restyled when it changes): a full restyle of 100 rows
+        # froze the window ~0.8 s every 30 s (measured, 2026-11-10).
+        self._age_timer.timeout.connect(lambda: [r.when.setText(_ago(r.t0)) for r in self._rows.values()])
         self._age_timer.start()
         self._set_settings_collapsed(bool(getattr(settings, "live_settings_collapsed", False)), save=False)
         self.apply_theme()
@@ -1842,15 +1844,20 @@ class LivePage(QScrollArea):
             self._note("✓  Approved" if outcome == "approved" else "✕  Denied", "#FFFFFF")
             _track("live_task", outcome=outcome)
         elif outcome in ("organize", "organize_changed", "undone", "auto_setup", "auto_off", "auto_asked",
-                         "auto_none"):                # organizing by voice: the top panel shows the rest
-            self.listener.learn(tag)
+                         "auto_none", "find", "find_opened", "find_shown", "find_which", "find_all", "find_more",
+                         "find_closed"):            # organizing / finding by voice: the top panel shows the rest
+            if tag is not None:                        # (typed into the panel: no row of its own)
+                self.listener.learn(tag)
             if settings.live_chime:
                 _chime()
             if row is not None:
                 row.set_outcome({"organize": "Organizing your files", "organize_changed": "Updating the plan",
                                  "undone": "Putting your files back", "auto_setup": "Setting up auto-organize",
                                  "auto_off": "Auto-organize turned off", "auto_asked": "Asking which folder",
-                                 "auto_none": "Auto-organize isn't on"}[outcome], ACCENT)
+                                 "auto_none": "Auto-organize isn't on", "find": "Looking for your file",
+                                 "find_opened": "Opening it", "find_shown": "Showing where it is",
+                                 "find_which": "Asking which one", "find_all": "Showing all of them",
+                                 "find_more": "Looking again", "find_closed": "Closed"}[outcome], ACCENT)
             _track("live_task", outcome=outcome)
         elif outcome in ("organize_busy", "organize_page_busy"):
             if row is not None:

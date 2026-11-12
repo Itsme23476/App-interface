@@ -256,7 +256,7 @@ def _tag_transcript(transcript: str) -> dict:
             "chat",
             [{"role": "system", "content": system},
              {"role": "user", "content": transcript[:6000]}],
-            max_tokens=400, model="gpt-5-mini",
+            max_tokens=400, model=V.FILECT_MODEL,
         )
         content = (resp or {}).get("choices", [{}])[0].get("message", {}).get("content", "") if resp else ""
         data = V._parse_json_relaxed(content) if content else None

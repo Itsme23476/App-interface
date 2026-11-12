@@ -5,10 +5,16 @@ Converts files to clean, readable text suitable for AI analysis.
 
 import csv
 import logging
+import threading
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 import io
 import os
+
+# PDFium (pypdfium2) isn't thread-safe: two threads in it at once crash Filect ("access violation", reproduced
+# 2026-11-10 with PDFs read side by side). EVERY use of it, anywhere in the app, holds this one lock. Re-entrant: the
+# organize reader already holds it while it calls extract_file_text.
+PDFIUM_LOCK = threading.RLock()
 
 logger = logging.getLogger(__name__)
 
@@ -263,21 +269,22 @@ def extract_pdf_text(file_path: Path, max_pages: int = 10, max_chars: int = 2000
     A scanned PDF has no text layer -> None; the indexer then looks at it as an image instead."""
     try:
         import pypdfium2 as pdfium
-        doc = pdfium.PdfDocument(str(file_path))
-        try:
-            parts = []
-            for i in range(min(len(doc), max_pages)):
-                page = doc[i]
-                tp = page.get_textpage()
-                t = (tp.get_text_range() or "").replace("\r\n", "\n").strip()
-                tp.close()
-                page.close()
-                if t:
-                    parts.append(t)
-                if sum(len(p) for p in parts) >= max_chars:
-                    break
-        finally:
-            doc.close()
+        with PDFIUM_LOCK:
+            doc = pdfium.PdfDocument(str(file_path))
+            try:
+                parts = []
+                for i in range(min(len(doc), max_pages)):
+                    page = doc[i]
+                    tp = page.get_textpage()
+                    t = (tp.get_text_range() or "").replace("\r\n", "\n").strip()
+                    tp.close()
+                    page.close()
+                    if t:
+                        parts.append(t)
+                    if sum(len(p) for p in parts) >= max_chars:
+                        break
+            finally:
+                doc.close()
     except Exception as e:
         logger.warning(f"pdf text extraction failed for {file_path.name}: {e}")
         return None

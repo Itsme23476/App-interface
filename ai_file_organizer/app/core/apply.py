@@ -23,6 +23,53 @@ def _nc(p) -> str:
     return os.path.normcase(os.path.normpath(str(p)))
 
 
+class FileBusyError(OSError):
+    """The file is open in another program (Word, a recorder, a download still running), so it wasn't moved."""
+
+
+_BUSY = (32, 33)        # WinError 32 sharing violation, 33 lock violation: another program has the file open
+
+
+def is_busy(err) -> bool:
+    return isinstance(err, FileBusyError) or getattr(err, "winerror", None) in _BUSY
+
+
+def move_file(src, dst) -> str:
+    """Move ONE file without ever leaving a copy behind. Returns the destination.
+
+    shutil.move falls back to copy-then-delete whenever a rename fails. On Windows a rename fails when another
+    program has the file open — and then shutil.move wrote a full copy to the destination before the delete of
+    the original failed: two copies, a half-written one for a recording still in progress (measured 2026-11-11).
+    Here: a plain rename (same drive: never copies). Busy → FileBusyError, the file untouched where it was.
+    Another drive → copy, then delete the original; if that delete fails, the copy is removed again.
+    An existing destination is never overwritten (FileExistsError: callers pick a free name first)."""
+    src, dst = str(src), str(dst)
+    if os.path.lexists(dst):
+        raise FileExistsError(17, "the destination already exists", dst)
+    try:
+        os.rename(src, dst)
+        return dst
+    except OSError as e:
+        if getattr(e, "winerror", None) in _BUSY:
+            raise FileBusyError(e.errno, f"{os.path.basename(src)} is open in another program", src) from e
+        if not (getattr(e, "winerror", None) == 17 or e.errno == 18):     # 17 / EXDEV: a different drive
+            raise
+    if os.path.isdir(src):
+        return shutil.move(src, dst)                                     # (a folder to another drive: rare)
+    shutil.copy2(src, dst)
+    try:
+        os.unlink(src)
+    except OSError as e:
+        try:
+            os.unlink(dst)                                               # never two copies
+        except OSError:
+            logger.warning(f"[move] couldn't remove the copy {dst} after the original stayed busy")
+        if getattr(e, "winerror", None) in _BUSY:
+            raise FileBusyError(e.errno, f"{os.path.basename(src)} is open in another program", src) from e
+        raise
+    return dst
+
+
 def _get_unique_path(dest_path: Path) -> Path:
     """
     Generate a unique file path by adding (1), (2), etc. if file exists.
@@ -164,9 +211,9 @@ def apply_moves(move_plan: List[Dict[str, Any]],
                         "folder": str(dest_path.parent)
                     })
                 
-                # Move the file
-                shutil.move(str(source_path), str(dest_path))
-                
+                # Move the file (never a half copy: a file open in another program stays where it is)
+                move_file(source_path, dest_path)
+
                 # Log successful move
                 move_entry = {
                     "from": str(source_path.absolute()),
@@ -179,7 +226,11 @@ def apply_moves(move_plan: List[Dict[str, Any]],
                 logger.debug(f"Moved {source_path.name} to {dest_path}")
 
             except Exception as e:
-                error_msg = f"Error moving {move.get('file_name', 'unknown')}: {e}"
+                if is_busy(e):
+                    error_msg = (f"{move.get('file_name') or Path(move.get('source_path', '')).name} is open in "
+                                 f"another program, so it was left where it is. Close it and organize again.")
+                else:
+                    error_msg = f"Error moving {move.get('file_name', 'unknown')}: {e}"
                 errors.append(error_msg)
                 logger.error(error_msg)
                 continue
@@ -240,20 +291,22 @@ _auto_log_lock = threading.Lock()
 
 def _auto_log_path(folder: str, now: datetime) -> Path:
     """Today's open History entry for this auto-organized folder. Named to sort before that day's manual
-    entries. Once it has been reverted, the next automatic move starts a new one. (Windows: the folder is hashed
-    without case, so C:\\Users\\x\\Downloads and c:\\users\\x\\downloads share one entry.)"""
+    entries. Once it has been reverted, the next automatic move starts a new one, and later moves JOIN that one
+    (Mac: before, every move after an undo started its own row). (Windows: the folder is hashed without case, so
+    C:\\Users\\x\\Downloads and c:\\users\\x\\downloads share one entry.)"""
     digest = hashlib.sha1(_nc(folder).encode("utf-8")).hexdigest()[:8]
     moves_dir = settings.get_moves_dir()
     day = now.strftime("%Y%m%d")
-    path = moves_dir / f"moves-{day}-000000-auto-{digest}.json"
-    if path.exists():
-        try:
-            with open(path, 'r', encoding='utf-8') as f:
-                if json.load(f).get("reverted"):
-                    return moves_dir / f"moves-{day}-{now.strftime('%H%M%S')}-auto-{digest}.json"
-        except (OSError, ValueError):
-            pass
-    return path
+    todays = sorted(moves_dir.glob(f"moves-{day}-*-auto-{digest}.json"))
+    if not todays:
+        return moves_dir / f"moves-{day}-000000-auto-{digest}.json"
+    try:
+        with open(todays[-1], 'r', encoding='utf-8') as f:
+            if not json.load(f).get("reverted"):
+                return todays[-1]
+    except (OSError, ValueError):
+        pass
+    return moves_dir / f"moves-{day}-{now.strftime('%H%M%S')}-auto-{digest}.json"
 
 
 def record_auto_moves(folder: str, moves: List[Tuple[str, str]]) -> None:
@@ -314,6 +367,7 @@ def get_move_history() -> List[Dict[str, Any]]:
                     "total_files": log_data.get("total_files", 0),
                     "successful_moves": len(log_data.get("moves", [])),
                     "reverted": bool(log_data.get("reverted", False)),
+                    "partly_reverted": bool(log_data.get("partly_reverted", False)),
                     "source": log_data.get("source", ""),
                     "folder": log_data.get("folder", "")
                 })
@@ -336,6 +390,8 @@ def split_revertable(moves: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]],
     """Which logged moves can still go back: (those moves, why the others can't)."""
     can, cannot = [], []
     for move in moves:
+        if move.get("back"):                  # (already put back by an earlier, partial revert)
+            continue
         dest_path = Path(move.get("to", ""))
         source_path = Path(move.get("from", ""))
         if not dest_path.exists():
@@ -395,15 +451,42 @@ def tidy_emptied_sources(log_file: str, root: str) -> None:
     iCloud rename it "name 2". (Windows: kept the same way; whether OneDrive does this too isn't verified.)"""
     with open(log_file, 'r', encoding='utf-8') as f:
         log = json.load(f)
-    if log.get("reverted"):
+    if log.get("reverted") or log.get("partly_reverted"):
         return
     top = Path(root)
     _prune_empty({Path(m["from"]).parent for m in log.get("moves", [])}, {top, *top.parents})
 
 
+def mark_moves_back(log_file: str, done: List[Dict[str, Any]]) -> None:
+    """Mark in the log each move that went back. It's "reverted" only when none are left out; until then it's
+    "partly_reverted" and Revert stays available for the rest (Mac fix 4: an undo that could put back only some
+    files marked the whole thing undone, so the rest could never be retried). Never raises."""
+    if not done or not log_file:
+        return
+    try:
+        with open(log_file, 'r', encoding='utf-8') as f:
+            log_data = json.load(f)
+        went_back = {(_nc(m.get("from", "")), _nc(m.get("to", ""))) for m in done}
+        for m in log_data.get("moves", []):
+            if (_nc(m.get("from", "")), _nc(m.get("to", ""))) in went_back:
+                m["back"] = True
+        still_out = any(not m.get("back") for m in log_data.get("moves", []))
+        log_data['reverted'] = not still_out
+        log_data['partly_reverted'] = still_out
+        log_data['reverted_count'] = log_data.get('reverted_count', 0) + len(done)
+        log_data['reverted_at'] = datetime.now().isoformat()
+        with open(log_file, 'w', encoding='utf-8') as f:
+            json.dump(log_data, f, indent=2, ensure_ascii=False)
+        logger.info(f"[REVERT] Marked {len(done)} move(s) back in {log_file}"
+                    + (" (some still out: it stays revertable)" if still_out else ""))
+    except Exception as e:
+        logger.warning(f"[REVERT] Could not mark the log: {e}")
+
+
 def revert_moves(log_file: str, moves: List[Dict[str, Any]]) -> Tuple[int, List[str]]:
-    """Move these logged files back where they were, keep the index right, and mark the log as reverted so
-    History shows it. `moves` should come from split_revertable. Returns (files moved back, errors)."""
+    """Move these logged files back where they were, keep the index right, and mark in the log what went back so
+    History shows it. If some are still out, it stays revertable for those. `moves` should come from
+    split_revertable. Returns (files moved back, errors)."""
     reverted = 0
     errors = []
     done = []
@@ -412,7 +495,7 @@ def revert_moves(log_file: str, moves: List[Dict[str, Any]]) -> Tuple[int, List[
         source_path = Path(move.get("from", ""))
         try:
             source_path.parent.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(dest_path), str(source_path))
+            move_file(dest_path, source_path)        # (a busy file stays; no copy lands at its old place)
             reverted += 1
             done.append(move)
             logger.info(f"[REVERT] Moved back: {dest_path.name} -> {source_path.parent.name}/")
@@ -425,7 +508,8 @@ def revert_moves(log_file: str, moves: List[Dict[str, Any]]) -> Tuple[int, List[
             except Exception as db_err:
                 logger.warning(f"[REVERT] DB path update failed: {db_err}")
         except Exception as e:
-            errors.append(f"{dest_path.name}: {str(e)}")
+            errors.append(f"{dest_path.name} is open in another program, so it stayed. Close it, then put it back "
+                          f"again." if is_busy(e) else f"{dest_path.name}: {str(e)}")
     try:
         _remove_emptied_folders(done)
     except Exception as e:
@@ -436,18 +520,7 @@ def revert_moves(log_file: str, moves: List[Dict[str, Any]]) -> Tuple[int, List[
             settings.mark_auto_organize_skip_known([m["from"] for m in done])
         except Exception as e:
             logger.warning(f"[REVERT] Couldn't mark auto-organize folders: {e}")
-    if reverted > 0 and log_file:
-        try:
-            with open(log_file, 'r', encoding='utf-8') as f:
-                log_data = json.load(f)
-            log_data['reverted'] = True
-            log_data['reverted_count'] = reverted
-            log_data['reverted_at'] = datetime.now().isoformat()
-            with open(log_file, 'w', encoding='utf-8') as f:
-                json.dump(log_data, f, indent=2, ensure_ascii=False)
-            logger.info(f"[REVERT] Marked log as reverted: {log_file}")
-        except Exception as e:
-            logger.warning(f"[REVERT] Could not mark log as reverted: {e}")
+    mark_moves_back(log_file, done)
     return reverted, errors
 
 

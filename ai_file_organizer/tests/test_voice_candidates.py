@@ -105,7 +105,7 @@ def _check(cands):
 
 def test_voice_candidates(monkeypatch):
     fake = _fake_sessions()
-    monkeypatch.setattr(asess, "list_sessions", lambda limit=500, cwd=None: fake[:limit])
+    monkeypatch.setattr(asess, "list_sessions", lambda limit=500, cwd=None, real_only=False: [s for s in fake if not (real_only and asess.is_junk(s))][:limit])
     page = ap.AssistantPage(_MW())
     page._sessions = {}
     page._load_all_sessions()                                 # the real loader (off the UI thread), fake list

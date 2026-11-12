@@ -20,6 +20,7 @@ Windows notes (vs the Mac file):
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -395,6 +396,24 @@ _SETUP = {("claude", "install"): SETUP_INSTALL, ("claude", "signin"): SETUP_SIGN
 def usage_message(agent: str, detail: str = "") -> str:
     """Out of usage on the plan — the agent's own words carry when it resets."""
     return f"{AGENT_NAMES[agent]} is out of usage for now. {(detail or '').strip()}".strip()
+
+
+class WarmStartGone(Exception):
+    """A warm spare's Claude Code ended (crashed / was ended) before it replied to its request. Not the user's
+    problem: AgentWorker runs the same request on a fresh Claude Code (or, with no request yet, just ends)."""
+    def __init__(self, code=None):
+        self.code = code
+        super().__init__(f"the warm Claude Code had ended (exit code {code})")
+
+
+def _cli_exit_code(client) -> Optional[int]:
+    """Claude Code's exit code once its process has ended; None while it runs (or if that can't be told).
+    Reads the SDK's live transport -- its internals, guarded (same as AgentWorker.kill_process)."""
+    try:
+        proc = client._transport._process
+        return None if proc is None else proc.returncode
+    except Exception:
+        return None
 
 
 class AgentSetupError(Exception):
@@ -799,49 +818,79 @@ class AgentRunner:
             async with ClaudeSDKClient(options=opts) as client:
                 self._client = client            # exposed so stop() can interrupt the running turn
                 if wait_for is not None:         # a warm spare: running, waiting for its request
-                    got = await wait_for()
+                    got = await self._await_request(client, wait_for)
                     if got is None:
                         return None              # not needed after all — closes Claude Code
                     prompt, images = got
                     msg = user_message(prompt, images) if images else None
                     logger.info("[agent] warm start — Claude Code was already running")
-                if msg is not None:
-                    logger.info("[agent] sending %d screenshot(s)",
-                                sum(b["type"] == "image" for b in msg["message"]["content"]))
+                heard = False                    # (any reply yet: a warm start gone before one is re-run fresh)
+                try:
+                    if msg is not None:
+                        logger.info("[agent] sending %d screenshot(s)",
+                                    sum(b["type"] == "image" for b in msg["message"]["content"]))
 
-                    async def _one():
-                        yield msg
-                    await client.query(_one())
-                else:
-                    await client.query(prompt)
-                async for msg in client.receive_response():
-                    if StreamEvent is not None and isinstance(msg, StreamEvent):
-                        self._on_stream_event(msg)
-                        continue
-                    if getattr(msg, "subtype", None) == "init" and isinstance(getattr(msg, "data", None), dict):
-                        mcp = msg.data.get("mcp_servers") or []
-                        if mcp:                          # which of your tools this task got (diagnostics)
-                            logger.info("[agent] MCP: %s", ", ".join(f"{m.get('name')} ({m.get('status')})" for m in mcp))
-                    err = getattr(msg, "error", None) if isinstance(msg, AssistantMessage) else None
-                    if err == "authentication_failed":
-                        # Signed out: Claude Code answers "Not logged in · Please run /login" as if it were
-                        # the reply — that showed as a DONE card. It's a setup step, not an answer.
-                        raise AgentSetupError("signin")
-                    if err in ("rate_limit", "billing_error"):
-                        # Out of usage ("You've hit your limit · resets 3pm") — also not an answer.
-                        from claude_agent_sdk import TextBlock
-                        said = " ".join(b.text for b in msg.content if isinstance(b, TextBlock))
-                        raise AgentSetupError("usage", detail=said)
-                    for st in _steps_from_message(msg):
-                        self.on_step(st)
-                    if isinstance(msg, ResultMessage):
-                        self.session_id = getattr(msg, "session_id", None)
-                        self.on_result(self.session_id, getattr(msg, "total_cost_usd", 0.0) or 0.0)
+                        async def _one():
+                            yield msg
+                        await client.query(_one())
+                    else:
+                        await client.query(prompt)
+                    async for msg in client.receive_response():
+                        heard = True
+                        if StreamEvent is not None and isinstance(msg, StreamEvent):
+                            self._on_stream_event(msg)
+                            continue
+                        if getattr(msg, "subtype", None) == "init" and isinstance(getattr(msg, "data", None), dict):
+                            mcp = msg.data.get("mcp_servers") or []
+                            if mcp:                          # which of your tools this task got (diagnostics)
+                                logger.info("[agent] MCP: %s", ", ".join(f"{m.get('name')} ({m.get('status')})" for m in mcp))
+                        err = getattr(msg, "error", None) if isinstance(msg, AssistantMessage) else None
+                        if err == "authentication_failed":
+                            # Signed out: Claude Code answers "Not logged in · Please run /login" as if it were
+                            # the reply — that showed as a DONE card. It's a setup step, not an answer.
+                            raise AgentSetupError("signin")
+                        if err in ("rate_limit", "billing_error"):
+                            # Out of usage ("You've hit your limit · resets 3pm") — also not an answer.
+                            from claude_agent_sdk import TextBlock
+                            said = " ".join(b.text for b in msg.content if isinstance(b, TextBlock))
+                            raise AgentSetupError("usage", detail=said)
+                        for st in _steps_from_message(msg):
+                            self.on_step(st)
+                        if isinstance(msg, ResultMessage):
+                            self.session_id = getattr(msg, "session_id", None)
+                            self.on_result(self.session_id, getattr(msg, "total_cost_usd", 0.0) or 0.0)
+                except Exception as e:
+                    # A warm spare's Claude Code that had ended before ANY reply to this request (it died in the
+                    # moment between being picked and being written to): WarmStartGone -> the worker runs the same
+                    # request on a fresh Claude Code. Anything else (or once it has replied) is a real error.
+                    code = _cli_exit_code(client) if wait_for is not None and not heard else None
+                    if code is not None and not isinstance(e, AgentSetupError):
+                        raise WarmStartGone(code) from e
+                    raise
         except CLINotFoundError as e:            # no `claude` anywhere (the installed app doesn't bundle it)
             raise AgentSetupError("install") from e
         finally:
             self._client = None
         return self.session_id
+
+    @staticmethod
+    async def _await_request(client, wait_for, every: float = 0.5):
+        """A warm spare waits for its request -- and keeps an eye on its Claude Code meanwhile. One that ends while
+        it waits (a crash; Windows ending it) is noticed within `every` s (WarmStartGone: the spare ends quietly and
+        the next request starts fresh) -- before, nothing noticed until the request was written to it and the chat
+        said "Cannot write to terminated process (exit code: 15)" (live test 2026-11-11)."""
+        want = asyncio.ensure_future(wait_for())
+        try:
+            while not want.done():
+                await asyncio.wait({want}, timeout=every)
+                if not want.done():
+                    code = _cli_exit_code(client)
+                    if code is not None:
+                        raise WarmStartGone(code)
+            return want.result()
+        finally:
+            if not want.done():
+                want.cancel()
 
     async def interrupt(self) -> None:
         """Stop the running turn now (the SDK-sanctioned stop). Ends receive_response() so the task
