@@ -4343,6 +4343,7 @@ class WatchConfigDialog(QDialog):
         
         # Track folder data: {path: instruction}
         self.folder_data: Dict[str, str] = {}
+        self._chosen_now: set = set()     # (folders whose mode was picked in THIS dialog: only they get applied)
         # Track folder widgets for updates
         self.folder_widgets: Dict[str, Dict] = {}
         
@@ -4800,6 +4801,7 @@ class WatchConfigDialog(QDialog):
         if dialog.result_choice:
             # Save the selected action (but don't apply yet - wait for Save button)
             settings.update_auto_organize_action(folder_path, dialog.result_choice)
+            self._chosen_now.add(os.path.normcase(os.path.normpath(folder_path)))
             
             # Update status display to show what will be applied
             self._update_folder_status_display(folder_path, dialog.result_choice)
@@ -4832,8 +4834,12 @@ class WatchConfigDialog(QDialog):
                     'instruction': instruction,
                     'action': existing_action  # Preserve the action setting
                 })
-                # Track folders that need action applied
-                if existing_action in [1, 2]:  # 1=Re-organize, 2=As-Is
+                # Apply only a mode picked in THIS dialog, and never to a paused folder. (Mac live test 2026-11-12:
+                # every saved mode was re-applied on each Save, so adding another folder re-sorted a paused
+                # "Re-organize everything" folder from scratch - flattened and sorted again.)
+                if (existing_action in [1, 2]  # 1=Re-organize, 2=As-Is
+                        and os.path.normcase(os.path.normpath(path)) in self._chosen_now
+                        and not _old.get('paused')):
                     folders_to_apply.append((path, existing_action))
             
             # Save settings first
@@ -5302,7 +5308,12 @@ class OrganizePage(QWidget):
         # Header
         header = QLabel("Filect")
         header.setObjectName("heroHeading")
-        layout.addWidget(header)
+        from app.ui.page_tours import tour_button
+        _hrow = QHBoxLayout()                          # ("See what it can do" at the right end of the header)
+        _hrow.addWidget(header)
+        _hrow.addStretch()
+        _hrow.addWidget(tour_button("organize"), 0, Qt.AlignVCenter)
+        layout.addLayout(_hrow)
         
         self.subtitle = QLabel(
             "Describe how you want your files organized in plain English. "
@@ -7241,8 +7252,12 @@ class OrganizePage(QWidget):
                 for row in cursor.fetchall():
                     indexed_paths.add(os.path.normpath(row[0]).lower())
             
-            # Scan destination folder for files
-            for root, dirs, filenames in os.walk(str(self.destination_path)):
+            # Scan destination folder for files. Never inside an app, a library or a code project, and no hidden
+            # files: they're never organized, so counting them asked "index these new files?" forever. (Mac 2026-11-12)
+            from app.core.organize_reader import protected, _dir_is_off_limits
+            top, cache = str(self.destination_path), {}
+            for root, dirs, filenames in os.walk(top):
+                dirs[:] = [d for d in dirs if not _dir_is_off_limits(os.path.join(root, d))]
                 for filename in filenames:
                     file_path = os.path.join(root, filename)
                     normalized_path = os.path.normpath(file_path).lower()
@@ -7250,7 +7265,7 @@ class OrganizePage(QWidget):
                     # Skip if already indexed or matches exclusion
                     if normalized_path in indexed_paths:
                         continue
-                    if settings.should_exclude(file_path):
+                    if settings.should_exclude(file_path) or protected(file_path, top, cache):
                         continue
                     
                     unindexed_files.append(file_path)
@@ -7268,6 +7283,14 @@ class OrganizePage(QWidget):
         if getattr(self, "_prep_worker", None) is not None and self._prep_worker.isRunning():
             return
         if not self.destination_path:
+            return
+        from app.core.organize_reader import is_code_project
+        if is_code_project(self.destination_path):
+            ModernInfoDialog.show_warning(
+                self, title="That's a code project",
+                message="This folder is a code project, so Filect won't reorganize it.",
+                details=["Moving its files would break it"],
+                info_text="Pick a folder with your documents, photos or downloads.")
             return
 
         # Capture the instruction now (instance flag, not a method arg — the
@@ -7436,10 +7459,14 @@ class OrganizePage(QWidget):
         original_count = result.get("original_count", len(files))
 
         # Re-filter exclusions after path verification (paths may have changed)
+        # ...and never a file inside an app, a library or a code project, nor a hidden one (Mac live test 2026-11-12:
+        # the page planned bakery-website/.git/HEAD and an app's own files, and Apply moved them).
+        from app.core.organize_reader import protected
+        _top, _pcache = str(self.destination_path or ""), {}
         excluded_after_verify = 0
         filtered_files = []
         for f in files:
-            if settings.should_exclude(f["file_path"]):
+            if settings.should_exclude(f["file_path"]) or (_top and protected(f["file_path"], _top, _pcache)):
                 excluded_after_verify += 1
                 logger.info(f"Excluding file after path verify: {f['file_name']} (matches exclusion pattern)")
             else:
@@ -8683,11 +8710,14 @@ Caption: {file_info.get('caption', 'none')}
         if not dialog.exec():
             return
         
-        # Final safety check: filter out any excluded files before moving
+        # Final safety check: filter out any excluded files before moving - and anything inside an app, a library or
+        # a code project (a plan made before this check existed, or a folder that became a project meanwhile).
+        from app.core.organize_reader import protected
+        _top, _pcache = str(self.destination_path or ""), {}
         filtered_moves = []
         excluded_count = 0
         for m in self.current_moves:
-            if settings.should_exclude(m["source_path"]):
+            if settings.should_exclude(m["source_path"]) or (_top and protected(m["source_path"], _top, _pcache)):
                 excluded_count += 1
                 logger.info(f"Skipping excluded file in apply: {m['file_name']}")
             else:

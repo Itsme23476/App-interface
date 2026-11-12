@@ -201,6 +201,7 @@ class AgentWorker(QObject):
     result = Signal(str, str, float)         # key, session_id, cost_usd
     error = Signal(str, str)                 # key, message
     done = Signal(str)                       # key
+    session_known = Signal(str, str)         # key, session_id: as soon as the chat has one (History's Open in)
 
     def __init__(self, key: str, cwd: str, prompt: str, resume: str | None = None, bypass: bool = False,
                  model: str | None = None, effort: str | None = None, images: list | None = None,
@@ -351,6 +352,7 @@ class AgentWorker(QObject):
             on_approval=self._on_approval,
             on_result=lambda sid, cost: self.result.emit(self.key, sid or "", float(cost or 0.0)),
         )
+        runner.on_session = lambda sid: self.session_known.emit(self.key, sid or "")
         runner.allow_all = self._allow_all
         self._runner = runner            # exposed so stop() can interrupt the live turn
         return runner
@@ -853,6 +855,9 @@ class AssistantPage(QWidget):
         if st != {k: was.get(k) for k in ("claude", "codex")}:
             _trace(f"agents: claude={st.get('claude')} codex={st.get('codex')}")
         self._agents_state = st
+        ready = st.get("claude") == "ready" or st.get("codex") == "ready"
+        if ready != bool(_setting("agent_was_ready", False)):
+            _save_setting(agent_was_ready=ready)  # (the first-run guide's Assistant screen, before the next check)
         if (st.get("claude") == "ready" and was.get("claude") not in (None, "ready") and self._hands_free
                 and "new" not in self._spares):
             self._prewarm_new()                  # Claude Code just got set up while listening: ready it now (as the Mac)
@@ -1661,12 +1666,18 @@ class AssistantPage(QWidget):
         def stems(t):
             return {w[:4] for w in re.findall(r"[a-z0-9]+", (t or "").lower())
                     if len(w) > 2 and w not in _fill and w not in asking}
-        words = stems(text)
+
+        def big(t):                                        # a word big enough to name a chat on its own
+            return {w[:5] for w in re.findall(r"[a-z0-9]+", (t or "").lower())
+                    if len(w) >= 5 and w not in _fill and w not in asking}
+        words, big_words = stems(text), big(text)
         scored = []
         for ss in saved:
             in_title = len(words & stems(ss.title))
             in_first = len(words & (stems(ss.preview) - stems(ss.title)))
-            if in_title + in_first >= 2:
+            # One word of 5+ letters in its NAME is enough ("use my Outlier chat"), or a real overlap (two stems).
+            # A word only in its first message doesn't count alone: long first messages match by accident. (Mac)
+            if big_words & big(ss.title) or in_title + in_first >= 2:
                 scored.append((3 * in_title + in_first, ss.mtime, ss))
         scored.sort(key=lambda t: (t[0], t[1]), reverse=True)
         for _, _, ss in scored[:6]:
@@ -1892,6 +1903,8 @@ class AssistantPage(QWidget):
         def _report(outcome, title=""):
             if live:
                 key = self._focused_key if outcome in ("new", "continued") else ""
+                if key:                              # (History: hands-free requests that went to a chat)
+                    self._history_chat(key, result.get("heard") or task, title)
                 self.live_routed.emit(tag, outcome, title or "", key or "")
 
         if live:
@@ -2009,7 +2022,7 @@ class AssistantPage(QWidget):
             import re
             if not task and re.search(r"\b(?:all|both|every|everything|each)\b", heard or "", re.I):
                 task = "all"
-            return (org.stop_auto(task),)
+            return (org.stop_auto(task, heard=heard),)
         if intent == "ORGANIZE_CHOICE":
             return ("organize_changed" if org.choose(task) else "ignored",)
         if intent == "ORGANIZE_NO_RULES":
@@ -2109,6 +2122,45 @@ class AssistantPage(QWidget):
             v = verbs.get(tool, f"Using {tool}")
         return f"{v} {detail}".strip() if detail else v
 
+
+    def _history_chat(self, key, said, title):
+        """The History tab: this hands-free request went to this chat (what you SAID, not the decider's rewrite)."""
+        sess = self._sessions.get(key)
+        if sess is not None:
+            from app.core import assistant_history
+            assistant_history.chat(key, sess.agent, sess.session_id or sess.resume or "", sess.cwd,
+                                   title or sess.title, said)
+
+    def _on_session_known(self, key, session_id: str):
+        sess = self._sessions.get(key)
+        if sess is not None and session_id:
+            from app.core import assistant_history
+            assistant_history.set_session(key, session_id, sess.agent, sess.cwd)
+
+    def open_saved_chat(self, agent: str, session_id: str, cwd: str, where: str) -> str:
+        """History's Open in: a chat by its id, in the agent's app or a terminal. "ok", "gone" (it was deleted or
+        archived) or "failed". The pick becomes the default, as on the card and the Agents page."""
+        if where in ("app", "terminal") and self._open_in(agent) != where:
+            _save_setting(**{f"assistant_{agent}_open_in": where})
+            if self._overlay is not None:
+                self._overlay.set_open_defaults({agent: where})
+        try:
+            _trace(f"open from History: {agent} {(session_id or '')[:8]} in {where}")
+            if agent == "codex":
+                from app.core.codex_runner import chat_exists, open_in_codex
+                if not chat_exists(session_id):
+                    return "gone"
+                open_in_codex(session_id, cwd, where)
+            else:
+                from app.core.agent_sessions import _session_file
+                from app.core.agent_runner import open_in_claude
+                if _session_file(session_id, cwd) is None:
+                    return "gone"
+                open_in_claude(session_id, cwd, where)
+            return "ok"
+        except Exception as e:
+            _trace(f"open from History failed: {e}")
+            return "failed"
 
     def _open_task(self, where: str = "app", key=None):
         """"Open in …" — open the ACTUAL conversation: "app" → the Claude app (claude://resume), "terminal"
@@ -2237,7 +2289,8 @@ class AssistantPage(QWidget):
             # BOUND methods, never lambdas: Qt queues a bound-method slot to its receiver's (main) thread.
             for sig, slot in ((sess.worker.step, self._on_step), (sess.worker.approvalRequested, self._on_approval),
                               (sess.worker.result, self._on_result), (sess.worker.error, self._on_error),
-                              (sess.worker.done, self._on_done)):
+                              (sess.worker.done, self._on_done),
+                              (sess.worker.session_known, self._on_session_known)):
                 if on:
                     sig.connect(slot)
                 else:
@@ -2637,6 +2690,7 @@ class AssistantPage(QWidget):
         self._down.pop(sess.agent, None)            # it just worked — usable again
         if session_id:
             sess.session_id = session_id
+            self._on_session_known(key, session_id)
             if sess.agent == "claude" and sess.cwd and os.path.normcase(os.path.normpath(sess.cwd)) != \
                     os.path.normcase(os.path.normpath(DEFAULT_WORKSPACE)):
                 try:                                # a chat continued in another project: keep it listed
@@ -2861,6 +2915,12 @@ class AssistantPage(QWidget):
         if sess.worker is not None:
             sess.worker.deleteLater()
         sess.worker = None
+        from app.core import assistant_history
+        if sess.session_id or sess.resume:          # (a failed hand-over gives the chat back to its own agent)
+            assistant_history.set_session(key, sess.session_id or sess.resume, sess.agent, sess.cwd)
+        elif (sess.stopping or sess.status == "error") and not (sess.fallback_to or sess.codex_held
+                                                                 or sess.pending_followup):
+            assistant_history.forget(key)           # it never answered: nothing to open later, so no row
         if sess.stopping:                           # user hit Stop — don't fire any queued follow-up
             sess.stopping = False
             sess.pending_followup = None

@@ -727,6 +727,7 @@ class AgentRunner:
         self.auto_allow = DEFAULT_AUTO_ALLOW if auto_allow is None else auto_allow
         self.session_id: Optional[str] = None
         self.allow_all = False
+        self.on_session = lambda sid: None   # (the owner sets it) the chat's id as soon as Claude Code says it
         self._client = None          # live ClaudeSDKClient (set during run) — for interrupt()
         self._live = None            # the text block Claude is writing right now (from stream events)
         self._live_at = 0.0          # when the last "partial" step went out (they're throttled)
@@ -841,6 +842,10 @@ class AgentRunner:
                             self._on_stream_event(msg)
                             continue
                         if getattr(msg, "subtype", None) == "init" and isinstance(getattr(msg, "data", None), dict):
+                            try:                         # (History: openable while it works, and after a crash)
+                                self.on_session(msg.data.get("session_id"))
+                            except Exception:
+                                pass
                             mcp = msg.data.get("mcp_servers") or []
                             if mcp:                          # which of your tools this task got (diagnostics)
                                 logger.info("[agent] MCP: %s", ", ".join(f"{m.get('name')} ({m.get('status')})" for m in mcp))

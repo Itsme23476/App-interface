@@ -12,8 +12,58 @@ from pathlib import Path
 app_dir = Path(__file__).parent.parent
 sys.path.insert(0, str(app_dir))
 
+# Off-screen Qt has no fonts of its own (every letter a box, every width wrong): give it Windows' own, so a test that
+# measures text (the guide's "every text fits") measures Segoe UI as it really is. Before any test makes the QApplication.
+if os.name == "nt" and Path(r"C:\Windows\Fonts").is_dir():
+    os.environ.setdefault("QT_QPA_FONTDIR", r"C:\Windows\Fonts")
+
+
+# YOUR index (file_index.db) is never opened by a test: the shared index the app makes when app.core.database is
+# first imported (by several test files, at collection) is made in a temp folder instead. Every part of the app uses
+# that one object, so every test that doesn't make its own index works on the temp one. (Before 2026-11-12 that
+# import opened your real index: its table checks - and an FTS rebuild if needed - ran on it at every test run.)
+import tempfile as _tempfile                                     # noqa: E402
+from app.core import settings as _settings_mod                   # noqa: E402  (reads your settings; never writes)
+_TEST_DATA = Path(_tempfile.mkdtemp(prefix="filect-tests-"))
+_orig_data_dir = _settings_mod.Settings.get_app_data_dir
+_settings_mod.Settings.get_app_data_dir = lambda self: _TEST_DATA
+try:
+    from app.core import database as _database                   # noqa: E402,F401
+finally:
+    _settings_mod.Settings.get_app_data_dir = _orig_data_dir
+assert str(_database.file_index.db_path).startswith(str(_TEST_DATA)), _database.file_index.db_path
 
 _KEEP_PAGES = []   # every Agents test page, kept until the session ends (see below)
+
+
+_REAL_CFG = Path(os.environ.get("APPDATA", str(Path.home()))) / "ai-file-organizer" / "settings.json"
+
+
+@pytest.fixture(autouse=True)
+def _never_your_settings_file(monkeypatch):
+    """No test ever writes YOUR settings.json: a save aimed at it is dropped (a save to a test's temp folder still
+    happens). A test that stubs saving itself overrides this. (2026-11-12: a tour test saved through an unstubbed
+    _save_config and changed one of your settings.)"""
+    from app.core import settings as _st
+    real = _st.Settings._save_config
+
+    def guarded(self, *a, **k):
+        try:
+            if Path(self._config_file()).resolve() == _REAL_CFG.resolve():
+                return
+        except Exception:
+            return
+        return real(self, *a, **k)
+    monkeypatch.setattr(_st.Settings, "_save_config", guarded)
+
+
+@pytest.fixture(autouse=True)
+def _no_telemetry(monkeypatch):
+    """No test ever sends analytics (track() sends even when signed out) or opens a database connection: the client
+    it would send with is None. A test that records track() itself still sees every call - only the network is cut.
+    (Two of those background sends setting up SSL at the same moment crashed the interpreter.)"""
+    from app.core import supabase_client as _sc
+    monkeypatch.setattr(type(_sc.supabase_auth), "_get_db_client", lambda self: None)
 
 
 @pytest.fixture(autouse=True)

@@ -691,6 +691,7 @@ class FakeWorker(QObject):
     result = Signal(str, str, float)
     error = Signal(str, str)
     done = Signal(str)
+    session_known = Signal(str, str)
     sent = []
 
     def __init__(self, key, cwd, prompt, **kw):

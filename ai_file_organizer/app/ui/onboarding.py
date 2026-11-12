@@ -1,14 +1,24 @@
 """
 Interactive Onboarding Overlay for Filect
-A floating panel that guides users through the app's features
+A floating panel that guides users through the app's features: the first-run guide (nine screens in three sections:
+Agents, Your voice, Your files) and, in page-tour mode, every page's "See what it can do" (page_tours.py).
+
+Ported from the Mac (onboarding.py at 92e895f) for Windows:
+  * Windows keys and words: Ctrl + Win to dictate (+ Shift to search, + Alt to organize), "the card at the top of
+    your screen" (the Mac's notch);
+  * Windows page numbers (page_stack: Voice 3, Settings 4); the sidebar button is the nav_button_group's for that page;
+  * the panel is a Tool window OWNED by the main window, not "always on top": on Windows that flag floats it over
+    every other app too; owned, it stays above Filect only;
+  * key caps use Segoe UI (the Mac's SF Pro Display isn't on Windows); the logo comes from Filect's own icon;
+  * the voice drawing is Windows' own (a mic with Ctrl + Win key chips).
 """
 
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, 
-    QFrame, QWidget, QGraphicsDropShadowEffect, QProgressBar
+    QFrame, QWidget, QGraphicsDropShadowEffect, QProgressBar, QPlainTextEdit
 )
-from PySide6.QtCore import Qt, Signal, QPoint, QTimer, QPropertyAnimation, QRect, QRectF, QEasingCurve, Property, QPointF
-from PySide6.QtGui import QColor, QFont, QKeyEvent, QPainter, QPen, QBrush, QPainterPath, QRegion, QLinearGradient
+from PySide6.QtCore import Qt, Signal, QPoint, QTimer, QEvent, QPropertyAnimation, QRect, QRectF, QEasingCurve, Property, QPointF
+from PySide6.QtGui import QColor, QFont, QKeyEvent, QPainter, QPen, QBrush, QPainterPath, QRegion, QLinearGradient, QPixmap
 from datetime import datetime, timedelta
 import random
 import math
@@ -20,7 +30,7 @@ class OnboardingAnimation(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setFixedSize(440, 130)
-        self._step = 0
+        self._art = "welcome"
         self._frame = 0
         self._max_frames = 300  # 5 seconds at 60fps then loops
         
@@ -38,7 +48,31 @@ class OnboardingAnimation(QWidget):
         self._cyan = QColor("#00CED1")
         # Theme-dependent colors
         self._update_theme_colors()
-    
+        # Real app logo (purple sparkle icon) for the Welcome step.
+        self._logo = self._load_logo()
+
+    def _load_logo(self):
+        """Load the bundled Filect app logo (resources/logo.png), dev + frozen."""
+        try:
+            import sys
+            from pathlib import Path
+            base = Path(sys._MEIPASS) if hasattr(sys, "_MEIPASS") \
+                else Path(__file__).resolve().parents[2]   # → ai_file_organizer/
+            for name in ("logo.png", "icon.png", "iconnn.ico"):
+                p = base / "resources" / name
+                if p.exists():
+                    pm = QPixmap(str(p))
+                    if not pm.isNull():
+                        # Pre-scale once (source is 1024px) so paintEvent doesn't resample.
+                        return pm.scaled(160, 160, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            from PySide6.QtWidgets import QApplication
+            ic = QApplication.windowIcon()
+            if not ic.isNull():
+                return ic.pixmap(160, 160)
+        except Exception:
+            pass
+        return None
+
     def _update_theme_colors(self):
         """Set theme-dependent colors for animations."""
         from app.ui.theme_manager import get_theme_colors
@@ -50,9 +84,11 @@ class OnboardingAnimation(QWidget):
         self._card_bg = QColor(c['border_strong'])
         self._surface = QColor(c['card'])
 
-    def set_step(self, step_index):
-        """Switch to a different step animation"""
-        self._step = step_index
+    def set_art(self, name):
+        """Switch to a different animation: one of the _draw_* methods, or ("keys", [...]) / ("icon", name) / ("logos",)."""
+        if isinstance(name, (tuple, list)):
+            name, self._art_arg = name[0], (name[1] if len(name) > 1 else None)
+        self._art = name
         self._frame = 0
         if not self._timer.isActive():
             self._timer.start()
@@ -80,27 +116,8 @@ class OnboardingAnimation(QWidget):
         painter.setPen(QPen(QColor("#252535"), 1.5))
         painter.drawRoundedRect(QRectF(0.5, 0.5, self.width()-1, self.height()-1), 12, 12)
         
-        if self._step == 0:
-            self._draw_welcome(painter)
-        elif self._step == 1:
-            self._draw_search(painter)
-        elif self._step == 2:
-            self._draw_organize(painter)
-        elif self._step == 3:
-            self._draw_auto_organize(painter)
-        elif self._step == 4:
-            self._draw_index(painter)
-        elif self._step == 5:
-            self._draw_voice(painter)
-        elif self._step == 6:
-            self._draw_cleanup(painter)
-        elif self._step == 7:
-            self._draw_voice(painter)   # Custom Words step (its live panel replaces this)
-        elif self._step == 8:
-            self._draw_settings(painter)
-        elif self._step == 9:
-            self._draw_ready(painter)
-        
+        getattr(self, f"_draw_{self._art}")(painter)
+
         painter.end()
 
     # ── Step 0: Welcome ──────────────────────────────
@@ -112,24 +129,23 @@ class OnboardingAnimation(QWidget):
         pulse = 1.0 + 0.08 * math.sin(t * 3)
         size = 40 * pulse
         
-        # Folder icon
+        # Real app logo (the purple sparkle icon), gently pulsing.
         p.save()
         p.translate(cx, cy - 8)
         p.scale(pulse, pulse)
-        p.setPen(Qt.NoPen)
-        p.setBrush(self._purple)
-        # Folder tab
-        p.drawRoundedRect(QRectF(-20, -18, 16, 8), 3, 3)
-        # Folder body
-        p.drawRoundedRect(QRectF(-22, -12, 44, 30), 4, 4)
-        # AI sparkle inside
-        p.setBrush(self._white)
-        sparkle_alpha = int(180 + 75 * math.sin(t * 5))
-        sparkle_color = QColor(255, 255, 255, sparkle_alpha)
-        p.setBrush(sparkle_color)
-        # Draw a 4-point star
-        star_size = 8 + 2 * math.sin(t * 4)
-        self._draw_star(p, 0, 3, star_size)
+        if self._logo is not None and not self._logo.isNull():
+            lp = 78  # drawn size (logo is pre-scaled to 160px)
+            p.drawPixmap(QRectF(-lp / 2, -lp / 2, lp, lp), self._logo,
+                         QRectF(self._logo.rect()))
+        else:
+            # Fallback (logo missing): the previous hand-drawn folder + sparkle.
+            p.setPen(Qt.NoPen)
+            p.setBrush(self._purple)
+            p.drawRoundedRect(QRectF(-20, -18, 16, 8), 3, 3)
+            p.drawRoundedRect(QRectF(-22, -12, 44, 30), 4, 4)
+            sparkle_alpha = int(180 + 75 * math.sin(t * 5))
+            p.setBrush(QColor(255, 255, 255, sparkle_alpha))
+            self._draw_star(p, 0, 3, 8 + 2 * math.sin(t * 4))
         p.restore()
         
         # Floating sparkles around
@@ -263,7 +279,78 @@ class OnboardingAnimation(QWidget):
         p.setFont(font)
         p.drawText(bar_rect.adjusted(12, 0, 0, 0), Qt.AlignVCenter | Qt.AlignLeft, f"🔍 {display_text}{cursor}")
 
-    # ── Step 2: Organize Files ───────────────────────
+    # ── Step 4: Index Files ──────────────────────────
+    def _draw_index(self, p: QPainter):
+        t = self._frame / 60.0
+        w, h = self.width(), self.height()
+        
+        # Grid of files
+        cols, rows = 8, 3
+        cell_w, cell_h = 40, 30
+        grid_x = (w - cols * cell_w) / 2
+        grid_y = 15
+        
+        # Scanning progress
+        scan_progress = (t * 0.4) % 1.2  # 0 to 1.2 (extra for completion)
+        scanned_cells = int(scan_progress * cols * rows)
+        
+        for row in range(rows):
+            for col in range(cols):
+                idx = row * cols + col
+                x = grid_x + col * cell_w + 4
+                y = grid_y + row * cell_h + 2
+                
+                is_scanned = idx < scanned_cells
+                
+                # File card
+                p.setPen(Qt.NoPen)
+                if is_scanned:
+                    card_bg = QColor(124, 77, 255, 40)
+                    border_color = self._purple
+                else:
+                    card_bg = QColor("#252535")
+                    border_color = QColor("#3A3A4A")
+                
+                p.setBrush(card_bg)
+                p.drawRoundedRect(QRectF(x, y, cell_w - 8, cell_h - 4), 4, 4)
+                p.setPen(QPen(border_color, 1))
+                p.drawRoundedRect(QRectF(x, y, cell_w - 8, cell_h - 4), 4, 4)
+                
+                # Checkmark for scanned
+                if is_scanned:
+                    p.setPen(QPen(self._green, 2, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+                    cx_c = x + (cell_w - 8) / 2
+                    cy_c = y + (cell_h - 4) / 2
+                    p.drawLine(QPointF(cx_c - 5, cy_c), QPointF(cx_c - 1, cy_c + 4))
+                    p.drawLine(QPointF(cx_c - 1, cy_c + 4), QPointF(cx_c + 5, cy_c - 3))
+                else:
+                    # File icon placeholder
+                    p.setPen(Qt.NoPen)
+                    p.setBrush(QColor("#3A3A4A"))
+                    p.drawRoundedRect(QRectF(x + 8, y + 6, 16, 3), 1, 1)
+                    p.drawRoundedRect(QRectF(x + 8, y + 12, 12, 3), 1, 1)
+        
+        # Scanning bar
+        scan_y = grid_y + (scan_progress / 1.0) * (rows * cell_h)
+        if scan_progress < 1.0:
+            scan_bar_color = QColor(124, 77, 255, 150)
+            p.setPen(QPen(scan_bar_color, 2))
+            p.drawLine(QPointF(grid_x, scan_y), QPointF(grid_x + cols * cell_w, scan_y))
+            # Glow
+            grad = QLinearGradient(0, scan_y - 8, 0, scan_y)
+            grad.setColorAt(0, QColor(124, 77, 255, 0))
+            grad.setColorAt(1, QColor(124, 77, 255, 60))
+            p.setPen(Qt.NoPen)
+            p.setBrush(grad)
+            p.drawRect(QRectF(grid_x, scan_y - 8, cols * cell_w, 8))
+        
+        # Progress text at bottom
+        pct = min(100, int(scan_progress / 1.0 * 100))
+        p.setPen(self._purple)
+        font = QFont("Segoe UI", 9, QFont.Bold)
+        p.setFont(font)
+        p.drawText(QRectF(0, h - 28, w, 20), Qt.AlignCenter, f"Indexing... {pct}%")
+
     def _draw_organize(self, p: QPainter):
         t = self._frame / 60.0
         w, h = self.width(), self.height()
@@ -343,147 +430,47 @@ class OnboardingAnimation(QWidget):
         p.drawLine(QPointF(mid_x + 20, mid_y), QPointF(mid_x + 12, mid_y - 8))
         p.drawLine(QPointF(mid_x + 20, mid_y), QPointF(mid_x + 12, mid_y + 8))
 
-    # ── Step 3: Auto-Organize ────────────────────────
-    def _draw_auto_organize(self, p: QPainter):
+    def _draw_assistant(self, p: QPainter):
         t = self._frame / 60.0
-        w, h = self.width(), self.height()
-        cx, cy = w / 2, h / 2
-        
-        # Clock icon
-        p.save()
-        p.translate(cx - 80, cy - 5)
-        clock_color = self._purple
-        p.setPen(QPen(clock_color, 2.5))
-        p.setBrush(QColor(124, 77, 255, 30))
-        p.drawEllipse(QPointF(0, 0), 22, 22)
-        # Clock hands
-        sec_angle = t * 60  # Fast second hand
-        min_angle = t * 5
-        # Minute hand
-        p.setPen(QPen(self._purple, 2, Qt.SolidLine, Qt.RoundCap))
-        p.drawLine(QPointF(0, 0), QPointF(12 * math.sin(math.radians(min_angle)), -12 * math.cos(math.radians(min_angle))))
-        # Second hand
-        p.setPen(QPen(self._gold, 1.5, Qt.SolidLine, Qt.RoundCap))
-        p.drawLine(QPointF(0, 0), QPointF(16 * math.sin(math.radians(sec_angle)), -16 * math.cos(math.radians(sec_angle))))
-        # Center dot
+        cx, cy = self.width() / 2, self.height() / 2 - 12
+        for k in range(3):
+            phase = (t * 0.7 + k / 3.0) % 1.0
+            c = QColor(self._purple)
+            c.setAlpha(int(120 * (1 - phase)))
+            p.setPen(QPen(c, 2))
+            p.setBrush(Qt.NoBrush)
+            p.drawEllipse(QPointF(cx, cy), 30 + phase * 24, 30 + phase * 24)
         p.setPen(Qt.NoPen)
         p.setBrush(self._purple)
-        p.drawEllipse(QPointF(0, 0), 3, 3)
-        p.restore()
-        
-        # Files appearing and auto-sorting
-        file_cycle = t % 3  # Every 3 seconds a new file
-        
-        # Conveyor belt effect - file slides in from left and goes into folder
-        file_x = cx - 30 + min(file_cycle / 2.0, 1.0) * 160
-        file_alpha = 255
-        if file_cycle > 2.5:
-            file_alpha = int(255 * (3 - file_cycle) / 0.5)
-        
-        p.setPen(Qt.NoPen)
-        fc = QColor("#252535")
-        fc.setAlpha(file_alpha)
-        p.setBrush(fc)
-        p.drawRoundedRect(QRectF(file_x - 14, cy - 14, 28, 28), 5, 5)
-        font = QFont("Segoe UI Emoji", 10)
-        p.setFont(font)
-        p.setPen(QColor(232, 232, 240, file_alpha))
-        p.drawText(QRectF(file_x - 14, cy - 14, 28, 28), Qt.AlignCenter, "📄")
-        
-        # Dotted path
-        p.setPen(QPen(QColor(124, 77, 255, 80), 1.5, Qt.DashLine))
-        p.drawLine(QPointF(cx - 30, cy), QPointF(cx + 130, cy))
-        
-        # Target folder
-        fx = cx + 130
-        p.setPen(Qt.NoPen)
-        p.setBrush(self._green)
-        p.drawRoundedRect(QRectF(fx, cy - 20, 10, 5), 2, 2)
-        p.drawRoundedRect(QRectF(fx - 2, cy - 16, 55, 32), 4, 4)
-        p.setPen(self._white)
-        font = QFont("Segoe UI", 7, QFont.Bold)
-        p.setFont(font)
-        p.drawText(QRectF(fx - 2, cy - 16, 55, 32), Qt.AlignCenter, "Auto\nSorted")
-        
-        # "⚡ Automatic" label
-        p.setPen(self._purple)
-        font = QFont("Segoe UI", 9, QFont.Bold)
-        p.setFont(font)
-        p.drawText(QRectF(0, h - 28, w, 20), Qt.AlignCenter, "⚡ Set it and forget it")
+        p.drawEllipse(QPointF(cx, cy), 30, 30)
+        from app.ui.icons import line_pixmap
+        p.drawPixmap(QPointF(cx - 13, cy - 13), line_pixmap("mic", 26, "#FFFFFF"))
+        p.setPen(self._purple_light)
+        p.setFont(QFont("Segoe UI", 10, QFont.Bold))
+        p.drawText(QRectF(0, cy + 42, self.width(), 22), Qt.AlignCenter, "Say what you want")
 
-    # ── Step 4: Index Files ──────────────────────────
-    def _draw_index(self, p: QPainter):
+    def _draw_agents(self, p: QPainter):
+        from app.ui.agents_view import agent_logo as logo
         t = self._frame / 60.0
-        w, h = self.width(), self.height()
-        
-        # Grid of files
-        cols, rows = 8, 3
-        cell_w, cell_h = 40, 30
-        grid_x = (w - cols * cell_w) / 2
-        grid_y = 15
-        
-        # Scanning progress
-        scan_progress = (t * 0.4) % 1.2  # 0 to 1.2 (extra for completion)
-        scanned_cells = int(scan_progress * cols * rows)
-        
-        for row in range(rows):
-            for col in range(cols):
-                idx = row * cols + col
-                x = grid_x + col * cell_w + 4
-                y = grid_y + row * cell_h + 2
-                
-                is_scanned = idx < scanned_cells
-                
-                # File card
-                p.setPen(Qt.NoPen)
-                if is_scanned:
-                    card_bg = QColor(124, 77, 255, 40)
-                    border_color = self._purple
-                else:
-                    card_bg = QColor("#252535")
-                    border_color = QColor("#3A3A4A")
-                
-                p.setBrush(card_bg)
-                p.drawRoundedRect(QRectF(x, y, cell_w - 8, cell_h - 4), 4, 4)
-                p.setPen(QPen(border_color, 1))
-                p.drawRoundedRect(QRectF(x, y, cell_w - 8, cell_h - 4), 4, 4)
-                
-                # Checkmark for scanned
-                if is_scanned:
-                    p.setPen(QPen(self._green, 2, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-                    cx_c = x + (cell_w - 8) / 2
-                    cy_c = y + (cell_h - 4) / 2
-                    p.drawLine(QPointF(cx_c - 5, cy_c), QPointF(cx_c - 1, cy_c + 4))
-                    p.drawLine(QPointF(cx_c - 1, cy_c + 4), QPointF(cx_c + 5, cy_c - 3))
-                else:
-                    # File icon placeholder
-                    p.setPen(Qt.NoPen)
-                    p.setBrush(QColor("#3A3A4A"))
-                    p.drawRoundedRect(QRectF(x + 8, y + 6, 16, 3), 1, 1)
-                    p.drawRoundedRect(QRectF(x + 8, y + 12, 12, 3), 1, 1)
-        
-        # Scanning bar
-        scan_y = grid_y + (scan_progress / 1.0) * (rows * cell_h)
-        if scan_progress < 1.0:
-            scan_bar_color = QColor(124, 77, 255, 150)
-            p.setPen(QPen(scan_bar_color, 2))
-            p.drawLine(QPointF(grid_x, scan_y), QPointF(grid_x + cols * cell_w, scan_y))
-            # Glow
-            grad = QLinearGradient(0, scan_y - 8, 0, scan_y)
-            grad.setColorAt(0, QColor(124, 77, 255, 0))
-            grad.setColorAt(1, QColor(124, 77, 255, 60))
+        w, row_h = 330, 42
+        x = (self.width() - w) / 2
+        for i, (agent, text) in enumerate((("claude", "Building your landing page"), ("codex", "Summing up this week's invoices"))):
+            y = 18 + i * (row_h + 10)
+            p.setPen(QPen(QColor("#2E2E40"), 1))
+            p.setBrush(QColor("#252535"))
+            p.drawRoundedRect(QRectF(x, y, w, row_h), 10, 10)
+            pm = logo(agent, 20)
+            if pm is not None:
+                p.drawPixmap(QPointF(x + 12, y + 11), pm)
+            p.setPen(QColor("#E8E8F0"))
+            p.setFont(QFont("Segoe UI", 10))
+            p.drawText(QRectF(x + 42, y, w - 80, row_h), Qt.AlignVCenter | Qt.AlignLeft, text)
+            c = QColor(self._purple_light)
+            c.setAlpha(int(140 + 115 * (0.5 + 0.5 * math.sin(t * 4 + i * 2))))
             p.setPen(Qt.NoPen)
-            p.setBrush(grad)
-            p.drawRect(QRectF(grid_x, scan_y - 8, cols * cell_w, 8))
-        
-        # Progress text at bottom
-        pct = min(100, int(scan_progress / 1.0 * 100))
-        p.setPen(self._purple)
-        font = QFont("Segoe UI", 9, QFont.Bold)
-        p.setFont(font)
-        p.drawText(QRectF(0, h - 28, w, 20), Qt.AlignCenter, f"Indexing... {pct}%")
+            p.setBrush(c)
+            p.drawEllipse(QPointF(x + w - 20, y + row_h / 2), 4, 4)
 
-    # ── Step 5: Voice ────────────────────────────────
     def _draw_voice(self, p: QPainter):
         t = self._frame / 60.0
         w, h = self.width(), self.height()
@@ -545,221 +532,67 @@ class OnboardingAnimation(QWidget):
         p.setPen(self._gray)
         p.drawText(QRectF(x + 4, cap_y, fm.horizontalAdvance(tail) + 10, 18), Qt.AlignVCenter | Qt.AlignLeft, tail.strip())
 
-    # ── Step 6: AI Cleanup (optional) ────────────────
-    def _draw_cleanup(self, p: QPainter):
-        t = self._frame / 60.0
-        w, h = self.width(), self.height()
-        cx, cy = w / 2, h / 2 - 6
-
-        # A small "document" of text lines. A sparkle sweep passes left→right,
-        # turning messy/dim lines into clean bright ones — the AI-polish motif.
-        doc_w, doc_h = 158, 94
-        dx, dy = cx - doc_w / 2, cy - doc_h / 2
-        p.setPen(Qt.NoPen); p.setBrush(QColor(255, 255, 255, 10))
-        p.drawRoundedRect(QRectF(dx, dy, doc_w, doc_h), 10, 10)
-        p.setPen(QPen(QColor(124, 77, 255, 70), 1)); p.setBrush(Qt.NoBrush)
-        p.drawRoundedRect(QRectF(dx + 0.5, dy + 0.5, doc_w - 1, doc_h - 1), 10, 10)
-
-        sweep = (t * 0.45) % 1.0
-        sweep_x = dx + 14 + sweep * (doc_w - 28)
-
-        fracs = [0.78, 0.94, 0.58, 0.86, 0.66]
-        ly = dy + 16
-        for i, frac in enumerate(fracs):
-            lx = dx + 16
-            line_w = (doc_w - 32) * frac
-            cleaned = sweep_x >= (lx + line_w) or sweep >= 0.98
-            if cleaned:
-                g = QLinearGradient(lx, 0, lx + line_w, 0)
-                g.setColorAt(0, QColor("#B39DFF")); g.setColorAt(1, QColor("#7C4DFF"))
-                p.setPen(QPen(g, 5, Qt.SolidLine, Qt.RoundCap))
-                p.drawLine(QPointF(lx, ly), QPointF(lx + line_w, ly))
-            else:
-                wob = 2.0 * math.sin(t * 4 + i)
-                p.setPen(QPen(QColor(150, 150, 172, 90), 5, Qt.SolidLine, Qt.RoundCap))
-                p.drawLine(QPointF(lx, ly + wob), QPointF(lx + line_w * 0.82, ly - wob))
-            ly += 16
-
-        # Bright translucent sweep bar.
-        bar = QLinearGradient(sweep_x - 11, 0, sweep_x + 11, 0)
-        bar.setColorAt(0, QColor(124, 77, 255, 0))
-        bar.setColorAt(0.5, QColor(179, 157, 255, 130))
-        bar.setColorAt(1, QColor(124, 77, 255, 0))
-        p.setPen(Qt.NoPen); p.setBrush(bar)
-        p.drawRect(QRectF(sweep_x - 11, dy + 6, 22, doc_h - 12))
-
-        # Twinkling sparkles riding the sweep.
-        for i in range(3):
-            s = 4 + 3 * abs(math.sin(t * 6 + i))
-            sxx = sweep_x + (i - 1) * 9
-            syy = dy - 6 + i * 5
-            col = QColor(self._purple); col.setAlpha(int(140 + 100 * abs(math.sin(t * 5 + i))))
-            p.setBrush(col); p.setPen(Qt.NoPen)
-            self._draw_star(p, sxx, syy, max(3, s))
-
-        p.setFont(QFont("Segoe UI", 8, QFont.Bold))
-        p.setPen(self._gray)
-        p.drawText(QRectF(0, h - 30, w, 20), Qt.AlignCenter, "Optional — off by default")
-
-    # ── Step 7: Settings ─────────────────────────────
-    def _draw_settings(self, p: QPainter):
-        t = self._frame / 60.0
-        w, h = self.width(), self.height()
-        cx, cy = w / 2, h / 2
-        
-        # Rotating gear
-        p.save()
-        p.translate(cx, cy - 10)
-        p.rotate(t * 30)
-        
-        gear_color = self._purple
-        p.setPen(Qt.NoPen)
-        p.setBrush(gear_color)
-        
-        # Gear teeth
-        teeth = 8
-        outer_r = 28
-        inner_r = 20
-        tooth_w = 0.25
-        
-        path = QPainterPath()
-        for i in range(teeth):
-            angle = i * (2 * math.pi / teeth)
-            # Outer point
-            a1 = angle - tooth_w
-            a2 = angle + tooth_w
-            if i == 0:
-                path.moveTo(outer_r * math.cos(a1), outer_r * math.sin(a1))
-            else:
-                path.lineTo(outer_r * math.cos(a1), outer_r * math.sin(a1))
-            path.lineTo(outer_r * math.cos(a2), outer_r * math.sin(a2))
-            # Inner point
-            a3 = angle + tooth_w + 0.15
-            a4 = angle + (2 * math.pi / teeth) - tooth_w - 0.15
-            path.lineTo(inner_r * math.cos(a3), inner_r * math.sin(a3))
-            path.lineTo(inner_r * math.cos(a4), inner_r * math.sin(a4))
-        path.closeSubpath()
-        p.drawPath(path)
-        
-        # Center hole
-        p.setBrush(QColor("#16161F"))
-        p.drawEllipse(QPointF(0, 0), 10, 10)
-        p.restore()
-        
-        # Shield icon appearing
-        shield_alpha = int(128 + 127 * math.sin(t * 2))
-        p.save()
-        p.translate(cx + 60, cy - 10)
-        shield_color = QColor(self._green)
-        shield_color.setAlpha(shield_alpha)
-        p.setPen(Qt.NoPen)
-        p.setBrush(shield_color)
-        
-        shield = QPainterPath()
-        shield.moveTo(0, -18)
-        shield.lineTo(14, -10)
-        shield.lineTo(14, 4)
-        shield.quadTo(14, 18, 0, 22)
-        shield.quadTo(-14, 18, -14, 4)
-        shield.lineTo(-14, -10)
-        shield.closeSubpath()
-        p.drawPath(shield)
-        
-        # Checkmark on shield
-        p.setPen(QPen(self._white, 2.5, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-        p.drawLine(QPointF(-5, 2), QPointF(-1, 7))
-        p.drawLine(QPointF(-1, 7), QPointF(6, -4))
-        p.restore()
-        
-        # Exclusion patterns text
-        patterns = [".py", ".json", ".env", ".git"]
-        for i, pat in enumerate(patterns):
-            px = cx - 100 + i * 52
-            py = cy + 30
-            # Tag style
-            p.setPen(Qt.NoPen)
-            tag_color = QColor(self._purple_bg)
-            p.setBrush(tag_color)
-            p.drawRoundedRect(QRectF(px, py, 44, 20), 10, 10)
-            p.setPen(self._purple)
-            font = QFont("Segoe UI", 8)
-            p.setFont(font)
-            p.drawText(QRectF(px, py, 44, 20), Qt.AlignCenter, pat)
-
-    # ── Step 7: Ready ────────────────────────────────
-    def _draw_ready(self, p: QPainter):
-        t = self._frame / 60.0
-        w, h = self.width(), self.height()
-        cx, cy = w / 2, h / 2
-        
-        # Big "Ctrl+Alt+H" keyboard shortcut display
-        # Pulsing glow effect behind the keys
-        glow_alpha = int(30 + 20 * math.sin(t * 2))
-        p.setPen(Qt.NoPen)
-        p.setBrush(QColor(124, 77, 255, glow_alpha))
-        p.drawRoundedRect(QRectF(30, 8, w - 60, h - 16), 16, 16)
-        
-        # "Quick Search Anywhere" title
-        p.setPen(self._purple)
-        font = QFont("Segoe UI", 10, QFont.Bold)
+    # ── Page tours: ("keys", [...]) · ("icon", name) · ("logos",) ──
+    def _draw_keys(self, p: QPainter):
+        """Key caps, lit one after another in the order you press them. "+" and "→" are plain text."""
+        toks = self._art_arg
+        font = QFont("Segoe UI", 15, QFont.DemiBold)      # (Windows: no SF Pro Display)
         p.setFont(font)
-        p.drawText(QRectF(0, 10, w, 22), Qt.AlignCenter, "⚡ Quick Search — Anytime, Anywhere")
-        
-        # Draw keyboard keys: Ctrl + Alt + H
-        key_y = cy - 8
-        key_h = 38
-        keys = ["Ctrl", "Alt", "H"]
-        key_widths = [60, 50, 42]
-        total_w = sum(key_widths) + 60  # keys + plus signs + spacing
-        start_x = (w - total_w) / 2
-        
-        curr_x = start_x
-        for i, (key, kw) in enumerate(zip(keys, key_widths)):
-            # Key press animation - each key presses in sequence
-            press_time = t * 1.5 - i * 0.3
-            press_offset = 0
-            if press_time > 0:
-                cycle = press_time % 3
-                if cycle < 0.15:
-                    press_offset = 3 * (cycle / 0.15)  # Press down
-                elif cycle < 0.4:
-                    press_offset = 3 * (1 - (cycle - 0.15) / 0.25)  # Release
-            
-            ky = key_y + press_offset
-            
-            # Key shadow
+        fm = p.fontMetrics()
+        widths = [fm.horizontalAdvance(t) + 14 if t in ("+", "→") else max(52, fm.horizontalAdvance(t) + 30) for t in toks]
+        gap = 8
+        x = (self.width() - sum(widths) - gap * (len(toks) - 1)) / 2
+        caps = [i for i, t in enumerate(toks) if t not in ("+", "→")]
+        lit = caps[int(self._frame / 40) % (len(caps) + 1)] if caps and int(self._frame / 40) % (len(caps) + 1) < len(caps) else None
+        cy, h = self.height() / 2, 52
+        for i, (t, w) in enumerate(zip(toks, widths)):
+            if t in ("+", "→"):
+                p.setPen(self._gray)
+                p.drawText(QRectF(x, cy - h / 2, w, h), Qt.AlignCenter, t)
+            else:
+                down = 3 if i == lit else 0
+                r = QRectF(x, cy - h / 2 + down, w, h - 3)
+                p.setPen(Qt.NoPen)
+                p.setBrush(QColor("#0E0E16"))
+                p.drawRoundedRect(r.adjusted(0, 3, 0, 3 - down), 10, 10)            # (the cap's side)
+                p.setBrush(QColor("#2A2140") if i == lit else QColor("#252535"))
+                p.drawRoundedRect(r, 10, 10)
+                p.setPen(QPen(self._purple if i == lit else QColor("#3A3A4E"), 1.5))
+                p.setBrush(Qt.NoBrush)
+                p.drawRoundedRect(r, 10, 10)
+                p.setPen(QColor("#FFFFFF") if i == lit else QColor("#D8D8E6"))
+                p.drawText(r, Qt.AlignCenter, t)
+            x += w + gap
+
+    def _draw_icon(self, p: QPainter):
+        """One big line icon in a softly pulsing ring."""
+        from app.ui.icons import line_pixmap
+        t = self._frame / 60.0
+        cx, cy = self.width() / 2, self.height() / 2
+        for k in range(2):
+            phase = (t * 0.6 + k / 2.0) % 1.0
+            c = QColor(self._purple)
+            c.setAlpha(int(90 * (1 - phase)))
+            p.setPen(QPen(c, 2))
+            p.setBrush(Qt.NoBrush)
+            p.drawEllipse(QPointF(cx, cy), 34 + phase * 22, 34 + phase * 22)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor("#252535"))
+        p.drawEllipse(QPointF(cx, cy), 34, 34)
+        pm = line_pixmap(self._art_arg, 34, "#B39DDB")
+        p.drawPixmap(QPointF(cx - 17, cy - 17), pm)
+
+    def _draw_logos(self, p: QPainter):
+        """Claude Code and Codex, side by side."""
+        from app.ui.agents_view import agent_logo as logo
+        cx, cy = self.width() / 2, self.height() / 2
+        for dx, agent in ((-50, "claude"), (50, "codex")):
             p.setPen(Qt.NoPen)
-            p.setBrush(QColor(0, 0, 0, 25))
-            p.drawRoundedRect(QRectF(curr_x + 1, ky + 3, kw, key_h), 8, 8)
-            
-            # Key background
-            key_bg = QColor("#252535") if press_offset < 1 else QColor("#2A2040")
-            p.setBrush(key_bg)
-            p.setPen(QPen(QColor("#B39DDB"), 2))
-            p.drawRoundedRect(QRectF(curr_x, ky, kw, key_h), 8, 8)
-            
-            # Key label
-            p.setPen(self._purple)
-            font = QFont("Segoe UI", 14 if key == "H" else 11, QFont.Bold)
-            p.setFont(font)
-            p.drawText(QRectF(curr_x, ky, kw, key_h), Qt.AlignCenter, key)
-            
-            curr_x += kw + 6
-            
-            # Plus sign between keys
-            if i < len(keys) - 1:
-                p.setPen(QColor("#7A7A90"))
-                font = QFont("Segoe UI", 13, QFont.Bold)
-                p.setFont(font)
-                p.drawText(QRectF(curr_x - 2, key_y, 16, key_h), Qt.AlignCenter, "+")
-                curr_x += 16
-        
-        # "Try it now!" prompt at bottom with bounce
-        bounce = 2 * math.sin(t * 4)
-        p.setPen(self._purple)
-        font = QFont("Segoe UI", 9)
-        p.setFont(font)
-        p.drawText(QRectF(0, h - 26 + bounce, w, 20), Qt.AlignCenter, "👆 Try it now — works from any screen!")
+            p.setBrush(QColor("#252535"))
+            p.drawRoundedRect(QRectF(cx + dx - 36, cy - 36, 72, 72), 18, 18)
+            pm = logo(agent, 40)
+            if pm is not None:
+                p.drawPixmap(QPointF(cx + dx - 20, cy - 20), pm)
 
 
 class OnboardingOverlay(QDialog):
@@ -771,103 +604,121 @@ class OnboardingOverlay(QDialog):
     finished_onboarding = Signal()
     remind_later = Signal()  # Signal for "remind me later"
     
-    def __init__(self, main_window):
+    def __init__(self, main_window, steps=None, tour=None):
+        """tour: a page's own tour (page_tours.py): the same panel with `steps`, no sections, nothing saved."""
         super().__init__(main_window)
         self.main_window = main_window
+        self._tour = tour
         self.current_step = 0
         self.drag_position = None
         self.is_minimized = False  # For "Try It" mode
-        
-        # Steps definition with shorter, bullet-point text
-        # nav_index: 0=Search, 1=Organize, 2=Analyze Files, 3=Voice, 4=Settings
-        # highlight: attribute name on main_window to spotlight (dotted path ok)
+        self._dragged = False
+
+        lp = getattr(main_window, "live_page", None)
+        self._was_listening = bool(getattr(getattr(lp, "listener", None), "on", False))
+
+        # section: the chip it belongs to. nav_index: the page behind it (page numbers, not sidebar order).
+        # highlight: attribute path on main_window to spotlight. not_ready: what changes if no agent is set up.
         self.steps = [
             {
-                "title": "Welcome to Filect! 🎉",
-                "description": "• Quick tour of key features\n• Takes about 30 seconds\n• Use ← → keys to navigate",
+                "art": "welcome",
+                "title": "Control your entire computer by voice",
+                "description": "• Find your files, run AI agents, and work across your apps\n• Just by speaking\n• Takes about a minute",
                 "nav_index": None,
                 "button_text": "Let's Go!",
-                "show_try_it": False,
-                "highlight": "__full_dim__"
+                "highlight": None,
             },
             {
-                "title": "🔍 Smart Search",
-                "description": "• Find files by content, not just names\n• Try: \"vacation photo\" or \"tax document\"\n• AI understands what's inside files",
-                "nav_index": 0,
+                "section": "agents",
+                "art": "assistant",
+                "title": "Talk, and it gets done",
+                "description": "• Click Start listening and say what you want\n• Claude Code or Codex does the work\n• The card at the top of your screen shows what's happening",
+                "nav_index": 6,
                 "button_text": "Next",
                 "show_try_it": True,
-                "highlight": "search_input"
+                "highlight": "live_page.start_btn",
+                "interactive": "assistant",
+                "not_ready": {
+                    "title": "Set up your agent",
+                    "description": "• The agents run on your own Claude Code or Codex\n• Neither is set up on this computer yet\n• One click opens the setup, or do it later",
+                    "button_text": "Later",
+                    "show_try_it": False,
+                    "highlight": None,
+                },
             },
             {
-                "title": "🗂️ Organize Files",
-                "description": "• Select a destination folder\n• Click \"Generate Plan\"\n• Review suggestions & apply",
-                "nav_index": 1,
-                "sub_tab": 0,
+                "section": "agents",
+                "art": "agents",
+                "title": "Every job gets its own chat",
+                "description": "• See what each agent is doing\n• Run several at once\n• Follow up on any of them, by typing or by voice",
+                "nav_index": 5,
                 "button_text": "Next",
-                "show_try_it": True,
-                "highlight": "organize_page.content_stack"
+                "highlight": None,
             },
             {
-                "title": "⚡ Auto-Organize",
-                "description": "• Set it and forget it\n• Files sorted automatically on arrival\n• Configure watched folders here",
-                "nav_index": 1,
-                "sub_tab": 1,
-                "button_text": "Next",
-                "show_try_it": True,
-                "highlight": "organize_page.watch_card"
-            },
-            {
-                "title": "📁 Index Files",
-                "description": "• AI learns about your files first\n• Drop a folder here, or click to browse\n• Required before search/organize",
-                "nav_index": 2,
-                "button_text": "Next",
-                "show_try_it": True,
-                "highlight": "drop_zone"
-            },
-            {
-                "title": "🎤 Talk to Filect",
-                "description": "• Hold Ctrl+Win to dictate anywhere\n• Add Shift to search, Alt to organize — by voice\n• Custom words, language & cleanup live here",
+                "section": "voice",
+                "art": "voice",
+                "title": "Hold Ctrl + Win and talk",
+                "description": "Hold Ctrl + Win, say something, and let go. Your words appear wherever you're typing, in any app. Try it here:",
                 "nav_index": 3,
                 "button_text": "Next",
-                "show_try_it": False,
-                "highlight": "voice_shortcuts_card"
+                "highlight": None,
+                "interactive": "dictation",
             },
             {
-                "title": "✨ AI Cleanup (optional)",
-                "description": "• Off by default — your dictation stays instant\n• Turn it on to auto-format dates & emails and strip filler\n• Adds ~1s per dictation — flip it on here anytime",
-                "nav_index": 3,
-                "button_text": "Next",
-                "show_try_it": False,
-                "highlight": "voice_cleanup_card"
-            },
-            {
-                "title": "🗣️ Teach Filect your words",
+                "section": "voice",
+                "art": "voice",
+                "title": "Teach Filect your words (optional)",
                 "description": "Tell us your field and we'll suggest words to spell right.",
                 "nav_index": None,
                 "button_text": "Next",
-                "show_try_it": False,
                 "interactive": "vocab",
-                "highlight": "__full_dim__"
+                "highlight": None,
             },
             {
-                "title": "⚙️ Settings",
-                "description": "• Protect files from being moved\n• Add exclusion patterns (.json, .py)\n• Configure app behavior",
-                "nav_index": 4,
+                "section": "files",
+                "art": "index",
+                "title": "Add a folder",
+                "description": "• Filect reads what's inside your files\n• Add a folder to get started\n• Search needs this first",
+                "nav_index": 2,
                 "button_text": "Next",
-                "show_try_it": False,
-                "highlight": "exclusion_input"
+                "show_try_it": True,
+                "highlight": "drop_zone",
             },
             {
-                "title": "✅ Organize something now",
-                "description": "• Type what you want in plain English\n• e.g. \"group my screenshots by month\"\n• Then Generate Plan & apply",
+                "section": "files",
+                "art": "search",
+                "title": "Find any file",
+                "description": "• Describe it in your own words\n• Filect finds it, even by what's inside\n• By voice: hold Ctrl + Win + Shift and say it",
+                "nav_index": 0,
+                "button_text": "Next",
+                "show_try_it": True,
+                "highlight": "search_input",
+            },
+            {
+                "section": "files",
+                "art": "organize",
+                "title": "Sort a whole folder",
+                "description": "• Pick a folder and Filect sorts it into subfolders\n• You see the plan before anything moves, and can undo it\n• By voice: hold Ctrl + Win + Alt and name the folder",
                 "nav_index": 1,
                 "sub_tab": 0,
-                "button_text": "Start Organizing",
-                "show_try_it": False,
-                "highlight": "organize_page.instruction_input"
-            }
+                "button_text": "Next",
+                "show_try_it": True,
+                "highlight": "organize_page.dest_card",
+            },
+            {
+                "art": "welcome",
+                "title": "You're ready",
+                "description": "• Hold Ctrl + Win to talk in any app\n• More shortcuts: \"See what it can do\" on the Assistant page\n• This guide is in Settings any time",
+                "nav_index": None,
+                "button_text": "Start",
+                "highlight": None,
+            },
         ]
-        
+
+        if tour:
+            self.steps = steps
+
         # Spotlight overlay for Phase 3
         self.spotlight = None
         
@@ -878,14 +729,17 @@ class OnboardingOverlay(QDialog):
     def _setup_ui(self):
         """Set up the UI components"""
         # Window settings
-        self.setWindowFlags(Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
+        # (Windows: a Tool window owned by the main window stays above it; "always on top" would float the guide
+        # over every other app too, e.g. while you try dictating somewhere else.)
+        self.setWindowFlags(Qt.Tool | Qt.FramelessWindowHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
-        self.setFixedSize(520, 620)
+        w, h = (480, 480) if self._tour else (520, 620)    # (a page tour has no sections or try-it box: smaller)
+        self.setFixedSize(w, h)
         
         # Main container with shadow
         self.container = QFrame(self)
         self.container.setObjectName("onboardingContainer")
-        self.container.setGeometry(10, 10, 500, 600)
+        self.container.setGeometry(10, 10, w - 20, h - 20)
         
         # Add shadow effect
         shadow = QGraphicsDropShadowEffect()
@@ -904,12 +758,18 @@ class OnboardingOverlay(QDialog):
         header = QHBoxLayout()
         header.setSpacing(8)
         
-        self.step_label = QLabel("Step 1 of 7")
+        self.step_label = QLabel(f"Step 1 of {len(self.steps)}")
         self.step_label.setObjectName("stepLabel")
         header.addWidget(self.step_label)
         
         header.addStretch()
-        
+
+        self.skip_btn = QPushButton("Skip this section")
+        self.skip_btn.setObjectName("remindButton")
+        self.skip_btn.setCursor(Qt.PointingHandCursor)
+        self.skip_btn.clicked.connect(self._skip_section)
+        header.addWidget(self.skip_btn)
+
         # Remind Me Later button (replaces Skip)
         self.remind_btn = QPushButton("⏰ Remind Me Later")
         self.remind_btn.setObjectName("remindButton")
@@ -927,7 +787,30 @@ class OnboardingOverlay(QDialog):
         self.progress_bar.setMinimum(0)
         self.progress_bar.setMaximum(100)
         layout.addWidget(self.progress_bar)
-        
+
+        # The three sections: where you are, and a way to jump to any of them.
+        chips = QHBoxLayout()
+        chips.setSpacing(6)
+        self._chips = {}
+        for key, label in (("agents", "Agents"), ("voice", "Your voice"), ("files", "Your files")):
+            b = QPushButton(label)
+            b.setObjectName("sectionChip")
+            b.setCheckable(True)
+            b.setFocusPolicy(Qt.NoFocus)
+            b.setCursor(Qt.PointingHandCursor)
+            b.clicked.connect(lambda _=False, k=key: self._go_section(k))
+            chips.addWidget(b, 1)
+            self._chips[key] = b
+        layout.addLayout(chips)
+        if self._tour:
+            for b in self._chips.values():
+                b.hide()
+            self.remind_btn.setText("✕ Close")
+
+        # Center the title + animation + description as one balanced block (a matching
+        # stretch sits after the description) so short steps aren't top-heavy.
+        layout.addStretch(1)
+
         # Title
         self.title_label = QLabel("Welcome!")
         self.title_label.setObjectName("titleLabel")
@@ -936,7 +819,7 @@ class OnboardingOverlay(QDialog):
         
         # Animation widget
         self.anim_widget = OnboardingAnimation(self.container)
-        self.anim_widget.setFixedSize(440, 130)
+        self.anim_widget.setFixedSize(w - 80, 130)
         layout.addWidget(self.anim_widget, 0, Qt.AlignCenter)
         
         # Description
@@ -944,7 +827,7 @@ class OnboardingOverlay(QDialog):
         self.desc_label.setObjectName("descLabel")
         self.desc_label.setWordWrap(True)
         self.desc_label.setAlignment(Qt.AlignTop | Qt.AlignLeft)
-        layout.addWidget(self.desc_label, 1)
+        layout.addWidget(self.desc_label)
 
         # Interactive vocabulary panel — shown ONLY on the custom-words step so the user
         # types their field and picks suggested terms right here, instead of a spotlight
@@ -954,8 +837,40 @@ class OnboardingOverlay(QDialog):
         self.vocab_panel.setVisible(False)
         layout.addWidget(self.vocab_panel)
 
+        # Dictation step: a real box, so holding Ctrl + Win types into it like any other app.
+        self.try_box = QPlainTextEdit(self.container)
+        self.try_box.setObjectName("tryBox")
+        self.try_box.setPlaceholderText("Click here if you need to, then hold Ctrl + Win and talk")
+        self.try_box.setFixedHeight(92)
+        self.try_box.setVisible(False)
+        layout.addWidget(self.try_box)
+        self.try_ok = QLabel("✓ That's it. It works the same in any app.")
+        self.try_ok.setObjectName("tryOk")
+        self.try_ok.setVisible(False)
+        layout.addWidget(self.try_ok)
+        self.try_box.textChanged.connect(lambda: self.try_ok.setVisible(bool(self.try_box.toPlainText().strip())))
+
+        # Assistant step when no agent is set up: the same one-click setup as the Agents page.
+        self.setup_row = QWidget(self.container)
+        row = QHBoxLayout(self.setup_row)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(8)
+        for agent, label in (("claude", "Set up Claude Code"), ("codex", "Set up Codex")):
+            b = QPushButton(label)
+            b.setObjectName("tryButton")
+            b.setCursor(Qt.PointingHandCursor)
+            b.clicked.connect(lambda _=False, a=agent: self.main_window.assistant_page.setup_agent(a))
+            row.addWidget(b, 1)
+        self.setup_row.setVisible(False)
+        layout.addWidget(self.setup_row)
+        ap = getattr(self.main_window, "assistant_page", None)
+        if hasattr(ap, "agents_setup_changed"):
+            ap.agents_setup_changed.connect(self._on_agents_changed)
+
+        layout.addStretch(1)
+
         # Keyboard hint
-        self.keyboard_hint = QLabel("💡 Use ← → arrow keys  •  Esc to skip")
+        self.keyboard_hint = QLabel("💡 Use ← → arrow keys  •  Esc to " + ("close" if self._tour else "skip"))
         self.keyboard_hint.setObjectName("keyboardHint")
         self.keyboard_hint.setAlignment(Qt.AlignCenter)
         layout.addWidget(self.keyboard_hint)
@@ -985,17 +900,40 @@ class OnboardingOverlay(QDialog):
         self.next_btn.setCursor(Qt.PointingHandCursor)
         self.next_btn.clicked.connect(self._go_next)
         nav_layout.addWidget(self.next_btn)
+        # Windows: a clicked button takes the keyboard focus, and a focused button spends ← → on moving the focus to
+        # the next button - after clicking Next or Continue Tour the arrows did nothing (seen live). The panel's own
+        # buttons never take the focus, so ← → Return Esc always reach the panel. (The text boxes keep theirs.)
+        for b in [self.skip_btn, self.remind_btn, self.back_btn, self.try_btn, self.next_btn] + \
+                self.setup_row.findChildren(QPushButton):
+            b.setFocusPolicy(Qt.NoFocus)
         
         layout.addLayout(nav_layout)
         
-        # Minimized "Continue" button (shown when trying features)
-        self.continue_btn = QPushButton("▶ Continue Tour")
-        self.continue_btn.setObjectName("continueButton")
+        # Shown while you Try It. It lives on the main window, so the guide's stylesheet doesn't reach it: it has its own.
+        self.continue_btn = QPushButton("▶ Continue Tour", self.main_window)
         self.continue_btn.setCursor(Qt.PointingHandCursor)
         self.continue_btn.clicked.connect(self._restore_from_try)
-        self.continue_btn.setFixedSize(140, 40)
-        self.continue_btn.setParent(self.main_window)
+        self.continue_btn.setStyleSheet(
+            "QPushButton { background-color: #7C4DFF; border: none; border-radius: 20px; color: white;"
+            " font-size: 13px; font-weight: 600; padding: 0 22px; }"
+            " QPushButton:hover { background-color: #9575FF; }")
+        self.continue_btn.ensurePolished()
+        self.continue_btn.setFixedSize(self.continue_btn.sizeHint().width(), 40)
         self.continue_btn.hide()
+        # The window going full screen or changing size: the dim, the cutout and this button follow it.
+        self._highlight = None
+        self._follow_timer = QTimer(self, singleShot=True, interval=80, timeout=self._follow_window)
+        self.main_window.installEventFilter(self)
+        # However it closes (a button, Esc, or reject() from code: a second tour opening), the dim and the Continue
+        # pill go with it - they live on the main window, so they'd stay and leave the app dark. (A Mac open item.)
+        self.finished.connect(self._closed)
+
+    def _closed(self, *_):
+        self.is_minimized = False
+        self.continue_btn.hide()
+        if self.spotlight:
+            self.spotlight.hide()
+        self.anim_widget.stop()
     
     def _apply_styling(self):
         """Apply theme-aware styling"""
@@ -1026,6 +964,43 @@ class OnboardingOverlay(QDialog):
                 line-height: 1.6;
             }}
             
+            QPushButton#sectionChip {{
+                background-color: transparent;
+                border: 1px solid {c['border_strong']};
+                border-radius: 9px;
+                color: {c['text_muted']};
+                font-size: 12px;
+                font-weight: 600;
+                padding: 5px 8px;
+            }}
+            QPushButton#sectionChip:hover {{
+                border-color: #7C4DFF;
+                color: #7C4DFF;
+            }}
+            QPushButton#sectionChip:checked {{
+                background-color: rgba(124, 77, 255, 0.14);
+                border-color: #7C4DFF;
+                color: #7C4DFF;
+            }}
+
+            QPlainTextEdit#tryBox {{
+                background-color: {c['input_bg']};
+                border: 1px solid {c['border_strong']};
+                border-radius: 10px;
+                color: {c['text']};
+                font-size: 14px;
+                padding: 8px;
+            }}
+            QPlainTextEdit#tryBox:focus {{
+                border-color: #7C4DFF;
+            }}
+
+            QLabel#tryOk {{
+                color: #4CAF50;
+                font-size: 13px;
+                font-weight: 600;
+            }}
+
             QLabel#keyboardHint {{
                 color: {c['text_muted']};
                 font-size: 11px;
@@ -1099,49 +1074,34 @@ class OnboardingOverlay(QDialog):
             QPushButton#nextButton:hover {{
                 background-color: #9575FF;
             }}
-            
-            QPushButton#continueButton {{
-                background-color: #7C4DFF;
-                border: none;
-                border-radius: 20px;
-                color: white;
-                font-size: 13px;
-                font-weight: 600;
-            }}
-            QPushButton#continueButton:hover {{
-                background-color: #9575FF;
-            }}
         """)
     
-    # Telemetry slugs — MUST match the order of ``self.steps``. Used by
-    # _update_step / _finish_tour / _remind_later to label the step in the
-    # ``onboarding_step_viewed`` / ``onboarding_dismissed`` events.
+    # Stable slugs so analytics aren't broken by future title rewordings.
     _STEP_SLUGS = [
-        "welcome", "smart_search", "organize_files",
-        "auto_organize", "index_files", "voice", "cleanup", "custom_words", "settings", "ready",
+        "welcome", "assistant", "agents", "dictation", "custom_words", "add_folder", "search", "organize", "done",
     ]
 
     def _update_step(self):
         """Update the UI for the current step"""
-        # Telemetry: emit before any UI updates so we record the view even
-        # if a downstream render bug throws.
-        try:
+        step = self.steps[self.current_step]
+        kind = step.get("interactive")
+        needs_agent = "not_ready" in step and not self._agent_ready()
+        if needs_agent:
+            step = {**step, **step["not_ready"]}
+        if kind != "assistant" and not self._tour:    # (a page tour never turns off what you started)
+            self._stop_listening_if_tour_started_it()
+
+        # Funnel signal — fires every time a step is actually rendered (including
+        # re-renders from going back). max(step_index) per user = where they got
+        # to. Total step events show navigation patterns.
+        try:                                       # (page tours aren't part of the first-run funnel)
             from app.core.supabase_client import track
-            slug = (
-                self._STEP_SLUGS[self.current_step]
-                if self.current_step < len(self._STEP_SLUGS)
-                else "unknown"
-            )
-            track(
-                "onboarding_step_viewed",
-                step=slug,
-                step_index=self.current_step,
-                total_steps=len(self.steps),
-            )
+            slug = self._STEP_SLUGS[self.current_step] if self.current_step < len(self._STEP_SLUGS) else "unknown"
+            if not self._tour:
+                track("onboarding_step_viewed", step=slug, step_index=self.current_step,
+                      total_steps=len(self.steps))
         except Exception:
             pass
-
-        step = self.steps[self.current_step]
 
         # Update labels
         self.step_label.setText(f"Step {self.current_step + 1} of {len(self.steps)}")
@@ -1158,120 +1118,157 @@ class OnboardingOverlay(QDialog):
         
         # Update remind button visibility (hide on last step)
         self.remind_btn.setVisible(self.current_step < len(self.steps) - 1)
+
+        section = step.get("section")
+        self.skip_btn.setVisible(section is not None)
+        for key, chip in self._chips.items():
+            chip.setChecked(key == section)
         
         # Update Try It button visibility
         self.try_btn.setVisible(step.get("show_try_it", False))
         
         # Update animation
-        self.anim_widget.set_step(self.current_step)
+        self.anim_widget.set_art(step["art"])
 
         # Interactive vocab step: swap the animation + description for the live suggest panel.
-        is_vocab = step.get("interactive") == "vocab"
+        is_vocab = kind == "vocab"
+        is_box = kind == "dictation"
         self.vocab_panel.setVisible(is_vocab)
-        self.anim_widget.setVisible(not is_vocab)
+        self.anim_widget.setVisible(not is_vocab and not is_box)
         self.desc_label.setVisible(not is_vocab)
-        self.keyboard_hint.setVisible(not is_vocab)
+        self.keyboard_hint.setVisible(not is_vocab and not is_box)
+        self.try_box.setVisible(is_box)
+        self.try_ok.setVisible(is_box and bool(self.try_box.toPlainText().strip()))
+        self.setup_row.setVisible(needs_agent)
+        if is_box:                                    # (it has to be the focused box for Ctrl + Win to type into it)
+            self.activateWindow()
+            self.try_box.setFocus()
+        elif not is_vocab:
+            # Off the typing screens the panel has the keyboard again: a hidden box keeps the focus otherwise and
+            # eats ← → Return (seen live on Windows: after the custom-words screen, Return did nothing).
+            self.setFocus(Qt.OtherFocusReason)
 
         # Navigate to the appropriate page in the app
         nav_index = step["nav_index"]
         if nav_index is not None:
             if hasattr(self.main_window, 'page_stack'):
                 self.main_window.page_stack.setCurrentIndex(nav_index)
-            if hasattr(self.main_window, 'nav_buttons') and nav_index < len(self.main_window.nav_buttons):
-                self.main_window.nav_buttons[nav_index].setChecked(True)
+            # Check the sidebar button OF that page (the sidebar order isn't the page order: the button group
+            # has each button under its page number).
+            group = getattr(self.main_window, 'nav_button_group', None)
+            b = group.button(nav_index) if group is not None else None
+            if b is not None:
+                b.setChecked(True)
         
         # Handle sub-tab switching for Organize page
         sub_tab = step.get("sub_tab")
         if sub_tab is not None and hasattr(self.main_window, 'organize_page'):
             self.main_window.organize_page._switch_tab(sub_tab)
         
-        # Phase 3: Update spotlight overlay
-        self._update_spotlight(step.get("highlight"))
-    
-    def _update_spotlight(self, highlight_attr):
-        """Update the spotlight overlay to highlight a widget"""
-        # Hide existing spotlight when not needed or on certain steps
-        if not highlight_attr:
-            if self.spotlight:
-                self.spotlight.hide()
-            return
+        # The app is always dimmed behind the guide; a screen that points at something gets a bright cutout.
+        self._highlight = step.get("highlight")
+        self._update_spotlight(self._highlight)
 
-        # Full-screen dim with NO hole — used on the Welcome step so the whole
-        # app fades back and attention lands on the onboarding card itself.
-        if highlight_attr == "__full_dim__":
-            if not self.spotlight:
-                self.spotlight = SpotlightOverlay(self.main_window)
-            self.spotlight.setGeometry(self.main_window.rect())
-            self.spotlight.set_spotlight(None)   # None -> paintEvent fills the whole rect
-            self.spotlight.show()
-            self.spotlight.raise_()
-            self.raise_()   # keep the onboarding card above the dim
-            return
+    def _show_full_dim(self):
+        """Dim the entire app behind the dialog (no bright cutout) so the interactive
+        onboarding step gets the user's full attention."""
+        if not self.spotlight:
+            self.spotlight = SpotlightOverlay(self.main_window)
+        self.spotlight.setGeometry(self.main_window.rect())
+        self.spotlight.set_spotlight(None)   # None -> fills the whole window, no cutout
+        self.spotlight.show()
+        self.spotlight.raise_()
+        self.raise_()
 
-        # Get the widget to highlight - supports dot-path like "organize_page.content_stack"
-        target_widget = None
-        parts = highlight_attr.split(".")
+    def _resolve(self, path):
+        """"organize_page.dest_card" → that widget; a number picks from a list ("live_page.tab_btns.1")."""
         obj = self.main_window
-        for part in parts:
-            if hasattr(obj, part):
-                obj = getattr(obj, part)
-            else:
-                obj = None
-                break
-        target_widget = obj
-        
-        if not target_widget:
-            if self.spotlight:
-                self.spotlight.hide()
+        for part in path.split("."):
+            try:
+                obj = obj[int(part)] if part.isdigit() else getattr(obj, part)
+            except (AttributeError, IndexError, TypeError):
+                return None
+        return obj
+
+    def _update_spotlight(self, highlight):
+        """Dim the app; a bright cutout around what this screen points at: one path, or several (their union;
+        whichever are showing). Nothing showing (e.g. Mute while the Assistant is off) = the whole app dimmed."""
+        from PySide6.QtWidgets import QScrollArea, QApplication, QWidget
+        paths = list(highlight) if isinstance(highlight, (list, tuple)) else [highlight] if highlight else []
+        targets = [w for w in map(self._resolve, paths) if isinstance(w, QWidget) and w.isVisible() and w.width() > 0]
+        if not targets:
+            self._show_full_dim()
+            self._place(None)
             return
-
-        # If the target lives inside a scroll area (e.g. the AI Cleanup card at
-        # the bottom of the Voice page), scroll it into view FIRST — otherwise the
-        # spotlight lands on a card stuck below the fold. Walk up to the enclosing
-        # scroll area and pull the widget toward the centre of the viewport.
-        try:
-            from PySide6.QtWidgets import QAbstractScrollArea
-            from PySide6.QtWidgets import QApplication as _QApp
-            anc = target_widget.parentWidget()
-            scroller = None
-            while anc is not None:
-                if isinstance(anc, QAbstractScrollArea):
-                    scroller = anc
-                    break
-                anc = anc.parentWidget()
-            if scroller is not None:
-                vp = scroller.viewport()
-                vp_h = vp.height()
-                # Only scroll if the card isn't already fully inside the viewport,
-                # so steps that were already well-placed are left untouched.
-                top = target_widget.mapTo(vp, QPoint(0, 0)).y()
-                bottom = top + target_widget.height()
-                if top < 0 or bottom > vp_h:
-                    # A ymargin near half the viewport centres the card rather
-                    # than nudging it barely into view at the bottom edge.
-                    scroller.ensureWidgetVisible(target_widget, 0, max(80, vp_h // 2))
-                    _QApp.processEvents()
-        except Exception:
-            pass
-
-        # Create spotlight if needed
         if not self.spotlight:
             self.spotlight = SpotlightOverlay(self.main_window)
 
-        # Position and show spotlight
-        self.spotlight.setGeometry(self.main_window.rect())
+        # Inside a scroll area (a card below the fold): scroll it into view first.
+        anc = targets[0].parentWidget()
+        while anc is not None:
+            if isinstance(anc, QScrollArea):
+                bar = anc.verticalScrollBar()            # (near the top: room under it for the panel)
+                bar.setValue(targets[0].mapTo(anc.widget(), QPoint(0, 0)).y() - 24)
+                anc.ensureWidgetVisible(targets[0], 40, 40)
+                QApplication.processEvents()
+                break
+            anc = anc.parentWidget()
 
-        # Get widget rect relative to main window
-        widget_pos = target_widget.mapTo(self.main_window, QPoint(0, 0))
-        widget_rect = QRect(widget_pos.x(), widget_pos.y(), target_widget.width(), target_widget.height())
-        
-        self.spotlight.set_spotlight(widget_rect)
+        self.spotlight.setGeometry(self.main_window.rect())
+        local, screen = QRect(), QRect()
+        for w in targets:
+            local = local.united(QRect(w.mapTo(self.main_window, QPoint(0, 0)), w.size()))
+            screen = screen.united(QRect(w.mapToGlobal(QPoint(0, 0)), w.size()))
+        self.spotlight.set_spotlight(local)
         self.spotlight.show()
         self.spotlight.raise_()
-        
-        # Make sure our panel is above the spotlight
-        self.raise_()
-    
+        self._place(screen)
+        self.raise_()                              # (the panel above the dim)
+
+    def _place(self, target):
+        """The corner of the window that hides least of `target` (bottom-right when it's a tie or there's none).
+        Left alone once you've dragged it."""
+        self._target = target                      # (showing the panel places it for this, not for "nothing")
+        if self._dragged or not self.main_window:
+            return
+        geo = self.main_window.geometry()
+        xs = (geo.right() - self.width() - 30, geo.left() + 20)
+        ys = (geo.bottom() - self.height() - 30, geo.top() + 20)
+        corners = [QRect(x, y, self.width(), self.height()) for y in ys for x in xs]
+
+        def hidden(r):
+            i = r.intersected(target) if target is not None else QRect()
+            return i.width() * i.height()
+        self.move(min(corners, key=hidden).topLeft())    # (min keeps the first of equals: bottom-right)
+
+    def _agent_ready(self) -> bool:
+        """Claude Code or Codex is set up. Before the first check comes back, what the last one found."""
+        from app.core.settings import settings
+        from app.ui.agents_view import needs_setup
+        state = getattr(getattr(self.main_window, "assistant_page", None), "_agents_state", None)
+        return not needs_setup(state) if state else settings.agent_was_ready
+
+    def _on_agents_changed(self, _state):
+        if self.isVisible() and "not_ready" in self.steps[self.current_step]:
+            self._update_step()
+
+    def _stop_listening_if_tour_started_it(self):
+        """Tried the Assistant and moved on: it mustn't act on whatever's said during the rest of the tour."""
+        lp = getattr(self.main_window, "live_page", None)
+        listener = getattr(lp, "listener", None)
+        if listener is not None and listener.on and not self._was_listening:
+            lp.stop()
+
+    def _go_section(self, key):
+        self.current_step = next(i for i, s in enumerate(self.steps) if s.get("section") == key)
+        self._update_step()
+
+    def _skip_section(self):
+        section = self.steps[self.current_step].get("section")
+        while self.steps[self.current_step].get("section") == section:
+            self.current_step += 1
+        self._update_step()
+
     def _go_next(self):
         """Go to the next step or finish"""
         if self.current_step < len(self.steps) - 1:
@@ -1295,60 +1292,80 @@ class OnboardingOverlay(QDialog):
         if self.spotlight:
             self.spotlight.hide()
         
-        # Show the "Continue Tour" button at bottom-right
-        if self.main_window:
-            main_geo = self.main_window.geometry()
-            btn_x = main_geo.width() - self.continue_btn.width() - 20
-            btn_y = main_geo.height() - self.continue_btn.height() - 20
-            self.continue_btn.move(btn_x, btn_y)
-            self.continue_btn.show()
-            self.continue_btn.raise_()
-    
+        self._place_continue()
+        self.continue_btn.show()
+
+    def _place_continue(self):
+        """Bottom-right corner of the window, on top of everything in it."""
+        r, b = self.main_window.rect(), self.continue_btn
+        b.move(r.width() - b.width() - 20, r.height() - b.height() - 20)
+        b.raise_()
+
+    def eventFilter(self, obj, event):
+        if obj is self.main_window and event.type() == QEvent.Resize and (self.isVisible() or self.is_minimized):
+            self._follow_timer.start()            # (once the window's layout has settled)
+        return super().eventFilter(obj, event)
+
+    def _follow_window(self):
+        if self.is_minimized:
+            self._place_continue()
+        elif self.isVisible():
+            self._update_spotlight(self._highlight)
+
     def _restore_from_try(self):
         """Restore the onboarding panel after trying"""
         self.is_minimized = False
         self.continue_btn.hide()
         self.show()
         self.raise_()
-        # Re-show spotlight
-        step = self.steps[self.current_step]
-        self._update_spotlight(step.get("highlight"))
+        self.activateWindow()                         # (Windows: so ← → and Esc reach it again, as when it opened)
+        self._update_spotlight(self._highlight)
     
     def _remind_later(self):
-        """Remind the user later instead of skipping entirely"""
+        """Remind the user later instead of skipping entirely. On a page tour: Close."""
+        if self._tour:
+            self._end_page_tour("page_tour_closed", step=self.current_step + 1)
+            return
         try:
             from app.core.supabase_client import track
-            slug = (
-                self._STEP_SLUGS[self.current_step]
-                if self.current_step < len(self._STEP_SLUGS)
-                else "unknown"
-            )
-            track(
-                "onboarding_dismissed",
-                step=slug,
-                step_index=self.current_step,
-                total_steps=len(self.steps),
-            )
+            slug = self._STEP_SLUGS[self.current_step] if self.current_step < len(self._STEP_SLUGS) else "unknown"
+            track("onboarding_dismissed", step=slug, step_index=self.current_step,
+                  total_steps=len(self.steps))
         except Exception:
             pass
-
         if self.spotlight:
             self.spotlight.hide()
         self.remind_later.emit()
         self.reject()
 
+    def _end_page_tour(self, event, **props):
+        try:
+            from app.core.supabase_client import track
+            track(event, page=self._tour, **props)
+        except Exception:
+            pass
+        self.continue_btn.hide()
+        if self.spotlight:
+            self.spotlight.hide()
+        self.accept()
+
     def _finish_tour(self):
         """Complete the onboarding with celebration"""
+        if self._tour:
+            self._end_page_tour("page_tour_completed")
+            return
         try:
             from app.core.supabase_client import track
             track("onboarding_completed", total_steps=len(self.steps))
         except Exception:
             pass
-
         self.continue_btn.hide()
         if self.spotlight:
             self.spotlight.hide()
         self._show_confetti()  # Phase 4: Confetti celebration!
+        opening = self.main_window.nav_button_group.button(6 if self._agent_ready() else 0)
+        if opening is not None:                       # (where Filect itself would open)
+            opening.click()
         self.finished_onboarding.emit()
         self.accept()
     
@@ -1373,6 +1390,7 @@ class OnboardingOverlay(QDialog):
     def mouseMoveEvent(self, event):
         """Handle dragging"""
         if event.buttons() == Qt.LeftButton and self.drag_position:
+            self._dragged = True
             self.move(event.globalPosition().toPoint() - self.drag_position)
             event.accept()
     
@@ -1381,14 +1399,18 @@ class OnboardingOverlay(QDialog):
         self.drag_position = None
     
     def showEvent(self, event):
-        """Position the panel when shown"""
+        """Position the panel when shown - for what the step points at. (It was "nothing": every tour's first step
+        jumped to the bottom-right corner, over its own target - 54% of the search box hidden, seen live.)"""
         super().showEvent(event)
-        # Position at bottom-right of main window
-        if self.main_window:
-            main_geo = self.main_window.geometry()
-            x = main_geo.right() - self.width() - 30
-            y = main_geo.bottom() - self.height() - 30
-            self.move(x, y)
+        self._place(getattr(self, "_target", None))
+        QTimer.singleShot(0, self._take_keyboard)
+
+    def _take_keyboard(self):
+        """Windows shows a Tool window WITHOUT activating it (Qt: SW_SHOWNOACTIVATE), so a tour opened from its
+        button left the keyboard in the main window: "Esc to close" and the arrows did nothing (seen live)."""
+        if self.isVisible():
+            self.raise_()
+            self.activateWindow()
     
     def closeEvent(self, event):
         """Clean up when closing"""
@@ -1522,7 +1544,7 @@ class SpotlightOverlay(QWidget):
         self.setAttribute(Qt.WA_TransparentForMouseEvents)
         
         self.spotlight_rect = None
-        self.opacity = 0.5
+        self.opacity = 0.65
         
         if parent:
             self.setGeometry(parent.rect())

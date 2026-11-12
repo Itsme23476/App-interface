@@ -86,6 +86,9 @@ class Settings:
         self.assistant_router_model: str = 'opus'   # model for the voice intent router
         self.agents_list_collapsed: bool = True     # Agents page: the chat list starts hidden for a new user
         self.agents_tour_seen: bool = False         # Agents page: "See what it can do" stops glowing once opened
+        self.agent_was_ready: bool = False          # Claude Code or Codex was set up at the last check (the first-run
+                                                    # guide's Assistant screen uses it before the next check is back)
+        self.page_tours_seen: list = []             # the other pages' "See what it can do" tours opened once
         # ======= Filect Assistant (hands-free voice) — keys + defaults copied verbatim from the Mac app =======
         self.live_send_after_sec: float = 2.0       # send after you've stopped talking this long (1–10 s)
         self.live_sensitivity: str = 'medium'       # 'low' (ignores more) | 'medium' | 'high' (picks up softer)
@@ -420,9 +423,12 @@ class Settings:
         for _k in ('assistant_claude_open_in', 'assistant_codex_open_in'):
             if data.get(_k) in ('app', 'terminal'):
                 setattr(self, _k, data[_k])
-        for _k in ('assistant_codex_close_app', 'assistant_auto_open', 'agents_list_collapsed', 'agents_tour_seen'):
+        for _k in ('assistant_codex_close_app', 'assistant_auto_open', 'agents_list_collapsed', 'agents_tour_seen',
+                   'agent_was_ready'):
             if isinstance(data.get(_k), bool):
                 setattr(self, _k, data[_k])
+        if isinstance(data.get('page_tours_seen'), list):
+            self.page_tours_seen = [x for x in data['page_tours_seen'] if isinstance(x, str)]
         try:                                         # Filect Assistant (hands-free)
             if data.get('live_send_after_sec') is not None:
                 self.live_send_after_sec = min(10.0, max(1.0, float(data['live_send_after_sec'])))
@@ -485,6 +491,8 @@ class Settings:
             'assistant_router_model': self.assistant_router_model,
             'agents_list_collapsed': self.agents_list_collapsed,
             'agents_tour_seen': self.agents_tour_seen,
+            'agent_was_ready': self.agent_was_ready,
+            'page_tours_seen': list(self.page_tours_seen),
             'assistant_voice_shortcut': self.assistant_voice_shortcut,
             # Filect Assistant (hands-free)
             'live_send_after_sec': self.live_send_after_sec,
@@ -994,8 +1002,9 @@ class Settings:
             names.append(fnmatch.translate(nc(p)))
             if p.startswith('.') and not p.startswith('.*') and '*' not in p:
                 names.append(fnmatch.translate(nc('*' + p)))          # ".json" means "*.json"
-            if p.startswith('.') and '*' not in p and len(p) <= 5:
-                continue                                              # (extension-only: names only)
+            # (No skip for short dot-patterns any more: ".git" / ".svn" / ".hg" / ".venv" were treated as extensions
+            # and so never matched the FOLDER - files inside .git were organized and indexed. Mac 2026-11-12. An
+            # extension pattern like ".json" can never equal a whole folder name, so it still acts as an extension.)
             paths.append(p)
         join = lambda parts: re.compile("|".join(f"(?:{x})" for x in parts)) if parts else None
         name_re = join(names)
@@ -1034,10 +1043,8 @@ class Settings:
         for pattern in self.exclusion_patterns:
             pattern_lower = pattern.lower()
             
-            # Skip extension-only patterns for path matching (already handled above)
-            if pattern_lower.startswith('.') and '*' not in pattern_lower and len(pattern_lower) <= 5:
-                continue
-            
+            # (".git" & co. must match the FOLDER too - see _exclusion_matchers.)
+
             # Check if pattern matches the full path (for folder paths)
             if fnmatch.fnmatch(file_path_lower, f"*/{pattern_lower}") or fnmatch.fnmatch(file_path_lower, f"*\\{pattern_lower}"):
                 logger.debug(f"Excluding {name} - path matched pattern '{pattern}'")

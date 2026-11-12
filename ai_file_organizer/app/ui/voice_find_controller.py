@@ -175,6 +175,7 @@ class VoiceFindController(QObject):
             self._say("Which one? Say the number.")
             return "find_which"
         path = row["file_path"]
+        self._note(f"Opened {row['file_name']}")
         self.close()
         logger.info(f"[find] opening {path}")
         self.mw.open_file_in_os(path)
@@ -189,6 +190,7 @@ class VoiceFindController(QObject):
             self._say("Which one? Say the number.")
             return "find_which"
         path = row["file_path"]
+        self._note(f"Showed {row['file_name']}")
         self.close()
         logger.info(f"[find] showing where {path} is")
         finder.reveal(path)
@@ -338,6 +340,7 @@ class VoiceFindController(QObject):
             # Nothing from then: say so and ask, never show another time's files as if they were it (people misremember
             # months — and "due by November 3" made an October invoice look like November's).
             question = f"I couldn't find one {d['when'] or 'from then'}. Want me to show the closest?"
+            self._note(question.split(" Want")[0])
             f.update(stage="ask_closest", question=question, closest=rows)
             self._tuck.stop()
             self.overlay.ensure_open()
@@ -345,6 +348,7 @@ class VoiceFindController(QObject):
             self._say(question)
             self._expire.start(self.EXPIRE_SECS * 1000)
             return
+        self._note(f"Found {rows[0]['file_name']}" if len(rows) == 1 else "Showed what it found")
         lead = "Nothing of that type. " if r["dropped"] == "type" else ""
         question = r["ask"] if r["many"] else ""
         if r["many"]:
@@ -421,7 +425,23 @@ class VoiceFindController(QObject):
         self._say(question)
         self._expire.start(self.EXPIRE_SECS * 1000)
 
+    def _note(self, status):
+        """The History tab: one row per search, however many follow-ups it took."""
+        f = self._f
+        if f is None:
+            return
+        try:
+            from app.core import assistant_history
+            if f.get("row"):
+                assistant_history.update(f["row"], said=f["heard"], status=status)
+            else:
+                f["row"] = assistant_history.add("find", f["heard"], f"Looked for {finder.noun(f['d'])}", status)
+        except Exception as e:
+            logger.warning(f"[find] couldn't write History: {e}")
+
     def _gone(self, msg):
+        if not msg.startswith("Something went wrong"):
+            self._note(msg)
         self._f["stage"] = "gone"
         self._tuck.stop()
         self.overlay.ensure_open()

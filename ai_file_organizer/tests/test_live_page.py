@@ -518,9 +518,11 @@ def test_windows_specifics():
             shown += [w.toolTip() for w in page.findChildren(QLabel) + page.findChildren(QPushButton) if w.toolTip()]
             bad = [t for t in shown if any(m in t for m in mac)]
             assert not bad, (st, bad)
-        for art, title, text in lp.LIVE_TOUR:
-            assert not any(m in title + text for m in mac), (title, text)
-        assert lp.LIVE_TOUR[1][0] == ("keys", ["Shift", "+", "Ctrl"]) and "your PC is locked" in lp.LIVE_TOUR[4][2]
+        from app.ui import page_tours
+        tour = page_tours.steps("assistant")
+        for st in tour:
+            assert not any(m in st["title"] + st["description"] for m in mac), st
+        assert tour[1]["art"] == ("keys", ["Shift", "+", "Ctrl"]) and "your PC is locked" in tour[-1]["description"]
         assert lp.DRAW_KEY == "Shift + Ctrl"
         for f in lp._CHIMES.values():
             assert (Path(os.environ.get("SystemRoot", r"C:\Windows")) / "Media" / f).exists(), f
@@ -633,8 +635,8 @@ def test_redesigned_page():
     L.state_changed.emit("off", ""); L.on = False
     page._show_tour()
     assert settings.live_tour_seen and page.tour_btn.text().strip() == "See what it can do"
-    assert page._tour.steps[1][1] == "Point at your screen"
-    page._tour.close_tour()
+    assert page._tour.steps[1]["title"] == "Point at your screen"
+    page._tour._remind_later()
     # Settings: hide → saved; the header's Settings button brings them back
     page._set_settings_collapsed(True)
     assert settings.live_settings_collapsed and not page._set_card.isVisibleTo(page) and \
@@ -651,8 +653,10 @@ def test_redesigned_page():
     assert page.status.text().startswith("Collecting — 1 thing")
     page._tray_drop.click()
     assert page._collect is None and not page._tray_wrap.isVisibleTo(page)
-    unpadded = [b.text() or b.toolTip() for b in page.findChildren(QPushButton)
-                if "padding" not in b.styleSheet() and not isinstance(b, lp._PlayBtn)]
+    from app.ui.onboarding import OnboardingOverlay   # (the closed tour's panel: its own window and style - it's
+    unpadded = [b.text() or b.toolTip() for b in page.findChildren(QPushButton)   # checked in test_page_tours)
+                if "padding" not in b.styleSheet() and not isinstance(b, lp._PlayBtn)
+                and not isinstance(b.window(), OnboardingOverlay)]
     assert not unpadded, unpadded
 
 

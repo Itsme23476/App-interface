@@ -487,6 +487,8 @@ class VoiceOrganizeController(QObject):
         logger.info(f"[VOICE ORGANIZE] apply error: {msg}")
         if self._hf is not None:
             self._remember_undo()
+            if msg.startswith("Moved "):     # (some did move: that's real, and it can be undone - History)
+                self._note_history("organize", f"Organized {self._hf_name()}", msg, self._moved_log())
             self._hf_fail(msg + (" Say “undo” to put them back." if self.can_undo() else ""))
             return
         self.overlay.show_error(msg)
@@ -848,9 +850,22 @@ class VoiceOrganizeController(QObject):
         if self._hf.get("kind") == "auto":
             self._auto_turn_on(hint)
             return
+        self._note_history("organize", f"Organized {self._hf_name()}", hint, self._moved_log())
         self.overlay.ensure_open()
         self.overlay.show_done(hint, undo=self.can_undo())
         self._say(_spoken(hint))
+
+    def _moved_log(self):
+        return getattr(self.organize_page, "last_voice_log", "") or ""
+
+    def _note_history(self, kind, title, status="", log=""):
+        """The History tab on the Assistant page. Only what really happened: files moved, auto-organize switched."""
+        try:
+            from app.core import assistant_history
+            assistant_history.add(kind, (self._hf or {}).get("text", ""), title, _spoken(status).split(" Revert")[0],
+                                  log)
+        except Exception as e:
+            logger.warning(f"[VOICE ORGANIZE] couldn't write History: {e}")
 
     def _hf_fail(self, msg):
         self._plan_active = False
@@ -977,6 +992,9 @@ class VoiceOrganizeController(QObject):
         self._last_folder = hf["folder"]
         hf["stage"] = "done"
         msg = (_spoken(moved_hint) + " " if moved_hint else "") + f"{name} will stay organized from now on."
+        self._note_history("auto", f"Auto-organize on for {name}", moved_hint or {
+            "existing": "Only the folders already there", "everything": "Everything, and new files"}.get(
+                hf.get("mode"), "Only new files"), self._moved_log() if moved_hint else "")
         self.overlay.ensure_open()
         self.overlay.show_done(msg, undo=True)
         self._say(msg)
@@ -991,7 +1009,7 @@ class VoiceOrganizeController(QObject):
 
     _ALL_OF_THEM = frozenset({"both", "all", "every", "everything", "each", "them", "everyone", "everywhere"})
 
-    def stop_auto(self, named="", asking=False) -> str:
+    def stop_auto(self, named="", asking=False, heard="") -> str:
         """Turn auto-organize off. `named` is the folder as they said it, or "" (`asking`: it's their answer to which
         one). Returns "auto_off", "auto_asked", "auto_none" or "organize_busy"."""
         from app.core.ai_organizer import _NOT_A_FOLDER_NAME, _fold
@@ -1032,6 +1050,7 @@ class VoiceOrganizeController(QObject):
             self._hf_stop()
             names = " and ".join(_base(p) for p in entries)
             question = f"Which folder should I stop? {names}."
+            self._stop_heard = heard or named      # (History: the sentence that asked, when the answer comes)
             self._hf = {"stage": "ask_stop", "kind": "stop", "text": named, "how": "", "folder": "", "tucked": False,
                         "asked": question, "mode": None}
             self.overlay.set_hands_free(True)
@@ -1044,6 +1063,13 @@ class VoiceOrganizeController(QObject):
         target = entries[0]
         self._hf_stop()
         self.organize_page.voice_disable_watch(target)
+        try:
+            from app.core import assistant_history
+            assistant_history.add("auto", heard or getattr(self, "_stop_heard", "") or named,
+                                  f"Auto-organize off for {_base(target)}", "Your files stayed where they were")
+        except Exception as e:
+            logger.warning(f"[VOICE ORGANIZE] couldn't write History: {e}")
+        self._stop_heard = ""
         if self._undo_auto and _same_path(self._undo_auto, target):
             self._undo_auto = ""
         self._notice(f"Auto-organize is off for {_base(target)}. Your files stay where they are.")
@@ -1266,6 +1292,11 @@ class VoiceOrganizeController(QObject):
         self._undone_auto = bool(auto)
         if auto:                             # (off first, or the watcher would sort them straight back)
             self.organize_page.voice_disable_watch(auto)
+            try:
+                from app.core import assistant_history
+                assistant_history.add("auto", "", f"Auto-organize off for {_base(auto)}", "You undid it")
+            except Exception:
+                pass
         self._tidy_pending = ("", "")
         if not self.overlay.isVisible():
             self.overlay.present()
@@ -1283,6 +1314,11 @@ class VoiceOrganizeController(QObject):
         return True
 
     def _on_undone(self, r):
+        try:
+            from app.core import assistant_history
+            assistant_history.changed()      # (its row now says Put back - read from the move record, nothing stored)
+        except Exception:
+            pass
         n, skipped = r["reverted"], r["skipped"] + len(r["errors"])
         msg = f"Put {n} file{'s' if n != 1 else ''} back where {'they were' if n != 1 else 'it was'}."
         if skipped:

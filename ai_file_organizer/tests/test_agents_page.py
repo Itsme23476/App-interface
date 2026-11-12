@@ -252,17 +252,21 @@ def test_models_pill_and_effort_fallback(view):
 
 
 def test_tour_opens_steps_and_esc_closes(view):
+    """"See what it can do" opens this page's tour (page_tours "agents", the first-run guide's panel); Esc closes it
+    and takes its dim with it."""
     top = view.window()
+    seen = []
+    view.tour_opened.connect(lambda: seen.append(1))
     view.open_tour()
     app.processEvents()
-    tour = view.tour
-    assert tour is not None and tour.isVisible()
-    assert tour.title.text() == av.TOUR[0][0]
-    tour.go(1)
-    assert tour.title.text() == av.TOUR[1][0]
+    tour = top._page_tour
+    assert tour is not None and tour.isVisible() and tour._tour == "agents" and seen == [1]
+    assert tour.title_label.text() == "Ask for anything"
+    tour._go_next()
+    assert tour.title_label.text() == "Talk to it from anywhere" and "Ctrl + Alt" in tour.desc_label.text()
     tour.keyPressEvent(QKeyEvent(QEvent.KeyPress, Qt.Key_Escape, Qt.NoModifier))
     app.processEvents()
-    assert view.tour is None
+    assert top._page_tour is None and not tour.isVisible() and not tour.spotlight.isVisible()
 
 
 def test_dark_theme_applies(view, tmp_path):

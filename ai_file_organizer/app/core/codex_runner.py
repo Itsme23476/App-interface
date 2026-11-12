@@ -482,6 +482,7 @@ class CodexRunner:
         self.on_result = on_result or (lambda *a: None)
         self.session_id: Optional[str] = None
         self.allow_all = False                               # (Claude's mid-turn Full access; Codex can't ask)
+        self.on_session = lambda sid: None   # (the owner sets it) the thread's id as soon as Codex says it
         self._proc = None
         self._interrupted = False
 
@@ -552,6 +553,10 @@ class CodexRunner:
                 t = ev.get("type")
                 if t == "thread.started":
                     self.session_id = ev.get("thread_id") or self.session_id
+                    try:
+                        self.on_session(self.session_id)
+                    except Exception:
+                        pass
                 elif t in ("item.started", "item.completed"):
                     item = ev.get("item") or {}
                     if item.get("type") == "error":          # a transport warning ("Falling back from…")
@@ -1109,6 +1114,16 @@ def _events(path: Path):
 def _user_text(item: dict) -> str:
     return " ".join(c.get("text", "") for c in item.get("content") or []
                     if isinstance(c, dict) and c.get("type") == "text").strip()
+
+
+def chat_exists(thread_id: str) -> bool:
+    """Is this chat still there (not deleted or archived)? If Codex's store can't be read, assume so and let Codex
+    say. (History's Open in.)"""
+    try:
+        row = _db("state").execute("select archived from threads where id = ?", (thread_id,)).fetchone()
+    except Exception:
+        return True
+    return row is not None and not row[0]
 
 
 def _db(prefix: str):

@@ -654,7 +654,7 @@ class FakeOrg:
     def no_rules(self):
         return self.rules
 
-    def stop_auto(self, named="", asking=False):
+    def stop_auto(self, named="", asking=False, heard=""):
         self.stopped.append(named)
         return "auto_off"
 

@@ -724,6 +724,13 @@ class MainWindow(QMainWindow):
     def _show_onboarding(self):
         """Display the onboarding overlay"""
         try:
+            old = getattr(self, "onboarding", None)
+            if old is not None and (old.isVisible() or old.is_minimized):
+                if old.is_minimized:                       # (it's waiting behind "Continue Tour")
+                    old._restore_from_try()
+                old.raise_()
+                old.activateWindow()
+                return
             self.onboarding = OnboardingOverlay(self)
             self.onboarding.finished_onboarding.connect(self._on_onboarding_finished)
             self.onboarding.remind_later.connect(self._on_onboarding_remind_later)
@@ -1224,6 +1231,14 @@ class MainWindow(QMainWindow):
         vhint_row.addStretch()
         page_layout.addSpacing(18)
         page_layout.addLayout(vhint_row)
+        from app.ui.page_tours import tour_button
+        self.search_tour_wrap = QWidget()                # ("See what it can do": landing only, like the hints)
+        _tw = QHBoxLayout(self.search_tour_wrap)
+        _tw.setContentsMargins(0, 14, 0, 0)
+        _tw.addStretch()
+        _tw.addWidget(tour_button("search"))
+        _tw.addStretch()
+        page_layout.addWidget(self.search_tour_wrap)
 
         page_layout.addSpacing(40)
         
@@ -1445,6 +1460,11 @@ class MainWindow(QMainWindow):
         content_layout = QVBoxLayout(content_container)
         content_layout.setAlignment(Qt.AlignCenter)
         content_layout.setSpacing(32)
+        from app.ui.page_tours import tour_button
+        _trow = QHBoxLayout()
+        _trow.addStretch()
+        _trow.addWidget(tour_button("index"))
+        content_layout.addLayout(_trow)
         
         # Drop zone for drag and drop - large centered card
         self.drop_zone = QWidget()
@@ -2361,8 +2381,16 @@ class MainWindow(QMainWindow):
         settings_label_style = "color: #7A7A90; font-size: 13px; background: transparent; border: none;"
         settings_hint_style = "color: #4A4A5A; font-size: 11px; background: transparent; border: none;"
 
+        # "See what it can do" (page_tours), right-aligned above the first card
+        from app.ui.page_tours import tour_button
+        _trow = QHBoxLayout()
+        _trow.addStretch()
+        _trow.addWidget(tour_button("settings"))
+        layout.addLayout(_trow)
+
         # ======= APPEARANCE CARD =======
         appearance_card = QFrame()
+        self.appearance_card = appearance_card
         appearance_card.setObjectName("settingsCard")
         appearance_card.setStyleSheet("""
             QFrame#settingsCard {
@@ -2418,10 +2446,12 @@ class MainWindow(QMainWindow):
         layout.addWidget(appearance_card)
 
         # Connect to Claude / Codex (MCP) card — placed directly under Appearance (UI preference).
-        layout.addWidget(self._build_mcp_connect_card())
+        self._mcp_card = self._build_mcp_connect_card()
+        layout.addWidget(self._mcp_card)
 
         # ======= HELP & ONBOARDING CARD =======
         help_card = QFrame()
+        self.help_card = help_card
         help_card.setObjectName("settingsCardHelp")
         help_card.setStyleSheet("""
             QFrame#settingsCardHelp {
@@ -2536,6 +2566,7 @@ class MainWindow(QMainWindow):
 
         # ======= QUICK SEARCH CARD =======
         qs_card = QFrame()
+        self.quick_search_card = qs_card
         qs_card.setObjectName("settingsCardQS")
         qs_card.setStyleSheet("""
             QFrame#settingsCardQS {
@@ -2718,6 +2749,7 @@ class MainWindow(QMainWindow):
         
         # ======= ACCOUNT CARD =======
         account_card = QFrame()
+        self.account_card = account_card
         account_card.setObjectName("settingsCardAccount")
         account_card.setStyleSheet("""
             QFrame#settingsCardAccount {
@@ -3199,6 +3231,8 @@ class MainWindow(QMainWindow):
                             "font-weight: 700; color: #7C4DFF; background: transparent; border: none;")
         _trow.addWidget(title, 0, Qt.AlignVCenter)
         _trow.addStretch(1)
+        from app.ui.page_tours import tour_button
+        _trow.addWidget(tour_button("voice"), 0, Qt.AlignVCenter)
         layout.addLayout(_trow)
         self.voice_subtitle = QLabel("Hold Ctrl + Win to dictate anywhere; add Shift to search your files "
                                      "by voice, or Alt to organize them.")
@@ -7713,6 +7747,7 @@ Move Plan Summary:
         # Hide the landing-only voice-hotkey hint strip.
         if hasattr(self, 'voice_hint_row'):
             self.voice_hint_row.setVisible(False)
+            self.search_tour_wrap.setVisible(False)
 
         # Show the results container
         if hasattr(self, 'results_container'):
@@ -7779,6 +7814,7 @@ Move Plan Summary:
         # Restore the landing-only voice-hotkey hint strip.
         if hasattr(self, 'voice_hint_row'):
             self.voice_hint_row.setVisible(True)
+            self.search_tour_wrap.setVisible(True)
 
         # Hide the results container
         if hasattr(self, 'results_container'):

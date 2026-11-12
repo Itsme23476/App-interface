@@ -27,14 +27,11 @@ import os
 import time
 from pathlib import Path
 
-from PySide6.QtCore import (Qt, Signal, QTimer, QSize, QUrl, QPoint, QRect, QRectF, QEvent,
-                            QPropertyAnimation, QEasingCurve, QVariantAnimation)
-from PySide6.QtGui import (QColor, QPixmap, QPainter, QFontMetrics, QDesktopServices, QImage, QIcon,
-                           QPainterPath, QKeyEvent)
+from PySide6.QtCore import Qt, Signal, QTimer, QSize, QUrl, QPoint, QRect
+from PySide6.QtGui import QColor, QPixmap, QPainter, QFontMetrics, QDesktopServices, QIcon, QKeyEvent
 from PySide6.QtWidgets import (QWidget, QFrame, QLabel, QPushButton, QVBoxLayout, QHBoxLayout,
                                QStackedWidget, QScrollArea, QLineEdit, QPlainTextEdit, QTextBrowser,
-                               QSizePolicy, QMenu, QWidgetAction, QGraphicsScene, QGraphicsPixmapItem,
-                               QGraphicsBlurEffect, QGraphicsDropShadowEffect, QApplication)
+                               QSizePolicy, QMenu, QWidgetAction, QGraphicsDropShadowEffect)
 
 from app.ui import details_view
 from app.ui.icons import line_pixmap
@@ -88,22 +85,6 @@ IDEA_PROMPTS = {
     "Summarize my Desktop PDFs": "Summarize the PDFs on my Desktop in one short list.",
 }
 
-# The tour (Windows: only what works on Windows today — the voice chord and screen drawing join it when
-# they're ported). Each step: (title, body).
-TOUR = [
-    ("Just say what you want",
-     "Type a task in the box at the bottom — or tap the mic and say it. Claude Code (or Codex) does the work on "
-     "your PC, in the “Filect Assistant” folder in your user folder, and every chat is saved."),
-    ("Several things at once",
-     "Start a new chat while another one is still working. Each keeps going on its own — the list on "
-     "the right shows which are working, done, or waiting for you."),
-    ("Pick the agent, model + access",
-     "Under the box: the model pill picks the agent (Claude Code or Codex), its model and how hard it thinks. ""If one isn't set up or runs out, Filect switches to the other on its own. The access pill decides "
-     "whether it asks you first before it changes files or runs commands, or just does the work."),
-    ("Your chats",
-     "Open the list (the sidebar button, top right) to pick up any chat again — type in an open chat to "
-     "continue it. Search also finds your other Claude Code and Codex chats. “Open in Claude / Codex” opens it in ""that app."),
-]
 
 
 # ── small helpers ───────────────────────────────────────────────────────────────────────────────
@@ -1362,199 +1343,6 @@ class ChatList(QFrame):
             w.deleteLater()
 
 
-# ── the tour ────────────────────────────────────────────────────────────────────────────────────
-def _blurred(pm: QPixmap, radius: float = 18.0) -> QPixmap:
-    """A soft blur of a window snapshot (done at quarter size — cheap)."""
-    w, h = max(1, pm.width() // 4), max(1, pm.height() // 4)
-    small = pm.scaled(w, h, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
-    small.setDevicePixelRatio(1.0)     # (a 200 %-scaled screen's snapshot keeps ratio 2 → the scene laid it out at half
-    scene = QGraphicsScene()           #  size: the blurred backdrop filled only the top-left quarter of the window)
-    item = QGraphicsPixmapItem(small)
-    eff = QGraphicsBlurEffect()
-    eff.setBlurRadius(radius / 4 + 2)
-    item.setGraphicsEffect(eff)
-    scene.addItem(item)
-    img = QImage(w, h, QImage.Format_ARGB32_Premultiplied)
-    img.fill(Qt.transparent)
-    p = QPainter(img)
-    scene.render(p, QRectF(0, 0, w, h), QRectF(0, 0, w, h))
-    p.end()
-    return QPixmap.fromImage(img).scaled(pm.size(), Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
-
-
-class Tour(QWidget):
-    """A layer INSIDE the window: a blurred + dimmed snapshot behind one card that rises in. Back / Next,
-    ← →, dots; Esc or a click outside closes."""
-    closed = Signal()
-
-    def __init__(self, c, window: QWidget, steps=TOUR):
-        super().__init__(window)
-        self.c, self.steps, self.i = c, list(steps), 0
-        self.hide()                                   # (a child painting during grab() would be in the snapshot)
-        snap = window.grab()
-        self._bg = _blurred(snap) if not snap.isNull() else QPixmap()
-        self.setGeometry(window.rect())
-        self.setFocusPolicy(Qt.StrongFocus)
-        self.card = QFrame(self)
-        self.card.setObjectName("tourCard")
-        self.card.setFixedWidth(420)
-        self.card.setStyleSheet(
-            f"QFrame#tourCard {{ background:{c['surface']}; border:1px solid {c['border']}; border-radius:18px; }}"
-            f" QLabel {{ background:transparent; border:none; }}")
-        sh = QGraphicsDropShadowEffect(self.card)
-        sh.setBlurRadius(40)
-        sh.setOffset(0, 10)
-        sh.setColor(QColor(0, 0, 0, 80))
-        self.card.setGraphicsEffect(sh)
-        cl = QVBoxLayout(self.card)
-        cl.setContentsMargins(26, 22, 26, 18)
-        cl.setSpacing(10)
-        self.step_lbl = QLabel()
-        self.step_lbl.setStyleSheet(f"color:{c['accent']}; font-size:11px; font-weight:700;")
-        cl.addWidget(self.step_lbl)
-        # Steps with art (the Assistant page's tour: a key / an icon on a lilac panel, like the Mac) get it here.
-        self.art = QFrame()
-        self.art.setObjectName("tourArt")
-        self.art.setFixedHeight(120)
-        self.art.setStyleSheet(f"QFrame#tourArt {{ background:{c['accent_soft']}; border:none; border-radius:14px; }}")
-        self._art = QHBoxLayout(self.art)
-        self._art.setSpacing(10)
-        self.art.setVisible(any(len(st) == 3 for st in self.steps))
-        cl.addWidget(self.art)
-        self.title = QLabel()
-        self.title.setWordWrap(True)
-        self.title.setStyleSheet(f"color:{c['text']}; font-size:18px; font-weight:700;")
-        cl.addWidget(self.title)
-        self.body = QLabel()
-        self.body.setWordWrap(True)
-        self.body.setStyleSheet(f"color:{c['muted']}; font-size:13px;")
-        cl.addWidget(self.body)
-        cl.addSpacing(6)
-        row = QHBoxLayout()
-        self.dots = QLabel()
-        row.addWidget(self.dots)
-        row.addStretch(1)
-        self.back = _btn("Back", "tourBack")
-        self.back.setStyleSheet(
-            f"QPushButton#tourBack {{ background:transparent; border:1px solid {c['border']}; border-radius:10px;"
-            f" padding:6px 14px; color:{c['text']}; font-size:12.5px; }}"
-            f" QPushButton#tourBack:hover {{ background:{c['hover']}; color:{c['text']}; border-color:{c['border_strong']}; }}")
-        self.back.clicked.connect(lambda: self.go(self.i - 1))
-        row.addWidget(self.back)
-        self.next = _btn("Next", "tourNext")
-        self.next.setStyleSheet(
-            f"QPushButton#tourNext {{ background:{c['accent']}; border:none; border-radius:10px;"
-            f" padding:6px 18px; color:{c['on_accent']}; font-size:12.5px; font-weight:600; }}"
-            f" QPushButton#tourNext:hover {{ background:{c['accent']}; color:{c['on_accent']}; border:none; }}")
-        self.next.clicked.connect(lambda: self.go(self.i + 1))
-        row.addWidget(self.next)
-        cl.addLayout(row)
-        self._anim = None
-        window.installEventFilter(self)
-        self.go(0, animate=False)
-
-    def eventFilter(self, obj, e):
-        if obj is self.parent() and e.type() == QEvent.Resize:
-            self.setGeometry(self.parent().rect())
-            self._place()
-        return False
-
-    def open(self):
-        self.show()
-        self.raise_()
-        self.setFocus()
-        self._place(rise=True)
-
-    def _place(self, rise=False):
-        self.card.adjustSize()
-        x = (self.width() - self.card.width()) // 2
-        y = (self.height() - self.card.height()) // 2
-        if rise:
-            a = QPropertyAnimation(self.card, b"pos", self)
-            a.setDuration(240)
-            a.setStartValue(QPoint(x, y + 28))
-            a.setEndValue(QPoint(x, y))
-            a.setEasingCurve(QEasingCurve.OutCubic)
-            a.start()
-            self._anim = a
-        else:
-            self.card.move(x, y)
-
-    def go(self, i, animate=True):
-        if i >= len(self.steps):
-            self.close_tour()
-            return
-        self.i = max(0, i)
-        st = self.steps[self.i]
-        art, t, b = st if len(st) == 3 else (None, st[0], st[1])
-        self._show_art(art)
-        self.step_lbl.setText(f"STEP {self.i + 1} OF {len(self.steps)}")
-        self.title.setText(t)
-        self.body.setText(b)
-        self.back.setVisible(self.i > 0)
-        self.next.setText("Done" if self.i == len(self.steps) - 1 else "Next")
-        dots = "".join(f'<span style="color:{self.c["accent"] if k == self.i else self.c["border_strong"]};'
-                       f' font-size:14px;">●</span>&nbsp;' for k in range(len(self.steps)))
-        self.dots.setText(dots)
-        if self.isVisible():
-            self._place()
-
-    def _show_art(self, art):
-        _clear(self._art)
-        if not art:
-            return
-        c = self.c
-        self._art.addStretch(1)
-        kind, what = art
-        if kind == "icon":
-            ic = QLabel()
-            ic.setPixmap(line_pixmap(what, 44, c["accent"]))
-            self._art.addWidget(ic, 0, Qt.AlignVCenter)
-        else:                                          # keycaps: "Shift", "+", "Ctrl", "→", "Esc"…
-            for k in what:
-                lab = QLabel(k)
-                if k in ("+", "→", "…"):
-                    lab.setStyleSheet(f"color:{c['muted']}; font-size:20px; background:transparent; border:none;")
-                else:
-                    lab.setAlignment(Qt.AlignCenter)
-                    lab.setMinimumWidth(56)
-                    lab.setFixedHeight(48)
-                    lab.setStyleSheet(f"color:{c['text']}; font-size:15px; font-weight:600; background:{c['surface']};"
-                                      f" border:1px solid {c['border_strong']}; border-bottom:3px solid {c['border_strong']};"
-                                      f" border-radius:10px; padding:0 14px;")
-                self._art.addWidget(lab, 0, Qt.AlignVCenter)
-        self._art.addStretch(1)
-
-    def close_tour(self):
-        try:
-            self.parent().removeEventFilter(self)
-        except Exception:
-            pass
-        self.hide()
-        self.closed.emit()
-        self.deleteLater()
-
-    def keyPressEvent(self, e):
-        if e.key() == Qt.Key_Escape:
-            self.close_tour()
-        elif e.key() in (Qt.Key_Right, Qt.Key_Return, Qt.Key_Enter):
-            self.go(self.i + 1)
-        elif e.key() == Qt.Key_Left:
-            self.go(self.i - 1)
-        else:
-            super().keyPressEvent(e)
-
-    def mousePressEvent(self, e):
-        if not self.card.geometry().contains(e.position().toPoint()):
-            self.close_tour()
-
-    def paintEvent(self, _):
-        p = QPainter(self)
-        if not self._bg.isNull():
-            p.drawPixmap(self.rect(), self._bg)
-        p.fillRect(self.rect(), QColor(10, 8, 20, 120))
-
-
 # ── the page ────────────────────────────────────────────────────────────────────────────────────
 class AgentsView(QWidget):
     """The whole Agents page. Signals = what you did; the engine answers with set_* / show_*."""
@@ -2245,12 +2033,9 @@ class AgentsView(QWidget):
 
     # ---- tour ----
     def open_tour(self):
-        win = self.window()
-        self.tour = Tour(self.c, win)
-        self.tour.closed.connect(self._tour_closed)
-        self.tour.open()
+        """"See what it can do": this page's tour (page_tours.py), in the first-run guide's style."""
+        from app.ui import page_tours
+        page_tours.mark_seen("agents")
         self.tour_opened.emit()
         self.composer.set_glow(False)
-
-    def _tour_closed(self):
-        self.tour = None
+        page_tours.open_tour(self.window(), "agents")

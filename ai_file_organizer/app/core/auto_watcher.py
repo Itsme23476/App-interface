@@ -5,6 +5,7 @@ Watches folders for new files and automatically organizes them using AI.
 Supports per-folder instructions and catch-up mode for files added while app was closed.
 """
 
+import json
 import os
 import shutil
 import logging
@@ -82,6 +83,80 @@ def _arrived_since(path: str, since: float) -> bool:
     except OSError:
         return False
     return born is not None and born > since
+
+
+# ---- Organize New Only: the snapshot of what was already there, kept on disk ---------------------------------
+# Taken when the folder is turned on and kept up to date while it's watched; at the next start the SAME snapshot is
+# used (as long as the folder wasn't stopped in between: its watching_since is unchanged), so anything that isn't in
+# it is new - however it got there. Before (2026-11-12) the snapshot was taken again at every start and a file MOVED
+# in while Filect was closed (cut/paste keeps its old creation date) counted as already there and was never sorted.
+# A file counts as already there if its CONTENT or its NAME (path inside the folder) is in the snapshot: a renamed
+# old file stays (same content), an old file edited while Filect was closed stays (same name).
+_BASELINE_FILE = "auto_organize_baseline.json"
+
+
+def _saving_baselines() -> bool:
+    """The test suite (offscreen Qt or pytest) never writes the real app data."""
+    import sys
+    return os.environ.get("QT_QPA_PLATFORM") != "offscreen" and "pytest" not in sys.modules
+
+
+def _baselines_path() -> Path:
+    from app.core.settings import settings
+    return Path(settings.get_app_data_dir()) / _BASELINE_FILE
+
+
+def _read_baselines() -> dict:
+    try:
+        d = json.loads(_baselines_path().read_text(encoding="utf-8"))
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def _write_baselines(d: dict) -> bool:
+    """Temp file + fsync + replace, so a crash or a full disk keeps the old file. Windows: antivirus / OneDrive can
+    hold the file for a moment, so the replace is retried a few times."""
+    if not _saving_baselines():
+        return False
+    path = _baselines_path()
+    tmp = path.with_name(f"{path.stem}.{os.getpid()}.tmp")
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(d, fh)
+            fh.flush()
+            os.fsync(fh.fileno())
+        for i in range(5):
+            try:
+                os.replace(tmp, path)
+                return True
+            except PermissionError:
+                time.sleep(0.1 * (i + 1))
+        logger.warning(f"[OrganizeNewOnly] Couldn't save the snapshot file (held by another program): {path}")
+    except Exception as e:
+        logger.warning(f"[OrganizeNewOnly] Couldn't save the snapshot file: {e}")
+    try:
+        tmp.unlink(missing_ok=True)
+    except Exception:
+        pass
+    return False
+
+
+def _rel_name(path: str, folder: str) -> str:
+    """A file's name inside its watched folder, as Windows compares it (case-insensitive)."""
+    try:
+        return os.path.normcase(os.path.relpath(os.path.normpath(path), os.path.normpath(folder)))
+    except ValueError:                                   # (another drive)
+        return os.path.normcase(os.path.normpath(path))
+
+
+class _Base(set):
+    """An Organize New Only snapshot: the content hashes of what was already there, plus `names`. `loaded`: it came
+    from the saved file (else it was just taken and still has to be saved)."""
+    def __init__(self, hashes=(), names=(), loaded=False):
+        super().__init__(hashes)
+        self.names = set(names)
+        self.loaded = loaded
 
 
 def _record_auto_moves(folder: str, moves) -> None:
@@ -767,6 +842,12 @@ class AutoOrganizeWatcher(QObject):
         # scan loop so we never re-hash or re-evaluate the same pre-existing
         # files again.
         self._left_in_place_paths: Set[str] = set()
+        self._baseline_names: Dict[str, Set[str]] = {}   # per folder: names already there (see _Base)
+        self._baseline_dirty: Set[str] = set()           # folders whose snapshot changed since it was last saved
+        self._flush_pending = False
+        _qapp = QCoreApplication.instance()
+        if _qapp is not None:
+            _qapp.aboutToQuit.connect(self._flush_baselines)   # (quitting: what was just sorted stays known)
         self._sizes: Dict[str, tuple] = {}       # path key -> (size, mtime) last seen: a write in progress shows
         self._old_workers: List[Any] = []        # finished workers whose threads are still ending (never collected)
 
@@ -948,7 +1029,9 @@ class AutoOrganizeWatcher(QObject):
         self._waiting_busy.clear()
         # Reset Organize-New-Only state every start() so the baseline reflects
         # the folder contents at THIS moment.
+        self._flush_baselines()                  # (what the last run learned is kept)
         self._baseline_hashes.clear()
+        self._baseline_names.clear()
         self._left_in_place_paths.clear()
         self._indexed_here.clear()
 
@@ -1001,6 +1084,7 @@ class AutoOrganizeWatcher(QObject):
 
     def stop(self) -> None:
         """Stop watching folders."""
+        self._flush_baselines()                       # (Organize New Only: keep what this run learned)
         if not self._is_running:
             return
 
@@ -1471,12 +1555,20 @@ class AutoOrganizeWatcher(QObject):
         baseline = self._compute_baseline(folder)
         if baseline is not None:
             self._baseline_hashes[os.path.normpath(folder)] = baseline
+            self._baseline_names[os.path.normpath(folder)] = set(getattr(baseline, "names", ()))
+            if not getattr(baseline, "loaded", True):
+                self._baseline_dirty.add(os.path.normpath(folder))
+                self._schedule_flush()
 
     def _merge_look(self, folder: str, baseline: Optional[Set[str]], snapshot) -> None:
         """On the UI thread: what a background look through `folder` found becomes the watcher's state."""
         folder = os.path.normpath(folder)
         if baseline is not None:
             self._baseline_hashes[folder] = baseline
+            self._baseline_names[folder] = set(getattr(baseline, "names", ()))
+            if not getattr(baseline, "loaded", True):
+                self._baseline_dirty.add(folder)                 # (just taken: save it)
+                self._schedule_flush()
         paths, arrived = snapshot
         self._processed_files.update(p for p in paths if p not in self._pending_files)
         if arrived:
@@ -1495,11 +1587,18 @@ class AutoOrganizeWatcher(QObject):
             file_index = None
 
         folder = os.path.normpath(folder)
+        since = self._watching_since(folder)
+        saved = self._saved_baseline(folder, since)
+        if saved is not None:
+            b = _Base(saved.get("hashes") or (), saved.get("names") or (), loaded=True)
+            logger.info(f"[OrganizeNewOnly] Using the saved snapshot for {folder} ({len(b.names)} file(s) there "
+                        "since it was turned on): anything not in it is new")
+            return b
         baseline: Set[str] = set()
+        names: Set[str] = set()
         hashed_from_disk = 0
         total = 0
         arrived = 0
-        since = self._watching_since(folder)
         known = self._indexed_hashes_under(folder)     # (one query, not one per file: 20,000 took ~20 s)
 
         try:
@@ -1533,6 +1632,7 @@ class AutoOrganizeWatcher(QObject):
                             hashed_from_disk += 1
                     if h:
                         baseline.add(h)
+                    names.add(_rel_name(path, folder))
         except OSError as e:
             logger.warning(f"[OrganizeNewOnly] Walk failed for baseline of {folder}: {e}")
             return None
@@ -1543,7 +1643,65 @@ class AutoOrganizeWatcher(QObject):
             f"{total - hashed_from_disk} reused from DB"
             + (f"; {arrived} created after it was turned on count as new" if arrived else "") + ")"
         )
-        return baseline
+        return _Base(baseline, names)
+
+    @staticmethod
+    def _saved_baseline(folder: str, since: float) -> Optional[dict]:
+        """The saved snapshot of `folder`, if it belongs to this watching session (same watching_since)."""
+        if not since:
+            return None
+        e = _read_baselines().get(_path_key(folder))
+        if isinstance(e, dict) and e.get("since") == since and isinstance(e.get("names"), list) \
+                and isinstance(e.get("hashes"), list):
+            return e
+        return None
+
+    def _remember(self, folder: str, path: str, h: Optional[str] = None) -> None:
+        """A file now belongs to `folder`'s snapshot (sorted by Filect, or recognised as already there)."""
+        folder = os.path.normpath(folder)
+        if folder not in self._baseline_hashes:
+            return                                   # (not an Organize New Only folder)
+        self._baseline_names.setdefault(folder, set()).add(_rel_name(path, folder))
+        if h:
+            self._baseline_hashes[folder].add(h)
+        self._baseline_dirty.add(folder)
+        self._schedule_flush()
+
+    def _schedule_flush(self) -> None:
+        if self._flush_pending:
+            return
+        self._flush_pending = True
+        QTimer.singleShot(1500, self._flush_baselines)
+
+    def _flush_baselines(self) -> None:
+        """Save the changed snapshots (one small file in the app data folder)."""
+        self._flush_pending = False
+        if not self._baseline_dirty:
+            return
+        dirty, self._baseline_dirty = set(self._baseline_dirty), set()
+        try:
+            from app.core.settings import settings
+            listed = {_path_key(f.get("path", "")) for f in (settings.auto_organize_folders or [])}
+        except Exception:
+            listed = None
+        d = _read_baselines()
+        if listed is not None:
+            d = {k: v for k, v in d.items() if k in listed}      # (folders taken off the list are forgotten)
+        for folder in dirty:
+            since = self._watching_since(folder)
+            if not since or folder not in self._baseline_hashes:
+                continue
+            d[_path_key(folder)] = {"since": since, "hashes": sorted(self._baseline_hashes[folder]),
+                                    "names": sorted(self._baseline_names.get(folder, ()))}
+        _write_baselines(d)
+
+    def _watched_root(self, path: str) -> Optional[str]:
+        """The watched folder `path` is in (the deepest one), or None."""
+        best = None
+        for f in self.watched_folders:
+            if _is_inside(path, f) and (best is None or len(f) > len(best)):
+                best = os.path.normpath(f)
+        return best
 
     @staticmethod
     def _watching_since(folder: str) -> float:
@@ -1626,6 +1784,8 @@ class AutoOrganizeWatcher(QObject):
         if not os.path.isdir(folder):
             return paths, 0
         since = self._watching_since(folder)
+        saved = self._saved_baseline(folder, since) if self._only_new_files(folder) else None
+        saved_names = set(saved.get("names") or ()) if saved is not None else None
         indexed: Optional[Set[str]] = None      # (read once, only if some file is newer than watching_since)
         looked = False
         arrived = 0
@@ -1636,6 +1796,14 @@ class AutoOrganizeWatcher(QObject):
             for fn in files:
                 path = os.path.normpath(os.path.join(root, fn))
                 if self._should_ignore(path, folder):
+                    continue
+                if saved_names is not None:
+                    # The saved snapshot decides: a name in it is already there; anything else arrived while
+                    # Filect was closed (or was renamed - the periodic check then knows it by its content).
+                    if _rel_name(path, folder) in saved_names:
+                        paths.add(path)
+                    else:
+                        arrived += 1
                     continue
                 if _arrived_since(path, since):
                     if not looked:
@@ -1685,7 +1853,10 @@ class AutoOrganizeWatcher(QObject):
             except Exception:
                 kept.append(path)  # be lenient — if we can't hash, treat as new
                 continue
-            is_baseline = bool(h) and h in baseline
+            # Already there = its content OR its name is in the snapshot (a renamed old file / an old file edited
+            # while Filect was closed both stay where they are).
+            is_baseline = (bool(h) and h in baseline) or \
+                (_rel_name(path, folder_n) in self._baseline_names.get(folder_n, ()))
             known = None
             if not is_baseline and h and path in looked_up:
                 known = looked_up[path]          # (looked up in the background, with the hash)
@@ -1701,6 +1872,7 @@ class AutoOrganizeWatcher(QObject):
                 logger.info(
                     f"[OrganizeNewOnly] '{os.path.basename(path)}' pre-existing (baseline) - leaving in place"
                 )
+                self._remember(folder_n, np, h)          # (a renamed one: its new name is known from now on)
                 self._left_in_place_paths.add(np.lower())
                 self._processed_files.add(np)
                 self._organized_files.add(np)
@@ -2424,6 +2596,9 @@ class AutoOrganizeWatcher(QObject):
         self._processed_files.add(dest)
         # Track the destination as an organized file (prevents re-processing)
         self._organized_files.add(os.path.normpath(dest))
+        root = self._watched_root(dest)
+        if root:
+            self._remember(root, dest)           # (Organize New Only: sorted = already there from now on)
         self.file_organized.emit(source, dest, category)
     
     def _on_worker_status(self, status: str):
@@ -2695,6 +2870,9 @@ class AutoOrganizeWatcher(QObject):
                     self._processed_files.add(dest_path)
                     
                     logger.info(f"Organized: {source_path} -> {dest_path}")
+                    _root = self._watched_root(dest_path)
+                    if _root:
+                        self._remember(_root, dest_path)
                     self.file_organized.emit(source_path, dest_path, folder_name)
                     
                     # Update database path using actual DB ID (not sequential ID)

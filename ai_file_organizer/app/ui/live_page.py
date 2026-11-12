@@ -60,22 +60,7 @@ DRAW_KEY = "Shift + Ctrl"        # press Shift + Ctrl together (live_listener.Ch
 COLLECT_TAP_SEC = 1.0           # two Ctrl taps this close together = start collecting
 COLLECT_WAIT_MS = 8000          # tapping Ctrl to send waits this long at most for what's still being transcribed
 
-LIVE_TOUR = [   # "See what it can do" on this page — agents_view.Tour's (art, title, text)
-    (("icon", "mic"), "Just talk",
-     "Click Start, then say what you want like you'd tell a person. When you pause, it goes to Claude Code or "
-     "Codex — the card at the top shows the work. Keep talking about the same thing to follow up."),
-    (("keys", ["Shift", "+", "Ctrl"]), "Point at your screen",
-     "While it listens, press Shift + Ctrl and draw on your screen in red — circle a button, underline a line. "
-     "Press them again to snap it. It goes with what you say next."),
-    (("keys", ["Ctrl", "Ctrl", "→", "Ctrl"]), "Several things at once",
-     "Double-tap Ctrl to start collecting: talk, scroll and snap as much as you want. Tap Ctrl once to send "
-     "it all as one message."),
-    (("keys", ["Esc"]), "Changed your mind?",
-     "Esc throws away what you're saying, cancels a request it's still checking, or stops it talking."),
-    (("icon", "lock"), "It only hears you",
-     "Only your speech is sent — never the silence. It steps aside while another app uses the mic, while you use a "
-     "Filect shortcut, and while your PC is locked."),
-]
+# ("See what it can do": this page's tour is page_tours.py's "assistant", in the first-run guide's style)
 
 # listener state → the notch light
 _NOTCH = {"starting": "listening", "listening": "listening", "countdown": "listening",
@@ -102,7 +87,7 @@ def _colors(theme=None) -> dict:
 
 
 def _av_colors(theme=None) -> dict:
-    """The Agents page's own palette — for its widgets used here (SetupCard, Tour)."""
+    """The Agents page's own palette — for its widgets used here (SetupCard)."""
     from app.ui.agents_view import colors
     return colors(_theme_name(theme))
 
@@ -1008,20 +993,45 @@ class LivePage(QScrollArea):
         sv.addLayout(row)
         sv.addStretch(1)
         self._stage_scroll.setWidget(stage)
-        mv.addWidget(self._stage_scroll, 1)
-        # footer: privacy · voice used today
+        from PySide6.QtWidgets import QStackedWidget
+        from app.ui.assistant_history_view import HistoryView, _Elided
+        self._pages = QStackedWidget()                    # the Assistant / History switch at the bottom
+        self._history = HistoryView(self._mw, self._c)
+        self._pages.addWidget(self._stage_scroll)
+        self._pages.addWidget(self._history)
+        mv.addWidget(self._pages, 1)
+        # footer: Assistant | History · privacy · voice used today
         self._foot = QFrame()
         self._foot.setObjectName("liveFoot")
         fo = QHBoxLayout(self._foot)
         fo.setContentsMargins(26, 11, 26, 11)
         fo.setSpacing(10)
+        self._tabs = QFrame()
+        self._tabs.setObjectName("liveSegs")
+        tab_row = QHBoxLayout(self._tabs)
+        tab_row.setContentsMargins(3, 3, 3, 3)
+        tab_row.setSpacing(3)
+        tab_group = QButtonGroup(self)
+        self.tab_btns = []
+        for i, label in enumerate(("Assistant", "History")):
+            b = QPushButton(label)
+            b.setCheckable(True)
+            b.setChecked(i == 0)
+            b.setCursor(Qt.PointingHandCursor)
+            b.setFixedHeight(28)
+            b.clicked.connect(lambda _=False, n=i: self._pages.setCurrentIndex(n))
+            tab_group.addButton(b)
+            self.tab_btns.append(b)
+            tab_row.addWidget(b)
+        fo.addWidget(self._tabs)
+        fo.addSpacing(8)
         self._lock = QLabel()
         fo.addWidget(self._lock)
-        self._hint = QLabel("Only your speech is sent — never the silence.")
+        # (shortens itself: a footer that won't shrink pushes Settings off the window - Mac issue 13; Segoe UI is wider)
+        self._hint = _Elided("Only your speech is sent — never the silence.")
         self._hint.setToolTip("It steps aside while another app uses the mic, while you use a Filect shortcut, and "
                               "while your PC is locked.")
-        fo.addWidget(self._hint)
-        fo.addStretch(1)
+        fo.addWidget(self._hint, 1)
         self.usage_label = QLabel("")
         fo.addWidget(self.usage_label)
         self._usage_bar = _UsageBar()
@@ -1038,7 +1048,8 @@ class LivePage(QScrollArea):
         self._age_timer.setInterval(30000)
         # Only the age changes with time (everything else is restyled when it changes): a full restyle of 100 rows
         # froze the window ~0.8 s every 30 s (measured, 2026-11-10).
-        self._age_timer.timeout.connect(lambda: [r.when.setText(_ago(r.t0)) for r in self._rows.values()])
+        self._age_timer.timeout.connect(lambda: ([r.when.setText(_ago(r.t0)) for r in self._rows.values()],
+                                                 self._history.tick()))
         self._age_timer.start()
         self._set_settings_collapsed(bool(getattr(settings, "live_settings_collapsed", False)), save=False)
         self.apply_theme()
@@ -1424,7 +1435,8 @@ class LivePage(QScrollArea):
             f"QSlider::sub-page:horizontal {{ background:{ACCENT}; border-radius:2px; }}"
             f"QSlider::handle:horizontal {{ background:{'#E8E8F0' if dark else '#FFFFFF'}; border:2px solid {ACCENT}; "
             "width:12px; height:12px; margin:-6px 0; border-radius:8px; }")
-        for b in list(self.sens_btns.values()) + list(getattr(self, "agent_btns", {}).values()):
+        self._history.apply_theme(c)
+        for b in list(self.sens_btns.values()) + list(getattr(self, "agent_btns", {}).values()) + self.tab_btns:
             b.setStyleSheet(
                 f"QPushButton {{ background:transparent; color:{c['text_secondary']}; border:none; border-radius:7px; "
                 "padding:0 4px; font-size:12px; } "
@@ -1492,18 +1504,11 @@ class LivePage(QScrollArea):
                 pass
 
     def _show_tour(self):
-        """"See what it can do" — the hands-free walk-through over the window (the Agents page's Tour)."""
-        from app.ui.agents_view import Tour
-        _track("live_tour_opened")
-        if not getattr(settings, "live_tour_seen", False):
-            settings.live_tour_seen = True
-            try:
-                settings._save_config()
-            except Exception:
-                pass
-            style_tour_button(self.tour_btn, True, self._c)
-        self._tour = Tour(_av_colors(), self.window(), steps=LIVE_TOUR)
-        self._tour.open()
+        """"See what it can do": this page's tour (page_tours.py), in the first-run guide's style."""
+        from app.ui import page_tours
+        page_tours.mark_seen("assistant")
+        style_tour_button(self.tour_btn, True, self._c)
+        self._tour = page_tours.open_tour(self.window(), "assistant")
 
     def _refresh_tray(self):
         """Collecting (⌃⌃): the numbered list of what goes as ONE message — screenshots and words in order."""
