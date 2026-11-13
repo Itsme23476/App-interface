@@ -522,7 +522,8 @@ def test_windows_specifics():
         tour = page_tours.steps("assistant")
         for st in tour:
             assert not any(m in st["title"] + st["description"] for m in mac), st
-        assert tour[1]["art"] == ("keys", ["Shift", "+", "Ctrl"]) and "your PC is locked" in tour[-1]["description"]
+        assert tour[1]["art"] == ("keys", ["Shift", "→", "Ctrl", "+", "Win"]) and tour[1]["title"] == "Mute it"
+        assert tour[2]["art"] == ("keys", ["Shift", "+", "Ctrl"]) and "your PC is locked" in tour[-1]["description"]
         assert lp.DRAW_KEY == "Shift + Ctrl"
         for f in lp._CHIMES.values():
             assert (Path(os.environ.get("SystemRoot", r"C:\Windows")) / "Media" / f).exists(), f
@@ -635,7 +636,7 @@ def test_redesigned_page():
     L.state_changed.emit("off", ""); L.on = False
     page._show_tour()
     assert settings.live_tour_seen and page.tour_btn.text().strip() == "See what it can do"
-    assert page._tour.steps[1]["title"] == "Point at your screen"
+    assert page._tour.steps[1]["title"] == "Mute it" and page._tour.steps[2]["title"] == "Point at your screen"
     page._tour._remind_later()
     # Settings: hide → saved; the header's Settings button brings them back
     page._set_settings_collapsed(True)

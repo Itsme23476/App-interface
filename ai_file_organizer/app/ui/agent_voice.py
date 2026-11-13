@@ -194,6 +194,11 @@ class AgentVoiceController(QObject):
             self._drop_escape()
             return
         logger.info(f"[agent-voice] heard {text[:120]!r} + {len(shots)} screenshot(s) → Agents")
+        try:                                       # the agent shortcut (counts only - never the words)
+            from app.core.supabase_client import track
+            track("voice_used", mode="assistant", words=len(text.split()), screenshots=len(shots))
+        except Exception:
+            pass
         page = getattr(self.mw, "assistant_page", None)
         if page is None:
             logger.error("[agent-voice] Agents page unavailable")
@@ -241,6 +246,9 @@ class AgentVoiceController(QObject):
     def _on_error(self, msg: str):
         logger.error(f"[agent-voice] mic/transcription error: {msg}")
         self._cancel()
+        pill = self._get_pill()
+        if msg and pill is not None and hasattr(pill, "show_message"):
+            pill.show_message(msg)                 # (e.g. the daily voice limit - said while the keys are held)
 
     def _on_timeout(self):
         if self._state == "transcribing":

@@ -15,7 +15,7 @@ preventsActivation). Pure-Qt painting (see icons.AnimatedWaveform / VoiceDots).
 """
 import logging
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (QWidget, QHBoxLayout, QVBoxLayout, QLabel,
                                QFrame, QGraphicsDropShadowEffect)
 from PySide6.QtGui import QColor
@@ -79,6 +79,16 @@ class DictationOverlay(QWidget):
         row.addWidget(self._bars, 1)
         row.addWidget(self._dots, 1)
         self._dots.setVisible(False)
+        # A short message in the pill ("Daily voice limit reached…") - errors used to just make the pill vanish
+        self._msg = QLabel()
+        self._msg.setAlignment(Qt.AlignCenter)
+        self._msg.setWordWrap(True)
+        self._msg.setStyleSheet("color: #F2F2F4; font-size: 13px; font-weight: 600; background: transparent;")
+        self._msg.setVisible(False)
+        row.addWidget(self._msg, 1)
+        self._msg_timer = QTimer(self)
+        self._msg_timer.setSingleShot(True)
+        self._msg_timer.timeout.connect(self.hide_pill)
 
     # ----- Win32 non-activation (applied once the HWND exists) -----
     def showEvent(self, event):
@@ -107,7 +117,32 @@ class DictationOverlay(QWidget):
             self._glyph.setVisible(False)
 
     # ----- public API driven by the controller -----
+    def _normal_size(self):
+        self._msg_timer.stop()
+        self._msg.setVisible(False)
+        self._card.setFixedSize(_PILL_W, _PILL_H)
+        self.setFixedSize(_PILL_W + 2 * _MARGIN, _PILL_H + 2 * _MARGIN)
+
+    def show_message(self, text: str, ms: int = 4500):
+        """Say something in the pill for a moment (an error: the daily voice limit, no microphone…), then hide."""
+        self._set_glyph("")
+        self._bars.setVisible(False)
+        self._dots.setVisible(False)
+        self._msg.setText(text)
+        self._msg.setVisible(True)
+        w = max(_PILL_W, min(460, self._msg.fontMetrics().horizontalAdvance(text) + 60))
+        self._card.setFixedSize(w, _PILL_H)
+        self.setFixedSize(w + 2 * _MARGIN, _PILL_H + 2 * _MARGIN)
+        self._position_bottom_center()
+        self.show()
+        self.raise_()
+        self._msg_timer.start(ms)
+
+    def showing_message(self) -> bool:
+        return self.isVisible() and self._msg.isVisible()
+
     def show_listening(self, mode: str = "dictate"):
+        self._normal_size()
         self._mode = mode
         self._set_glyph({"search": "search", "organize": "folder", "assistant": "sparkle"}.get(mode, ""))
         self._dots.setVisible(False)
@@ -118,6 +153,7 @@ class DictationOverlay(QWidget):
 
     def show_transcribing(self):
         # Keep the mode glyph; swap bars → pulsing dots.
+        self._normal_size()
         self._bars.setVisible(False)
         self._dots.setVisible(True)
 

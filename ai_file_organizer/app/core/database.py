@@ -40,6 +40,21 @@ def _parse_tags_value(raw: Any) -> Optional[List[str]]:
     # Fallback: comma-separated string
     return [t.strip() for t in s.split(",") if t.strip()]
 
+def _fts_term(word: str) -> str:
+    """One search word as a safe FTS5 prefix term. Quoted, so punctuation can't break the whole query: the hyphen in
+    "x-rays" or "self-raising" was a syntax error ("no such column"), and search fell back to an A-Z list of loose
+    matches. A plural searches its singular as a prefix, which finds both: "birds" -> "bird"* (photos are tagged
+    "bird"). Ported from the Mac (pack §6.1, item 6)."""
+    w = str(word).lower()
+    if len(w) > 4 and w.endswith("ies"):
+        w = w[:-3]
+    elif len(w) > 3 and w.endswith("es") and w[:-2].endswith(("s", "x", "z", "ch", "sh")):
+        w = w[:-2]
+    elif len(w) > 3 and w.endswith("s") and not w.endswith(("ss", "us", "is")):
+        w = w[:-1]
+    return '"' + w.replace('"', '""') + '"*'
+
+
 class FileIndex:
     """SQLite database for file indexing and search."""
     
@@ -217,6 +232,20 @@ class FileIndex:
             logger.error(f"Error updating {field} for {file_id}: {e}")
             return False
     
+    def set_tags_by_user(self, file_id: int, tags: List[str]) -> bool:
+        """The person edited a file's tags (the Tags cell): save them, and remember the ones they typed in (user_tags)
+        so a re-read keeps them; a tag they deleted is forgotten there too. (Mac a9cad3d.)"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                row = conn.execute("SELECT tags, user_tags FROM files WHERE id = ?", (file_id,)).fetchone()
+            old = (_parse_tags_value(row[0]) or []) if row else []
+            user = (_parse_tags_value(row[1]) or []) if row else []
+            user = [t for t in user if t in tags] + [t for t in tags if t not in old and t not in user]
+            return self.update_file_field(file_id, 'tags', tags) and self.update_file_field(file_id, 'user_tags', user)
+        except Exception as e:
+            logger.error(f"Error saving edited tags for {file_id}: {e}")
+            return False
+
     def update_file_path(self, file_id: int, new_path: str) -> bool:
         """
         Update only the file_path for a file after it has been moved.
@@ -517,6 +546,17 @@ class FileIndex:
                         if prev_list:
                             file_data['tags'] = prev_list
 
+                    # tags the person added (Add Tags, or typed in the Tags cell) survive a re-read, first - Re-index
+                    # used to replace them with the fresh AI tags (Mac a9cad3d)
+                    user = _parse_tags_value(file_data.get('user_tags')) or (
+                        _parse_tags_value(existing['user_tags']) if 'user_tags' in existing.keys() else None) or []
+                    if user:
+                        cur = file_data.get('tags')
+                        cur = cur if isinstance(cur, list) else (_parse_tags_value(cur) or [])
+                        mine = {t.lower() for t in user}
+                        file_data['tags'] = user + [t for t in cur if t.lower() not in mine]
+                        file_data['user_tags'] = user
+
                     # ocr_text: preserve if incoming empty but existing has OCR text
                     if (not (ocr_text or '').strip()) and ('ocr_text' in existing.keys()) and (existing['ocr_text'] or '').strip():
                         ocr_text = existing['ocr_text']
@@ -707,12 +747,8 @@ class FileIndex:
                 # Build FTS MATCH string using prefix queries per token
                 # Example: thumbnail -> 'thumbnail*'
                 # Join with OR to broaden matches across tokens
-                if fts_terms:
-                    # Use FTS5 prefix matching without quotes: token*
-                    tokens = [f"{t}*" for t in fts_terms]
-                    match = " OR ".join(tokens)
-                else:
-                    match = None
+                tokens = [_fts_term(t) for t in fts_terms or [] if any(ch.isalnum() for ch in str(t))]
+                match = " OR ".join(tokens) if tokens else None
 
                 # Base FTS query. Rank text matches by bm25 relevance (bm25 is negative, lower =
                 # better match) so the most relevant files come first. For a no-match browse

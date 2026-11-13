@@ -207,5 +207,47 @@ class TestSearchPauseCancel:
         print("✅ Search service singleton available")
 
 
+class TestSearchWords:
+    """Ported from the Mac (pack §6.1, item 6): any word with a hyphen ("x-rays", "self-raising", "part-time") was an
+    FTS5 syntax error, so search fell back to an A-Z list of loose matches; "birds" didn't find photos tagged "bird"."""
+
+    @pytest.fixture
+    def db(self, tmp_path):
+        from app.core.database import FileIndex
+        d = FileIndex(tmp_path / "words.db")
+        for name, text, tags in (("invoice.pdf", "Cleaning and two X-rays. Total due 180", []),
+                                 ("recipe.txt", "200 g self-raising flour, pour lemon syrup", []),
+                                 ("notes.md", "Hire one part-time designer in July", []),
+                                 ("owl.jpg", "", ["bird", "owl"]),
+                                 ("aaa_first_by_name.txt", "two and two cleaning flour designer", [])):
+            _add(d, {"file_path": f"C:/t/{name}", "file_name": name, "file_extension": Path(name).suffix,
+                     "file_size": 10, "category": "Documents", "ocr_text": text, "has_ocr": bool(text), "tags": tags})
+        return d
+
+    @pytest.mark.parametrize("terms, want", [
+        (["cleaning", "two", "x-rays"], "invoice.pdf"),
+        (["lemon", "syrup", "self-raising"], "recipe.txt"),
+        (["part-time", "designer"], "notes.md"),
+        (["birds"], "owl.jpg"),
+    ])
+    def test_words_with_hyphens_and_plurals_find_the_file_first(self, db, terms, want):
+        got = [r["file_name"] for r in db.search_files_advanced(terms, {}, 10)]
+        assert got and got[0] == want, got
+
+    def test_quotes_and_punctuation_never_break_the_query(self, db):
+        for terms in (['say "hi"'], ["-"], ["c++"], ["what?"], ["2025-03"]):
+            db.search_files_advanced(terms, {}, 10)          # (no exception, no crash)
+
+
+def test_a_weekday_in_a_sentence_falls_back_to_any_time():
+    """"please sign the lease by friday": the weekday made it a date search that found nothing. If the date finds
+    nothing but there are words, search everything typed at any time and say so (the owner's choice, Mac)."""
+    src = (Path(__file__).resolve().parents[1] / "app" / "ui" / "main_window.py").read_text(encoding="utf-8")
+    i = src.index("    def search_files(self):")
+    body = src[i:src.index("\n    def ", i + 10)]
+    assert "if not results and search_query and parsed.get('date_filter') and (date_start or date_end):" in body
+    assert "date_start=None, date_end=None" in body and "from any time" in body
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

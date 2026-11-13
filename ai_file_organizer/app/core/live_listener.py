@@ -818,6 +818,7 @@ class LiveListener(QObject):
         self._answer_probe = None       # () -> bool: is the agent waiting for your answer? (set by the page)
         self._esc_filter = None         # () -> bool: True = the page used this Esc (e.g. it cancelled a drawing)
         self._muted = False             # Filect is speaking and the noise filter is off: ignore the mic
+        self.user_muted = False         # you muted it (Shift, then Ctrl + Win, or the Mute button): the mic is closed
         self._chunk_sig.connect(self._on_chunk)
         self._qs_text, self._qs_since = None, 0.0
         self._quick = None                  # (uid, until) — the last quick send, while it can still be joined
@@ -831,6 +832,10 @@ class LiveListener(QObject):
         self._keys = None
         self._chord = ChordTap()
         self._ctrl = CtrlTap()
+        self._draw_wait = QTimer(self)      # Shift + Ctrl draws once this runs out, unless a shortcut's key joined
+        self._draw_wait.setSingleShot(True)
+        self._draw_wait.setInterval(int(self.DRAW_WAIT_SEC * 1000))
+        self._draw_wait.timeout.connect(self._tap_sig.emit)
         self._poll = QTimer(self)
         self._poll.setInterval(400)
         self._poll.timeout.connect(self._tick)
@@ -849,6 +854,7 @@ class LiveListener(QObject):
         self._quick = None                  # (a fresh start: nothing to join)
         self.on = True
         self._paused, self._yield_at, self._vp_broken, self._muted = None, 0.0, False, False
+        self.user_muted = False             # (a fresh start always listens)
         self._fails.clear()
         self._mic.add_foreground_hook(self._fg_hook)
         self._monitor = self._monitor_factory()
@@ -864,6 +870,8 @@ class LiveListener(QObject):
             return
         self.on = False
         self._muted = False
+        self.user_muted = False
+        self._draw_wait.stop()
         self._poll.stop()
         self._mic.remove_foreground_hook(self._fg_hook)
         self._remove_esc()
@@ -926,6 +934,20 @@ class LiveListener(QObject):
             self._det.reset()
         self._quick = None                  # (the clock restarts at 0: an old "join until" would match anything)
         logger.info("[live] mic %s while Filect speaks", "ignored" if on else "back")
+
+    def set_user_muted(self, on: bool) -> None:
+        """You muted it (recording a video, a private call): the microphone really closes and stays closed until
+        you unmute — nothing else (another app letting go of the mic, unlocking, Filect done talking) reopens it.
+        Unmuting listens again at once, without the usual second of waiting."""
+        on = bool(on)
+        if on == self.user_muted:
+            return
+        self.user_muted = on
+        logger.info("[live] %s by you", "muted" if on else "unmuted")
+        if not on and self._paused == "muted":
+            self._clear_since = time.monotonic() - 1.0        # (the resume wait is already over)
+        if self.on:
+            self._tick()
 
     def _answer_expected(self) -> bool:
         try:
@@ -1012,6 +1034,10 @@ class LiveListener(QObject):
             pass
 
     YIELD_SEC = 2.0     # the hook's "step aside" counts this long; by then busy() has taken over
+    # Shift + Ctrl waits this long before it draws. Windows' mute keys are Shift, THEN Ctrl + Win: Shift + Ctrl is
+    # down for a moment before Win joins — drawing at once flashed the red edge and its note on every mute press
+    # (live test 2026-11-13). A key, Win or Alt within the wait = a shortcut (also Ctrl + Shift + Tab): never drawn.
+    DRAW_WAIT_SEC = 0.15
 
     def _yielding(self) -> bool:
         return time.monotonic() - self._yield_at < self.YIELD_SEC
@@ -1061,6 +1087,8 @@ class LiveListener(QObject):
 
     # ---- pause / resume ------------------------------------------------------------------------------
     def _pause_reason(self):
+        if self.user_muted:                 # first: another app, the lock screen or a shortcut can't undo it
+            return ("muted", "Muted")
         if self._yielding() or self._mic.busy():
             return ("hotkey", "Paused while you use a Filect shortcut")
         m = self._monitor
@@ -1314,6 +1342,8 @@ class LiveListener(QObject):
         if uid in self._cancelled:
             self._cancelled.pop(uid, None)
             return
+        if self._cur is not None and self._cur[0] == uid:   # (the limit is said while you're still talking)
+            self._cur, self._held = None, []
         self.dropped.emit(uid, "", f"Couldn't transcribe: {msg}")
         if "limit" in (msg or "").lower():          # the daily voice limit → stop listening
             self.stop()
@@ -1346,9 +1376,13 @@ class LiveListener(QObject):
             self._ctrl.other()
             return
         if r == "press":
-            self._tap_sig.emit()
+            self._draw_wait.start()                   # (draws in a moment, unless a shortcut's key joins first)
         elif r == "spoil":
-            self._spoil_sig.emit()
+            if self._draw_wait.isActive():
+                self._draw_wait.stop()                # a shortcut after all, before anything showed: nothing to undo
+                logger.info("[live] Shift+Ctrl was part of a shortcut — not drawn")
+            else:
+                self._spoil_sig.emit()
         elif r == "blocked":
             logger.info("[live] Shift+Ctrl not counted — another key or Alt/Win was part of it (a shortcut)")
         if kind == "key" and a == 0x1B:               # VK_ESCAPE

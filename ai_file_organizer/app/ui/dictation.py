@@ -66,6 +66,7 @@ class DictationController(QObject):
         self.hotkey = DictationHotkey(trigger=trigger)
         self.hotkey.dictate_start.connect(self._on_dictate_start)
         self.hotkey.dictate_stop.connect(self._on_dictate_stop)
+        self.hotkey.mute_toggle.connect(self._on_mute_keys)
         logger.info(f"[DICTATION] controller ready (trigger='{self.hotkey.trigger_name}')")
         try:                                  # so the first dictation already reads the caret context
             from app.ui.win_hotkey import warm_text_before_caret
@@ -96,6 +97,17 @@ class DictationController(QObject):
         self._on_dictate_stop()
 
     # ----- hotkey gesture -----
+    def _on_mute_keys(self):
+        """Shift, then Ctrl + Win: mute or unmute the hands-free Assistant (the page says "The Assistant isn't on"
+        when it's off). Never in the middle of a capture: that press does nothing."""
+        from app.core import mic_helper
+        if self._recorder is not None or mic_helper.busy():
+            logger.info("[DICTATION] Shift, then the shortcut, during a capture — ignored")
+            return
+        page = getattr(self.main_window, "live_page", None)
+        if hasattr(page, "toggle_mute"):
+            page.toggle_mute()
+
     def _on_dictate_start(self, mode: str):
         if self._recorder is not None:
             logger.warning("[DICTATION] start ignored — a recording is already active")
@@ -132,6 +144,9 @@ class DictationController(QObject):
         self.state_changed.emit("listening")
 
     def _on_dictate_stop(self):
+        if self._recorder is None:            # (it already ended: an error, e.g. the daily limit, said so)
+            logger.info("[DICTATION] ■ stop — nothing is recording")
+            return
         logger.info("[DICTATION] ■ stop (awaiting transcript)")
         self._overlay.show_transcribing()
         if self._recorder:
@@ -193,6 +208,12 @@ class DictationController(QObject):
             logger.info("[DICTATION] empty transcript — nothing to do")
             return
 
+        try:                                       # which voice mode (counts only - never the words)
+            from app.core.supabase_client import track
+            track("voice_used", mode=str(self._mode or "dictate"), words=len(text.split()), screenshots=0)
+        except Exception:
+            pass
+
         if self._mode == "search":
             self._route_search(text)
         elif self._mode == "organize":
@@ -204,7 +225,10 @@ class DictationController(QObject):
 
     def _on_error(self, message: str):
         logger.error(f"[DICTATION] error: {message}")
-        self._overlay.hide_pill()
+        if message:                           # say it (the pill used to just vanish: no word about the limit)
+            self._overlay.show_message(message)
+        else:
+            self._overlay.hide_pill()
         self.state_changed.emit("idle")
         self._recorder = None
 

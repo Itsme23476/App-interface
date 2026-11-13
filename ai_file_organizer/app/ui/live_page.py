@@ -904,7 +904,19 @@ class LivePage(QScrollArea):
         self.start_btn.setCursor(Qt.PointingHandCursor)
         self.start_btn.setIconSize(QSize(17, 17))
         self.start_btn.clicked.connect(self.toggle)
-        cv.addWidget(self.start_btn, 0, Qt.AlignHCenter)
+        self.mute_btn = QPushButton("Mute")
+        self.mute_btn.setCursor(Qt.PointingHandCursor)
+        self.mute_btn.setIconSize(QSize(15, 15))
+        self.mute_btn.setToolTip("Closes the microphone until you unmute. Shortcut: Shift, then Ctrl + Win")
+        self.mute_btn.clicked.connect(self.toggle_mute)
+        self.mute_btn.setVisible(False)
+        buttons = QHBoxLayout()
+        buttons.setSpacing(10)
+        buttons.addStretch(1)
+        buttons.addWidget(self.mute_btn)
+        buttons.addWidget(self.start_btn)
+        buttons.addStretch(1)
+        cv.addLayout(buttons)
         # "Try saying" (while nothing's been heard yet — the old empty-activity line)
         self._empty = QWidget()
         ev = QHBoxLayout(self._empty)
@@ -1482,7 +1494,27 @@ class LivePage(QScrollArea):
                 fx.setOffset(0, 8)
                 fx.setColor(QColor(124, 77, 255, 70))
                 self.start_btn.setGraphicsEffect(fx)
+        self._applied.pop("mute", None)       # (the theme may have changed)
+        self._style_mute()
         self._update_layout()
+
+    def _style_mute(self):
+        from app.ui.icons import line_icon
+        on, muted = self.listener.on, bool(getattr(self.listener, "user_muted", False))
+        if self._applied.get("mute") == (on, muted):
+            return
+        self._applied["mute"] = (on, muted)
+        c = self._c
+        amber = "#E0B060" if c.get("dark") else "#B9861F"
+        col = amber if muted else c["text_secondary"]
+        self.mute_btn.setVisible(on)
+        self.mute_btn.setText("  Unmute" if muted else "  Mute")
+        self.mute_btn.setIcon(line_icon("mic" if muted else "mute", 15, col))
+        self.mute_btn.setFixedHeight(38)
+        self.mute_btn.setStyleSheet(
+            f"QPushButton {{ background:{c['surface']}; color:{col}; border:1px solid "
+            f"{amber if muted else c['border_strong']}; border-radius:11px; padding:0 16px; font-size:13px; "
+            f"font-weight:600; }} QPushButton:hover {{ border-color:{ACCENT}; color:{ACCENT}; }}")
 
     def _update_layout(self):
         """Empty & off: everything centred, the big orb. Otherwise the orb is smaller and the page starts at
@@ -1619,6 +1651,10 @@ class LivePage(QScrollArea):
             "paused": (detail or "Paused", "It carries on by itself", amber_t),
             "error": (detail or "Something went wrong.", "", RED),
         }.get(state, (detail or state, "", c["text_muted"]))
+        muted = state == "paused" and bool(getattr(self.listener, "user_muted", False))
+        if muted:
+            text, sub = ("Muted", f"It can't hear anything. Press {self._keys(['Shift'])} then "
+                                  f"{self._keys(['Ctrl', '+', 'Win'])} to unmute.")
         collecting = self._collect is not None and state in ("listening", "hearing", "countdown")
         if collecting:
             n = len(self._collect.get("bits") or ())
@@ -1636,7 +1672,7 @@ class LivePage(QScrollArea):
         chip, ccol, cbg, cbd = {
             "off": ("Off", c["text_muted"], c["surface"], c["border"]),
             "starting": ("Starting…", c["text_muted"], c["surface"], c["border"]),
-            "paused": ("Paused", amber_t, "rgba(224,163,58,0.08)", "rgba(224,163,58,0.55)"),
+            "paused": ("Muted" if muted else "Paused", amber_t, "rgba(224,163,58,0.08)", "rgba(224,163,58,0.55)"),
             "error": ("Can't listen", RED, "rgba(229,83,75,0.07)", "rgba(229,83,75,0.45)"),
         }.get(state, ("Collecting" if collecting else "Listening", ACCENT,
                       "rgba(124,77,255,0.16)" if c.get("dark") else c["purple_light_bg"], "rgba(124,77,255,0.35)"))
@@ -1652,6 +1688,7 @@ class LivePage(QScrollArea):
         if self._applied.get("on") != self.listener.on:  # (Start / Stop only changes when listening does)
             self._applied["on"] = self.listener.on
             self._style_start()
+        self._style_mute()
         if self._collect is not None or self._tray_wrap.isVisibleTo(self):
             self._refresh_tray()
         self._notch_light(_NOTCH.get(state, ""))
@@ -1929,6 +1966,16 @@ class LivePage(QScrollArea):
         if settings.live_chime:
             _chime("Pop")
         _track("live_cancelled")
+
+    def toggle_mute(self):
+        """Shift, then Ctrl + Win (or the Mute button). For recording a video or a private call: the mic stays
+        closed until they're pressed again."""
+        if not self.listener.on:
+            self._note("The Assistant isn't on")
+            return
+        on = not self.listener.user_muted
+        self.listener.set_user_muted(on)
+        self._note("Muted" if on else "Listening again", "#E0B060" if on else "#B8B8C4")
 
     def _note(self, text: str, color: str = "#B8B8C4", ms: int = 2500):
         ap = getattr(self._mw, "assistant_page", None)
@@ -2342,6 +2389,8 @@ class LivePage(QScrollArea):
         if sp is not None and sp.speaking:          # Esc while it's talking: just be quiet
             sp.stop()
             logger.info("[live] stopped speaking (Esc)")
+            if self._collect is not None:           # (what you collected stays: say so, or Esc looks like it did nothing)
+                self._note("Stopped talking. Press Esc again to throw away what you collected.", ms=4000)
             return True
         if self._collect is not None:               # collecting: throw it ALL away (+ what you're saying)
             self._drop_collection("Thrown away (Esc) — not sent")

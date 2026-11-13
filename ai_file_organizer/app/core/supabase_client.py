@@ -862,6 +862,11 @@ class SupabaseAuth:
         sub = self._subscription or {}
         if sub.get('price_id') and sub.get('status') in ('active', 'trialing', 'past_due'):
             url += f"&current={sub['price_id']}"
+            # Switching plans is done as the signed-in user (2026-11-12 security fix): the sign-in rides in the link's
+            # #part (never sent to any server; the page wipes it from the address bar). Checkout stays as it was.
+            token = self.get_access_token()
+            if token:
+                url += f"#at={token}"
         try:
             webbrowser.open(url)
             logger.info(f"Opened web pricing for user: {email}")
@@ -939,69 +944,122 @@ supabase_auth = SupabaseAuth()
 
 
 # ---------------------------------------------------------------------------
-# Telemetry: track() helper
+# Product analytics: one background sender, never the UI thread
 # ---------------------------------------------------------------------------
-# Fire-and-forget writer for the ``app_events`` table. Every call:
-#   - runs on a daemon thread so the GUI is never blocked
-#   - swallows every exception (telemetry must not crash the app or surface
-#     errors if Supabase is unreachable / RLS rejects / the schema changes)
-#
-# The Mac app uses the same signature; keep parity if you change either.
+# track() only puts the event on a queue (microseconds). ONE daemon thread does the rest - the sign-in token (which
+# can refresh over the network) and the POST - and sends the events in batches. The owner's rule (Mac, 2026-11-07):
+# analytics must never lag the app. Ported from the Mac's supabase_client.py (same table, same event names and props,
+# so Mac and Windows compare by `platform`). Before this, Windows started a thread per event and sent only
+# app_opened / session_ended / onboarding / hands-free events.
+import datetime as _dt
+import queue as _queue
+
+_PLATFORM = "win"
+TRACK_BATCH = 25                 # events per request (one POST of a JSON array)
+TRACK_DELAY_SEC = 10.0           # ...or this long after the first unsent one
+TRACK_MAX_QUEUED = 500           # offline for ages: newer events are dropped, never a slowdown
+_track_q: "_queue.Queue" = _queue.Queue(maxsize=TRACK_MAX_QUEUED)
+_track_thread = None
+_track_start_lock = threading.Lock()
+_FLUSH = object()
+_track_pending = [0]             # events the sender holds right now (for flush_tracking)
+
 
 def track(event_name: str, sync_wait_seconds: float = 0.0, **props) -> None:
-    """Insert an ``app_events`` row asynchronously.
-
-    Args:
-        event_name: short snake_case identifier (e.g. ``app_opened``).
-        sync_wait_seconds: when > 0, the caller blocks up to this many
-            seconds waiting for the POST to land. Used by close/shutdown
-            paths (``session_ended``) where the daemon thread would
-            otherwise be killed when the process exits before the POST
-            completes. Defaults to 0 (pure fire-and-forget).
-        **props: arbitrary key/values stored as JSON in the ``props`` column.
-
-    Behaviour:
-        - Never blocks the caller (unless ``sync_wait_seconds`` is set).
-        - Never raises. Any failure is logged at DEBUG level and silently
-          dropped — telemetry is best-effort.
-        - ``platform`` is hard-coded to ``"win"``. ``user_id`` is only sent
-          when the user is currently authenticated.
-    """
-    import threading
-
-    def _send():
-        try:
-            db = supabase_auth._get_db_client()
-            if db is None:
-                return
-            try:
-                from app.version import VERSION as _app_version
-            except Exception:
-                _app_version = None
-
-            row: Dict[str, Any] = {
-                "platform": "win",
-                "event_name": event_name,
-                "props": props or {},
-            }
-            if _app_version:
-                row["app_version"] = _app_version
-
-            user = supabase_auth.current_user
-            if user and user.get("id"):
-                row["user_id"] = user["id"]
-
-            db.from_("app_events").insert(row).execute()
-        except Exception as e:
-            logger.debug(f"track({event_name}) silently dropped: {e}")
-
+    """Record a product-analytics event - counts / slugs / booleans only, never text, paths, names or queries.
+    Never blocks (a queue put) and never raises. Sent from one background thread; dropped if not signed in.
+    `sync_wait_seconds` (old callers): send what's waiting now, waiting at most that long - use flush_tracking()."""
     try:
-        thread = threading.Thread(target=_send, daemon=True)
-        thread.start()
-        if sync_wait_seconds > 0:
-            # join() respects the timeout — if the POST doesn't finish in
-            # time we still let the caller proceed (e.g. so the window
-            # actually closes promptly even on flaky networks).
-            thread.join(timeout=sync_wait_seconds)
+        _track_q.put_nowait({"event_name": str(event_name), "props": props or {},
+                             "created_at": _dt.datetime.now(_dt.timezone.utc).isoformat()})
+        if _track_thread is None:
+            _start_track_thread()
+    except Exception:
+        pass                               # (queue full -> dropped: analytics never matter more than the app)
+    if sync_wait_seconds and sync_wait_seconds > 0:
+        flush_tracking(sync_wait_seconds)
+
+
+def flush_tracking(timeout: float = 1.0) -> None:
+    """At quit: send what's waiting, waiting at most `timeout` s (the last session_ended). Only if anything waits."""
+    try:
+        if _track_thread is None or (_track_q.empty() and not _track_pending[0]):
+            return
+        done = threading.Event()
+        _track_q.put_nowait((_FLUSH, done))
+        done.wait(timeout)
+    except Exception:
+        pass
+
+
+def _start_track_thread() -> None:
+    global _track_thread
+    with _track_start_lock:
+        if _track_thread is None:
+            _track_thread = threading.Thread(target=_track_loop, daemon=True, name="filect-analytics")
+            _track_thread.start()
+
+
+def _track_loop() -> None:
+    import time as _t
+    pending, first_at = [], 0.0
+    while True:
+        flush = None
+        try:
+            wait = max(0.05, TRACK_DELAY_SEC - (_t.monotonic() - first_at)) if pending else None
+            item = _track_q.get(timeout=wait)
+            if isinstance(item, tuple) and item and item[0] is _FLUSH:
+                flush = item[1]
+            else:
+                if not pending:
+                    first_at = _t.monotonic()
+                pending.append(item)
+                _track_pending[0] = len(pending)
+                if len(pending) < TRACK_BATCH:
+                    continue
+        except _queue.Empty:
+            pass
+        except Exception:
+            continue
+        if pending:
+            if not _track_send(pending) and len(pending) < TRACK_MAX_QUEUED:
+                first_at = _t.monotonic()          # offline: keep them, try again in TRACK_DELAY_SEC
+            else:
+                pending = []
+            _track_pending[0] = len(pending)
+        if flush is not None:
+            flush.set()
+
+
+def _current_app_version() -> str:
+    try:
+        from app.version import VERSION
+        return VERSION
+    except Exception:
+        return ""
+
+
+def _track_send(events) -> bool:
+    """POST a batch (the background thread only). True when done with them (sent, or they can never be sent)."""
+    try:
+        user = supabase_auth.current_user or {}
+        user_id = user.get("id") if isinstance(user, dict) else None
+        if not user_id:
+            return True                    # not signed in: nothing to attribute them to (the table only takes yours)
+        token = supabase_auth.get_access_token()
+        if not token:
+            return True
+        import json as _json
+        import urllib.request
+        ver = _current_app_version()
+        rows = [dict(e, user_id=user_id, platform=_PLATFORM, **({"app_version": ver} if ver else {})) for e in events]
+        req = urllib.request.Request(
+            f"{SUPABASE_URL}/rest/v1/app_events", data=_json.dumps(rows, default=str).encode(), method="POST",
+            headers={"apikey": SUPABASE_ANON_KEY, "Authorization": f"Bearer {token}",
+                     "Content-Type": "application/json", "Prefer": "return=minimal"})   # (odd values -> text)
+        urllib.request.urlopen(req, timeout=8).read()      # (Windows' Python uses the Windows certificate store)
+        return True
     except Exception as e:
-        logger.debug(f"track({event_name}) thread launch failed: {e}")
+        code = getattr(e, "code", None)
+        logger.debug(f"analytics batch not sent ({len(events)} events): {e}")
+        return code is not None and 400 <= int(code) < 500   # a bad request won't get better; offline will

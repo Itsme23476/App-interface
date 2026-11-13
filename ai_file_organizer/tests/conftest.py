@@ -64,6 +64,8 @@ def _no_telemetry(monkeypatch):
     (Two of those background sends setting up SSL at the same moment crashed the interpreter.)"""
     from app.core import supabase_client as _sc
     monkeypatch.setattr(type(_sc.supabase_auth), "_get_db_client", lambda self: None)
+    if hasattr(_sc, "_track_send"):                      # (the analytics sender posts on its own: cut it too)
+        monkeypatch.setattr(_sc, "_track_send", lambda events: True)
 
 
 @pytest.fixture(autouse=True)

@@ -13,6 +13,7 @@ from typing import Dict, List, Any, Optional
 # Test-only keys used on the Parallels dev box (Shift+letter: they'd type a capital letter for everyone else).
 # A saved one is put back to the real shortcut when settings load.
 _TEST_KEYS = {'shift+a', 'shift+z', 'shift+m'}
+DEFAULT_QUICK_SEARCH_SHORTCUT = 'ctrl+alt+h'      # (a new install, the fallback, a dev-box test key: one default)
 
 
 class Settings:
@@ -34,7 +35,7 @@ class Settings:
         self.local_model: str = 'qwen2.5vl:3b'
         # Quick search overlay
         self.use_quick_search: bool = True
-        self.quick_search_shortcut: str = 'ctrl+alt+h'
+        self.quick_search_shortcut: str = DEFAULT_QUICK_SEARCH_SHORTCUT
         self.quick_search_autopaste: bool = True
         self.quick_search_auto_confirm: bool = True
         self.quick_search_geometry: Dict[str, int] = {}
@@ -331,7 +332,7 @@ class Settings:
         if isinstance(qs, str) and qs.strip():
             self.quick_search_shortcut = qs.strip().lower()
         if self.quick_search_shortcut in _TEST_KEYS:          # (a dev-box test key, never a real one)
-            self.quick_search_shortcut = 'ctrl+alt+h'
+            self.quick_search_shortcut = DEFAULT_QUICK_SEARCH_SHORTCUT
         self.quick_search_autopaste = bool(data.get('quick_search_autopaste', self.quick_search_autopaste))
         self.quick_search_auto_confirm = bool(data.get('quick_search_auto_confirm', self.quick_search_auto_confirm))
         qsg = data.get('quick_search_geometry')
@@ -629,7 +630,7 @@ class Settings:
 
     # Quick search setters
     def set_quick_search_shortcut(self, shortcut: str) -> None:
-        sc = (shortcut or '').strip().lower() or 'ctrl+x'
+        sc = (shortcut or '').strip().lower() or DEFAULT_QUICK_SEARCH_SHORTCUT   # (was 'ctrl+x': Cut, in every app)
         self.quick_search_shortcut = sc
         self._save_config()
 

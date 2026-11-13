@@ -157,7 +157,7 @@ class FileOperations:
                 for file_id in file_ids:
                     try:
                         # Get current tags
-                        cursor.execute("SELECT tags FROM files WHERE id = ?", (file_id,))
+                        cursor.execute("SELECT tags, user_tags FROM files WHERE id = ?", (file_id,))
                         row = cursor.fetchone()
                         
                         if row:
@@ -175,10 +175,13 @@ class FileOperations:
                             # Merge tags (avoid duplicates)
                             merged_tags = list(set(current_tags + new_tags))
                             
-                            # Update in database
+                            # Update in database; user_tags remembers them so a re-read (Re-index) keeps them
+                            from app.core.database import _parse_tags_value
+                            user = _parse_tags_value(row['user_tags']) or []
+                            user = user + [t for t in new_tags if t not in user]
                             cursor.execute(
-                                "UPDATE files SET tags = ? WHERE id = ?",
-                                (json.dumps(merged_tags), file_id)
+                                "UPDATE files SET tags = ?, user_tags = ? WHERE id = ?",
+                                (json.dumps(merged_tags), json.dumps(user), file_id)
                             )
                             
                             # Update FTS index

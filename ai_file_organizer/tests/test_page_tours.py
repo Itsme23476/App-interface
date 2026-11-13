@@ -104,7 +104,9 @@ def test_windows_pages_keys_and_words():
             if isinstance(art, tuple) and art[0] == "keys":
                 assert not any(MAC_WORDS.search(k) for k in art[1]), (name, art)
     titles = {n: [s["title"] for s in page_tours.steps(n)] for n in NAMES}
-    assert "Mute it" not in titles["assistant"], "Windows has no Mute on the Assistant page"
+    mute = [s for s in page_tours.steps("assistant") if s["title"] == "Mute it"]
+    assert titles["assistant"][1] == "Mute it" and mute[0]["art"] == ("keys", ["Shift", "→", "Ctrl", "+", "Win"])
+    assert "Shift, then Ctrl + Win" in mute[0]["description"], mute[0]["description"]
     assert len(titles["agents"]) == 6, "Windows' agent shortcut has no collecting"
     assert page_tours._keys("ctrl+alt+h") == ["Ctrl", "+", "Alt", "+", "H"]
     assert page_tours._keys("") == ["Ctrl", "+", "Alt", "+", "H"]

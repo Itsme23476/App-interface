@@ -1,8 +1,10 @@
 """The fixes from the 2026-11-08 manual test (headless; no mic, no keys, no `claude`; settings never written):
 
   * ✕ on the card mid-task closed it, but left it frozen on "Working" for a chat it no longer followed — Stop did
-    nothing, the answer never came, and hovering never offered the input bar again. Now ✕ rests the card (the
-    chat keeps running in the drawer), and the card follows ITS OWN chat (not whatever the page has open).
+    nothing, the answer never came, and hovering never offered the input bar again. The card follows ITS OWN chat
+    (not whatever the page has open). Since pack §5.3 (2026-11-13): ✕ / Esc on a WORKING chat tucks the card and it
+    stays that chat's card (Stop, the answer and an approval still reach it); on an APPROVAL the card stays up
+    (letting go hid the approval and the chat waited for good); otherwise ✕ rests it as the strip.
   * After Stop, late steps flipped the card back to "Working" with a live ■ Stop (it looked ignored → clicked
     again). Now "Stopping…" stays until the turn ends, and a second click changes nothing.
   * Esc right AFTER letting go of Shift+Z (you lift the letter to reach Esc) did nothing — now it still cancels
@@ -118,7 +120,7 @@ def _sess(page, prompt):
 
 
 # ---- ✕ mid-task ------------------------------------------------------------------------------------------
-def test_x_mid_task_rests_the_card_and_the_chat_keeps_running(page):
+def test_x_mid_task_tucks_the_card_and_it_stays_that_chats_card(page):
     page.run_voice_task("slow count to a big number")
     assert _wait(lambda: page._sessions and next(iter(page._sessions.values())).running)
     s = next(iter(page._sessions.values()))
@@ -126,20 +128,79 @@ def test_x_mid_task_rests_the_card_and_the_chat_keeps_running(page):
     ov.open_full()
     assert _wait(lambda: ov._state == "working" and not ov._minimized)
     ov._on_dismiss()                                          # ✕
-    assert ov._state == "idle" and ov._minimized, (ov._state, ov._minimized)
-    assert page._card_key is None and page._focused_key is None
+    assert ov._minimized and ov._state == "working", (ov._state, ov._minimized)
+    assert page._card_key == s.key, "✕ on a working chat let go of it (an approval later would never show)"
     assert s.running, "✕ must not stop the chat"
-    assert not ov._handle._timer.isActive(), "the resting lip still breathes (CPU) after ✕"
-    # hovering the top now offers the input bar again (the user's "I can't open it")
+    n = len(s.entries)
+    assert _wait(lambda: len(s.entries) > n + 2), "the chat stopped while tucked"
     ov._hover_in = True
     ov._show_hover_bar()
-    assert ov._hover_bar_on, "the hover bar won't show after ✕ mid-task"
+    assert not ov._hover_bar_on, "a live chat's tucked card offered the blank input bar"
+    ov._hover_in = False
+    ov.open_full()                                            # click the strip: its card again, still working
+    assert not ov._minimized and ov._state == "working"
+    ov._on_primary()                                          # ■ Stop on the card reaches its chat
+    assert _wait(lambda: not s.running, 6), "Stop on the tucked-then-reopened card did nothing"
+    assert _wait(lambda: ov._state == "done"), ov._state
+    ov._on_dismiss()                                          # ✕ on the finished chat: lets go, rests
+    assert ov._state == "idle" and ov._minimized and page._card_key is None
+    assert not ov._handle._timer.isActive(), "the resting lip still breathes (CPU) after ✕"
+    ov._hover_in = True
+    ov._show_hover_bar()                                      # hovering the top offers the input bar again
+    assert ov._hover_bar_on, "the hover bar won't show after ✕"
     ov._hide_hover_bar()
-    page._on_stop_task()                                      # (no page chat → no-op)
-    page._stop_session(s)                                     # end it; the card stays at rest
-    assert _wait(lambda: not s.running, 6)
+
+
+def test_x_and_esc_on_an_approval_keep_it_up_and_approve_still_works(page):
+    from PySide6.QtCore import QEvent, Qt
+    from PySide6.QtGui import QKeyEvent
+    page.run_voice_task("please approve writing a file")
+    assert _wait(lambda: page._sessions and next(iter(page._sessions.values())).status == "needs_you")
+    s = next(iter(page._sessions.values()))
+    ov = page._overlay
+    ov.open_full()
     _pump(0.1)
-    assert ov._state == "idle", f"a chat the card let go of repainted it: {ov._state}"
+    ov._on_dismiss()                                          # ✕
+    assert ov._state == "needs_you" and not ov._minimized and page._card_key == s.key, \
+        (ov._state, ov._minimized, page._card_key)
+    assert ov._status_label.text() == "Approve or Deny first", ov._status_label.text()
+    ov.keyPressEvent(QKeyEvent(QEvent.KeyPress, Qt.Key_Escape, Qt.NoModifier))   # Esc
+    assert ov._state == "needs_you" and not ov._minimized and page._card_key == s.key
+    ov._on_approve()                                          # the card's Approve answers it
+    assert _wait(lambda: not s.running, 6), "Approve after ✕ did nothing — the chat waits for good"
+    assert any("approved=True" in e.get("text", "") for e in s.entries)
+    assert _wait(lambda: ov._state == "done")
+
+
+def test_an_approval_after_x_on_a_working_card_opens_it_by_itself(page, monkeypatch):
+    import asyncio
+    pinged = []
+    monkeypatch.setattr(ap, "_notify", lambda *a, **k: pinged.append(a))
+
+    async def work_then_ask(self, prompt, resume=None, **kw):
+        for i in range(8):
+            self.on_step(ar.Step("tool", tool="Bash", detail=f"step {i}", input={"command": "x"}, tool_id=f"t{i}"))
+            await asyncio.sleep(0.1)
+        ok = await self.on_approval(ar.ApprovalRequest("Write", {"file_path": "C:\\x\\b.txt"}))
+        self.on_step(ar.Step("text", text=f"approved={ok}"))
+        self.on_result("sid-w", 0.0)
+        return "sid-w"
+    monkeypatch.setattr(_Runner, "run", work_then_ask)
+    page.run_voice_task("build the thing")
+    assert _wait(lambda: page._sessions and next(iter(page._sessions.values())).running)
+    s = next(iter(page._sessions.values()))
+    ov = page._overlay
+    ov.open_full()
+    assert _wait(lambda: ov._state == "working")
+    ov._on_dismiss()                                          # ✕ while it works: tucked
+    assert ov._minimized and page._card_key == s.key
+    assert _wait(lambda: s.status == "needs_you", 5)
+    _pump(0.1)
+    assert ov._state == "needs_you" and not ov._minimized, "the approval didn't open the tucked card"
+    assert not pinged, f"it fell back to a notification: {pinged}"
+    ov._on_deny()
+    assert _wait(lambda: not s.running, 6)
+    assert any("approved=False" in e.get("text", "") for e in s.entries)
 
 
 def test_x_during_routing_runs_it_in_the_drawer_and_the_card_stays_shut(page, monkeypatch):

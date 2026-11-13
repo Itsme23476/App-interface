@@ -525,7 +525,7 @@ def test_key_events_through_the_listener():
     def feed(*evs):
         for e in evs:
             L._key_event(e[0], e[1] if len(e) > 1 else 0, 0)
-        _pump(lambda: False, 0.05)
+        _pump(lambda: False, L.DRAW_WAIT_SEC + 0.1)          # (Shift + Ctrl draws after a moment)
     L.start()
     try:
         feed(("mods", SHIFT), ("mods", SHIFT | CTRL))                    # press and hold…
@@ -534,7 +534,12 @@ def test_key_events_through_the_listener():
         feed(("mods", SHIFT), ("mods", 0))
         assert got == ["tap"], got
         feed(("mods", CTRL), ("mods", SHIFT | CTRL), ("key", VK_TAB), ("mods", CTRL), ("mods", 0))
-        assert got == ["tap", "tap", "spoil"], got                       # Ctrl+Shift+Tab
+        assert got == ["tap"], "Ctrl+Shift+Tab pressed at once: never drawn, nothing to take back"
+        feed(("mods", CTRL), ("mods", SHIFT | CTRL))
+        feed(("key", VK_TAB), ("mods", CTRL), ("mods", 0))
+        assert got == ["tap", "tap", "spoil"], got                       # Tab only after it drew: taken back
+        feed(("mods", SHIFT), ("mods", SHIFT | CTRL), ("mods", SHIFT | CTRL | OTHER), ("mods", SHIFT), ("mods", 0))
+        assert got == ["tap", "tap", "spoil"], "Shift, then Ctrl + Win (mute): no drawing at all"
         feed(("mods", OTHER), ("mods", OTHER | SHIFT), ("mods", OTHER | SHIFT | CTRL), ("mods", 0))
         assert got == ["tap", "tap", "spoil"], "Win / Alt + Shift + Ctrl: not ours"
         feed(("mods", SHIFT | CTRL), ("click",), ("mods", 0))           # a click doesn't spoil a drawing press

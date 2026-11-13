@@ -8,10 +8,11 @@ from pathlib import Path
 from typing import List, Dict, Any, Optional, Callable, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
-from .database import file_index
+from .database import file_index, _parse_tags_value
 from .scan import scan_directory
 from .categorize import get_file_metadata
-from .vision import analyze_image, analyze_text, gpt_vision_fallback, describe_image_detailed, FILECT_MODEL
+from .vision import analyze_image, analyze_text, gpt_vision_fallback, describe_image_detailed, FILECT_MODEL, \
+    tags_for_every_file
 from .settings import settings
 from .text_extract import extract_file_text, get_supported_text_formats
 import os
@@ -217,6 +218,10 @@ class SearchService:
             if (not force_ai) and existing and not stale and existing.get('content_hash') == full_metadata.get('content_hash'):
                 # File unchanged - skip expensive AI analysis, return existing data
                 logger.debug(f"Skipping unchanged file: {file_path.name}")
+                want = list(tags_for_every_file(user_instructions)) if user_instructions else []
+                have = _parse_tags_value(existing.get('tags')) or []
+                if want and not set(want) <= set(have):     # tags asked for on every file: saved, no new AI read
+                    self.index.update_file_field(existing['id'], 'tags', want + [t for t in have if t not in want])
                 existing['_file_path'] = file_path
                 existing['_skipped'] = True
                 return existing
@@ -287,7 +292,7 @@ class SearchService:
                 if settings.ai_provider == 'openai':
                     try:
                         from .video_analysis import analyze_video
-                        vinfo = analyze_video(file_path)
+                        vinfo = analyze_video(file_path, user_instructions=user_instructions)
                         if vinfo:
                             full_metadata.update(vinfo)
                     except Exception as e:
@@ -298,7 +303,7 @@ class SearchService:
                 if settings.ai_provider == 'openai':
                     try:
                         from .video_analysis import analyze_audio
-                        ainfo = analyze_audio(file_path)
+                        ainfo = analyze_audio(file_path, user_instructions=user_instructions)
                         if ainfo:
                             full_metadata.update(ainfo)
                     except Exception as e:
@@ -332,6 +337,15 @@ class SearchService:
                         else:
                             full_metadata['ai_source'] = 'ollama:qwen2.5vl'
             
+            if user_instructions:
+                # Tags asked for on EVERY file are added here, so they're there even when the AI couldn't read the
+                # file (a doorbell chime has no words) or left them out.
+                want = list(tags_for_every_file(user_instructions))
+                if want:
+                    have = full_metadata.get('tags')
+                    have = have if isinstance(have, list) else []
+                    full_metadata['tags'] = want + [t for t in have if t not in want]
+
             full_metadata['_file_path'] = file_path
             return full_metadata
             

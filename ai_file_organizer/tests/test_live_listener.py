@@ -368,10 +368,14 @@ def test_esc_and_stop_drop_what_isnt_finished():
         _pump(lambda: False, 0.3)
         assert not rec["heard"], rec["heard"]
         FakeTx.reply = "Rename the folder to archive"
+        # (its text comes 0.6 s after the sentence ends: with 10 ms it often came back before Stop was pressed - a
+        #  race in this test, not the app - so "still transcribing" wasn't what was being tested; 2026-11-13)
+        FakeTx.delay = 600
         mic.push(np.concatenate([silence(1.0), speech("Rename the folder to archive."), silence(2.1)]))
         n = len(rec["dropped"])
+        assert not rec["heard"] and L._pending, "the sentence should have ended and still be being transcribed"
         L.stop()                                                          # ended, still transcribing → Stop
-        _pump(lambda: False, 0.3)
+        _pump(lambda: False, 1.0)                                         # (its late text arrives - and is ignored)
         assert not rec["heard"], "Stop: nothing runs after you stopped"
         assert any(d[2] == "stopped" for d in rec["dropped"][n:]) or not L._pending
     finally:

@@ -312,7 +312,7 @@ def test_ctrl_tap_through_the_listener():
     def feed(*evs):
         for e in evs:
             L._key_event(e[0], e[1] if len(e) > 1 else 0, 0)
-        _pump(lambda: False, 0.05)
+        _pump(lambda: False, L.DRAW_WAIT_SEC + 0.1)          # (Shift + Ctrl draws after a moment)
     L.start()
     try:
         feed(("mods", CTRL), ("mods", 0))

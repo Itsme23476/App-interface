@@ -159,9 +159,56 @@ IMPORTANT RULES FOR HANDLING USER INSTRUCTIONS:
 - If the user mentions specific things to look for (e.g., "client names", "project codes", "invoice numbers", "brand names"), actively scan for these and include them as tags if they are visible in the content
 - If the user's focus areas are NOT visible or NOT applicable to this content, simply ignore them and proceed with standard analysis
 - The user's instructions should ENHANCE your tagging, not REPLACE your standard comprehensive analysis
-- Aim for 25-45 tags total, blending thorough standard analysis with the user's specific focus areas
+- If the user asks for specific tags, put those tags FIRST in the tags list (so they are never cut), then up to 25 tags in all
+- If the user asks for a tag only for some files (e.g. "tag photos of animals with X"), add it ONLY when that condition is literally true for THIS file; a related theme is not enough
 - If you find elements matching the user's focus, prioritize including those as tags
 """
+
+
+def _keep_tags(tags, user_instructions: str = None, cap: int = 25) -> list:
+    """Lowercase, trim and cap the AI's tags; the tags the person's instructions name go first, so the cap never cuts
+    them (the AI wrote a requested tag as tag 31 of 31 and [:25] cut it: Mac live 2026-11-12, de286ca)."""
+    tags = [str(t).lower()[:64] for t in tags] if isinstance(tags, list) else []
+    asked = (user_instructions or "").lower()
+    named = [t for t in tags if t and t in asked]
+    return (named + [t for t in tags if t not in named])[:cap]
+
+
+_EVERY_FILE_TAGS: Dict[str, tuple] = {}
+_EVERY_FILE_LOCK = __import__("threading").Lock()
+
+
+def tags_for_every_file(user_instructions: str = None) -> tuple:
+    """The tags the person's instructions put on EVERY file ("add the tag X to every file"), read once per
+    instructions text (one small AI call per run; the indexing threads wait for it), so Filect adds them to each file
+    itself - even one the AI can't read (a doorbell chime has no words: no AI read, no tag). Tags that depend on the
+    content ("tag photos of dogs as dog") are not returned; the per-file read handles those. () when there are none or
+    the call fails (a failure isn't remembered: the next file asks again)."""
+    text = (user_instructions or "").strip()[:500]
+    if not text:
+        return ()
+    with _EVERY_FILE_LOCK:
+        if text in _EVERY_FILE_TAGS:
+            return _EVERY_FILE_TAGS[text]
+        system = ("A person typed instructions for how their files should be tagged. Return ONLY the tags they want "
+                  "added to EVERY file, whatever the file is. Leave out tags that depend on what a file contains "
+                  "(\"tag photos of dogs as dog\" -> none) and general focus requests (\"focus on client names\" -> "
+                  "none). Keep each tag exactly as they wrote it, lowercase. Examples: \"Add the tag 'q3-audit' to "
+                  "every file\" -> [\"q3-audit\"]; \"tag all of these project apollo\" -> [\"project apollo\"]. "
+                  "Return JSON only: {\"tags\": [...]}")
+        try:
+            resp = _call_openai_proxy("chat", [{"role": "system", "content": system},
+                                               {"role": "user", "content": text}], max_tokens=150, temperature=0)
+            data = _parse_json_relaxed(resp["choices"][0]["message"]["content"])
+            tags = data.get("tags") if isinstance(data, dict) else None
+        except Exception:
+            return ()
+        if not isinstance(tags, list):
+            return ()
+        got = tuple(dict.fromkeys(str(t).strip().lower()[:64] for t in tags if str(t).strip()))
+        _EVERY_FILE_TAGS[text] = got
+        logger.info(f"[Vision] Tags for every file from the instructions: {list(got)}")
+        return got
 
 
 def build_analysis_prompt(base_prompt: str, user_instructions: str = None) -> str:
@@ -358,6 +405,11 @@ def analyze_image(image_path: Path, model: str = None, user_instructions: str = 
             image_b64 = _file_to_b64(image_path)
             if image_b64:
                 result = gpt_vision_fallback(image_b64, image_path.name, user_instructions=user_instructions)
+                try:                                # cost signal: counts only, success and failure
+                    from app.core.supabase_client import track
+                    track("vision_call", provider="openai", success=bool(result))
+                except Exception:
+                    pass
                 if result:
                     logger.info(f"OpenAI vision analysis successful for {image_path.name}")
                     return result
@@ -432,7 +484,7 @@ def analyze_image(image_path: Path, model: str = None, user_instructions: str = 
             tags = result.get("tags") or []
             if not isinstance(tags, list):
                 tags = []
-            tags = [str(t).lower()[:64] for t in tags][:25]
+            tags = _keep_tags(tags, user_instructions, 25)
             caption = str(result.get("caption", "")).strip()[:400]
             confidence = result.get("confidence")
             try:
@@ -511,7 +563,7 @@ def _gpt_text_analysis(text: str, filename: Optional[str] = None, user_instructi
         tags = data.get("tags") or []
         if not isinstance(tags, list):
             tags = []
-        tags = [str(t).lower()[:64] for t in tags][:20]
+        tags = _keep_tags(tags, user_instructions, 20)
         caption = str(data.get("caption", "")).strip()[:400]
         try:
             conf = float(data.get("confidence", 0))
@@ -605,7 +657,7 @@ def analyze_text(text: str, filename: Optional[str] = None, model: str = None, u
             tags = result.get("tags") or []
             if not isinstance(tags, list):
                 tags = []
-            tags = [str(t).lower()[:64] for t in tags][:25]
+            tags = _keep_tags(tags, user_instructions, 25)
             caption = str(result.get("caption", "")).strip()[:400]
             confidence = result.get("confidence")
             try:
@@ -756,7 +808,7 @@ def gpt_vision_fallback(image_b64: str, filename: Optional[str] = None, user_ins
         tags = data.get("tags") or []
         if not isinstance(tags, list):
             tags = []
-        tags = [str(t).lower()[:64] for t in tags][:25]
+        tags = _keep_tags(tags, user_instructions, 25)
         description = str(data.get("description", "")).strip()
         caption = description[:1200] if description else str(data.get("caption", "")).strip()[:1200]
         try:
@@ -870,7 +922,7 @@ def describe_image_detailed(image_path: Path, model: str = None) -> Optional[Dic
             tags = data.get("tags") or []
             if not isinstance(tags, list):
                 tags = []
-            tags = [str(t).lower()[:64] for t in tags][:25]
+            tags = _keep_tags(tags, None, 25)   # (no instructions reach this reader on Windows)
             try:
                 confidence = float(data.get("confidence", 0.0))
             except Exception:

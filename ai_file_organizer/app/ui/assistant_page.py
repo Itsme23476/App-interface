@@ -407,6 +407,7 @@ class AgentSession:
         self.pending_live = False            # …and so did the queued follow-up
         self.speak_noted = False             # this turn's message asked the agent what to say aloud (SPEAK_NOTE)
         self.n_tools = 0                     # this turn's tool calls (analytics: a count)
+        self.n_mcp = 0                       # ...and how many were MCP tools
         self.cwd = cwd
         self.prompt = prompt                 # this turn's input
         self.title = title                   # short conversation name (list row + notification)
@@ -1528,10 +1529,19 @@ class AssistantPage(QWidget):
         self._set_models(self._card_agent or self._pick_agent(), model, effort)
 
     def _on_notch_dismissed(self):
-        """✕ on the card: the card lets go of its chat and rests (see ClaudeOverlay._on_dismiss); the focus
-        pointer clears so the next voice request starts fresh. The chat keeps running (and stays in the
-        drawer and the page's list) — reopen it from the drawer."""
+        """✕ / Esc on the card. A chat that's working or waiting for your approval stays the card's chat (Mac §5.3):
+        working → the card tucks away (its status on hover; an approval or the answer opens it again); an approval
+        → the card stays up, so Approve / Deny answer it. (Letting go hid the approval — the chat waited for good,
+        with no card and no notice — and an approval asked later never showed.) Otherwise the card lets go of its
+        chat and rests (see ClaudeOverlay._on_dismiss); the focus pointer clears so the next voice request starts
+        fresh. The chat stays in the drawer and the page's list."""
         sess = self._sessions.get(self._card_key) if self._card_key else None
+        if sess is not None and sess.running and sess.status in ("working", "needs_you"):
+            how = "stay" if sess.status == "needs_you" else "tuck"
+            _trace(f"card closed (✕) on live {sess.key} {sess.title!r} — "
+                   f"{'the approval stays up' if how == 'stay' else 'tucked; still its card'}")
+            self._notch("keep_on_close", how)
+            return
         _trace(f"card closed (✕) on {sess.key + ' ' + repr(sess.title) if sess else 'nothing'}"
                f"{' — it keeps running' if sess and sess.running else ''}")
         self._card_key = None
@@ -2102,6 +2112,7 @@ class AssistantPage(QWidget):
         """"Approve & don't ask again": approve this one and switch to Full access (saved)."""
         self.view.set_access(True)
         self._on_access_changed(True)
+        _track("assistant_full_access_from_nudge")
         self._decide(True)
 
     def _on_model_changed(self, model: str, effort: str):
@@ -2272,7 +2283,10 @@ class AssistantPage(QWidget):
         if seed:                                    # a new turn (a hand-over keeps the turn's own flag)
             sess.live_turn = self._live_turn_next
         message = send or sess.prompt
-        sess.n_tools = 0
+        sess.n_tools = sess.n_mcp = 0
+        _track("assistant_task", agent=sess.agent, hands_free=bool(sess.live_turn), follow_up=bool(resume_id),
+               handover=not seed, screenshots=len(getattr(sess, "images", None) or []),
+               bypass=bool(getattr(sess, "bypass", False)))
         sess.speak_noted = bool(sess.live_turn and _setting("live_speak", False))
         if sess.speak_noted:                        # it'll be read aloud: the agent says what to say, first
             from app.core.speech_out import SPEAK_NOTE
@@ -2607,6 +2621,9 @@ class AssistantPage(QWidget):
             if not sess.stopping:                   # (keep "Stopping…" while a Stop winds the turn down)
                 sess.last_action = label
             sess.final_text = ""
+            sess.n_tools += 1                       # (analytics, and "the chat changed files more recently")
+            if str(step.tool or "").startswith("mcp__") or "." in str(step.tool or ""):   # Claude / Codex MCP
+                sess.n_mcp += 1
             _trace(f"{key} · {label}")
             if not sess.feed_lines or sess.feed_lines[-1] != label:
                 sess.feed_lines.append(label)
@@ -2701,6 +2718,8 @@ class AssistantPage(QWidget):
         sess.cost, sess.status = float(cost or 0.0), "done"
         sess.duration = time.time() - sess.started_at
         sess.last_action = ""
+        _track("assistant_done", agent=sess.agent, secs=int(sess.duration or 0), tools=sess.n_tools,
+               mcp_tools=getattr(sess, "n_mcp", 0), stopped=bool(sess.stopping), hands_free=bool(sess.live_turn))
         _trace(f"{key} DONE '{sess.title}' sid={session_id or '(none)'} cost=${float(cost or 0):.4f} "
                f"focused={key == self._focused_key} card={self._card_shows(key)}")
         if self._card_shows(key):
@@ -2842,6 +2861,7 @@ class AssistantPage(QWidget):
         sess.status, sess.error = "error", msg
         sess.last_action = ""
         _trace(f"{key} ERROR '{sess.title}': {msg}")
+        _track("assistant_error", agent=sess.agent, kind=(info[1] if info else "error"))
         if sess.live_turn and not sess.stopping:
             self.live_event.emit(key, "error", {"text": msg})
         if self._card_shows(key):

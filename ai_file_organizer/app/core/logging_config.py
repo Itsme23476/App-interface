@@ -52,5 +52,29 @@ def setup_logging():
     
     logging.info("Logging configured successfully")
     logging.info(f"Log file: {log_file}")
+    _record_crashes(logs_dir)
+
+
+_crash_file = None  # (kept open for the whole run: faulthandler writes into it at the moment of a crash)
+
+
+def _record_crashes(logs_dir: Path):
+    """A crash in native code (Qt, an image or PDF decoder, an access violation...) kills Filect before Python can
+    log anything. faulthandler writes every thread's Python stack to logs/crash.log at that moment, so a crash
+    report says exactly where. Each launch adds one line, so a crash can be matched to its session. (Pack §6.1.)"""
+    global _crash_file
+    try:
+        import faulthandler
+        from datetime import datetime
+        try:
+            from app.version import VERSION
+        except Exception:
+            VERSION = "?"
+        _crash_file = open(logs_dir / "crash.log", "a", encoding="utf-8")
+        _crash_file.write(f"--- Filect {VERSION} started {datetime.now():%Y-%m-%d %H:%M:%S} (pid {os.getpid()})\n")
+        _crash_file.flush()
+        faulthandler.enable(_crash_file, all_threads=True)
+    except Exception as e:
+        logging.warning(f"Crash recorder unavailable: {e}")
 
 

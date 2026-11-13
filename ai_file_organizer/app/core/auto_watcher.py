@@ -2051,6 +2051,21 @@ class AutoOrganizeWatcher(QObject):
         ORGANIZE_AS_IS = 2
         CONTINUE_WATCHING = 3
         
+        # Telemetry: which mode people pick per folder. Counts only, never folder paths.
+        try:
+            from app.core.supabase_client import track
+            counts = {"reorganize_all": 0, "organize_as_is": 0, "continue_watching": 0}
+            for c in folder_choices.values():
+                if c == 1:
+                    counts["reorganize_all"] += 1
+                elif c == 2:
+                    counts["organize_as_is"] += 1
+                elif c == 3:
+                    counts["continue_watching"] += 1
+            track("organize_started", source="auto_popup", folder_count=len(folder_choices), **counts)
+        except Exception:
+            pass
+
         # Separate folders by their chosen action
         folders_to_reorganize = []  # flatten + organize
         folders_to_organize = []     # organize as-is

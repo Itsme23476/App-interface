@@ -1822,6 +1822,14 @@ class AuthDialog(QDialog):
         # Taller than the other pages so the plan card isn't clipped on
         # high-DPI / scaled displays.
         self.setFixedSize(460, 730)
+        # Re-check while this page is up, not only after the button is clicked: someone who resubscribed elsewhere
+        # (the website on their phone, a card retry that went through) stayed locked out until they clicked again or
+        # restarted Filect. Same double-confirmed check and 30-minute limit as after a click. (Mac 59aab88.)
+        poll = getattr(self, "_poll_timer", None)
+        if poll is not None and not poll.isActive():
+            self._poll_count = 0
+            self._confirm_count = 0
+            poll.start(3000)
     
     def _open_checkout(self):
         """Open the web pricing page (plan selection + payment) and start polling."""
@@ -1926,6 +1934,8 @@ class AuthDialog(QDialog):
     
     def _do_logout(self):
         """Handle logout."""
+        if self._poll_timer.isActive():           # (the subscribe page's re-check doesn't carry on at the sign-in page)
+            self._poll_timer.stop()
         supabase_auth.sign_out()
         settings.clear_auth_tokens()
         

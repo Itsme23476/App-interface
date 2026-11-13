@@ -16,6 +16,10 @@ Modes (read at the moment the hold threshold is crossed):
   - trigger alone        -> 'dictate'
   - trigger + Shift      -> 'search'
   - trigger + Alt        -> 'organize'
+Shift held down FIRST (at least SHIFT_FIRST_SEC before the trigger goes down), then the trigger -> mute_toggle:
+mutes or unmutes the hands-free Assistant (the Mac's Shift, then Fn). Decided the moment the trigger goes down;
+holding them toggles once and records nothing. Shift and the trigger pressed together, or the trigger first and
+then Shift, stay a search. With Alt held too it isn't mute (a normal press).
 
 Default trigger is ``ctrl+win`` (hold Ctrl **and** the Windows key) — the de-facto
 standard push-to-talk hotkey for Windows dictation apps (Wispr Flow, Typeless,
@@ -24,6 +28,7 @@ The trigger is configurable via settings (a single named modifier, the ctrl+win
 chord, or a single alphanumeric key for testing).
 """
 import logging
+import time
 from PySide6.QtCore import QObject, Signal, QTimer
 
 logger = logging.getLogger(__name__)
@@ -47,6 +52,7 @@ _SHIFT_VKS = {0x10, 0xA0, 0xA1}
 _ALT_VKS = {0x12, 0xA4, 0xA5}
 
 DEFAULT_TRIGGER = "ctrl+win"
+SHIFT_FIRST_SEC = 0.1     # Shift down this long before the shortcut = mute / unmute the Assistant (the Mac's ⇧ then fn)
 
 
 def _key_down(vk: int) -> bool:
@@ -89,6 +95,7 @@ class DictationHotkey(QObject):
 
     dictate_start = Signal(str)   # mode: 'dictate' | 'search' | 'organize'
     dictate_stop = Signal()
+    mute_toggle = Signal()        # Shift first, then the shortcut: mute / unmute the hands-free Assistant
 
     def __init__(self, trigger: str = DEFAULT_TRIGGER, hold_ms: int = 180,
                  poll_ms: int = 25, parent=None):
@@ -99,6 +106,9 @@ class DictationHotkey(QObject):
         self._active = False
         self._mode = "dictate"
         self._masked_win = self._masked_alt = False   # (the mask key was sent for this press's Win / Alt)
+        self._shift_since = None      # when Shift (either one) went down; None while both are up
+        self._mute_press = False      # this press was Shift-first: it toggled mute, it records nothing
+        self._clock = time.monotonic
         self.set_trigger(trigger)
         self._timer = QTimer(self)
         self._timer.setInterval(self._poll_ms)
@@ -143,6 +153,7 @@ class DictationHotkey(QObject):
         if not self._timer.isActive():
             self._down_frames = 0
             self._active = False
+            self._shift_since, self._mute_press = None, False
             self._timer.start()
             logger.info(f"[DICTATION HOTKEY] polling '{self._trigger_name}' "
                         f"(hold {self._hold_frames * self._poll_ms}ms)")
@@ -166,6 +177,24 @@ class DictationHotkey(QObject):
             return "organize"
         return "dictate"
 
+    def _watch_shift(self, now: float) -> None:
+        """Remember when Shift went down (the first of the two Shift keys counts; both up clears it). Read only —
+        Shift is never swallowed."""
+        if (not self._chord) and self._vk in _SHIFT_VKS:
+            self._shift_since = None                      # (Shift IS the trigger: there's no "Shift first")
+            return
+        if _key_down(_VK_SHIFT):
+            if self._shift_since is None:
+                self._shift_since = now
+        else:
+            self._shift_since = None
+
+    def _shift_first(self, now: float) -> bool:
+        """The trigger just went down: was Shift already held for SHIFT_FIRST_SEC (and no Alt — that's another
+        shortcut)?"""
+        return (self._shift_since is not None and now - self._shift_since >= SHIFT_FIRST_SEC - 1e-6
+                and not _key_down(_VK_ALT))
+
     def _mask_if_needed(self):
         """While the shortcut is active: once Win, and once Alt, is part of it, send the mask key (see
         _mask_menu_keys) — so letting go opens neither Start nor the front app's menu. A quick tap never gets here."""
@@ -176,9 +205,21 @@ class DictationHotkey(QObject):
             _mask_menu_keys()
 
     def _poll(self):
+        now = self._clock()
         down = self._trigger_down()
+        if not down or self._down_frames == 0:
+            self._watch_shift(now)                        # (while the trigger is held, keep when Shift went down)
         if down:
             self._down_frames += 1
+            if self._down_frames == 1 and self._shift_first(now):
+                self._mute_press = True
+                self._masked_win = self._masked_alt = False
+                self._mask_if_needed()                    # (letting go of Win mustn't open Start)
+                logger.info("[DICTATION HOTKEY] Shift first, then the shortcut: mute / unmute")
+                self.mute_toggle.emit()
+                return
+            if self._mute_press:
+                return                                    # (held: it toggled once, it records nothing)
             if self._down_frames == self._hold_frames and not self._active:
                 self._active = True
                 self._masked_win = self._masked_alt = False
@@ -189,6 +230,7 @@ class DictationHotkey(QObject):
             elif self._active:
                 self._mask_if_needed()                  # (Alt pressed a moment after the start)
         else:
+            self._mute_press = False
             if self._active:
                 self._active = False
                 logger.info("[DICTATION HOTKEY] stop")

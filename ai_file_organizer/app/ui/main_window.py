@@ -62,6 +62,17 @@ logger = logging.getLogger(__name__)
 QS_DEFAULT_SHORTCUT = "Ctrl+Alt+H"
 
 
+def _is_valid_hotkey(seq: str) -> bool:
+    """True if `seq` has Ctrl, Alt or Win AND a key that isn't a modifier. Shift alone isn't enough: Shift + a letter
+    is just typing a capital letter, and as a global shortcut it swallows that letter in every app (the owner's Mac
+    had 'shift+a' saved: every capital A opened Quick Search instead. Mac 0308d18)."""
+    mods = {'ctrl', 'control', 'shift', 'alt', 'meta', 'win', 'cmd', 'command', 'option'}
+    parts = [p for p in (seq or '').replace(' ', '').lower().split('+') if p]
+    if len(parts) < 2:
+        return False
+    return any(p in mods - {'shift'} for p in parts) and any(p not in mods for p in parts)
+
+
 def _normalize_shortcut(value) -> str:
     """Return a clean ``Ctrl+Alt+H``-style string for the global hotkey.
 
@@ -81,8 +92,8 @@ def _normalize_shortcut(value) -> str:
         if seq.isEmpty() or seq.count() == 0:
             return QS_DEFAULT_SHORTCUT
         portable = seq.toString(QKeySequence.PortableText)
-        if not portable or "+" not in portable:
-            # Bare key with no modifier — almost certainly a mistake.
+        if not portable or not _is_valid_hotkey(portable):
+            # A bare key, or Shift + a letter: either would fire on normal typing in every app.
             return QS_DEFAULT_SHORTCUT
         return portable
     except Exception:
@@ -238,14 +249,10 @@ class AutoIndexWorker(QThread):
             self.start()
     
     def run(self):
-        """Process files in the queue."""
-        import hashlib
-        from datetime import datetime
-        from app.core.categorize import get_file_metadata
-        from app.core.database import file_index
-        from app.core.vision import analyze_image, gpt_vision_fallback, _file_to_b64
-        from app.core.settings import settings
-        
+        """Process files in the queue: each new file goes through the same analyzer as Analyze Files, so every type is
+        read (notes, documents, video, audio - not just photos and PDFs), with the watched folder's instructions, the
+        monthly limit, the usage count and the unchanged-skip. (It used to save every other file by name only - a
+        note's words couldn't be searched - and skipped the limit and the usage count. Mac 694b1b6.)"""
         self._running = True
 
         while self._queue:
@@ -257,55 +264,18 @@ class AutoIndexWorker(QThread):
             else:
                 file_path, file_instructions = item, None
 
+            self.status_update.emit(f"Analyzing: {file_path.name}")
             try:
-                # Check if file already exists in index with tags
-                existing = file_index.get_file_by_path(str(file_path))
-                if existing:
-                    has_tags = existing.get('tags') and existing['tags'] not in ['[]', '', None]
-                    has_label = existing.get('label') and existing['label'] not in ['', None]
-                    has_caption = existing.get('caption') and existing['caption'] not in ['', None]
-                    
-                    if has_tags or has_label or has_caption:
-                        logger.info(f"Skipping already indexed file: {file_path}")
-                        self.file_indexed.emit(file_path.name, 'skipped')
-                        continue
-                
-                # Get basic metadata
-                metadata = get_file_metadata(file_path)
-                metadata['source_path'] = str(file_path)
-                
-                # Compute content hash
-                try:
-                    h = hashlib.sha256()
-                    with open(file_path, 'rb') as fh:
-                        for chunk in iter(lambda: fh.read(1024 * 1024), b''):
-                            h.update(chunk)
-                    metadata['content_hash'] = h.hexdigest()
-                except Exception:
-                    metadata['content_hash'] = None
-                
-                metadata['last_indexed_at'] = datetime.utcnow().isoformat()
-                
-                # AI Vision analysis for images (uses configured AI provider)
-                ext = file_path.suffix.lower()
-                if ext in {'.png', '.jpg', '.jpeg', '.bmp', '.tiff', '.tif', '.gif', '.webp', '.avif', '.heic', '.heif', '.ico', '.raw', '.cr2', '.nef', '.arw', '.pdf'}:
-                    self.status_update.emit(f"Analyzing: {file_path.name}")
-                    
-                    # analyze_image handles provider selection internally.
-                    # Pass the watched folder's per-folder instruction (if any)
-                    # so tags/labels reflect what the user asked for.
-                    vision = analyze_image(file_path, user_instructions=file_instructions)
-                    if vision:
-                        metadata.update(vision)
-                        metadata['ai_source'] = settings.ai_provider
-                
-                # Add to index
-                file_index.add_file(metadata)
+                result = search_service.index_single_file(file_path, user_instructions=file_instructions)
+            except Exception as e:
+                result = {"error": str(e)}
+            if result.get('success'):
                 logger.info(f"Auto-indexed: {file_path}")
                 self.file_indexed.emit(file_path.name, 'success')
-                
-            except Exception as e:
-                logger.error(f"Error auto-indexing {file_path}: {e}")
+            elif result.get('skipped'):
+                self.file_indexed.emit(file_path.name, 'skipped')
+            else:
+                logger.error(f"Error auto-indexing {file_path}: {result.get('error')}")
                 self.file_indexed.emit(file_path.name, 'error')
 
         self._running = False
@@ -329,20 +299,24 @@ class HelpSendWorker(QThread):
     finished_ok = Signal(dict)
     failed = Signal(str)
 
-    def __init__(self, url: str, payload: dict):
+    def __init__(self, url: str, payload: dict, token: str = None):
         super().__init__()
         self.url = url
         self.payload = payload
+        self.token = token          # the user's sign-in: the server skips the website's captcha only for a signed-in app
 
     def run(self):
         import urllib.request
         import urllib.error
         try:
             data = json.dumps(self.payload).encode("utf-8")
+            headers = {"Content-Type": "application/json"}
+            if self.token:
+                headers["Authorization"] = f"Bearer {self.token}"
             req = urllib.request.Request(
                 self.url,
                 data=data,
-                headers={"Content-Type": "application/json"},
+                headers=headers,
                 method="POST",
             )
             with urllib.request.urlopen(req, timeout=15) as resp:
@@ -513,7 +487,11 @@ class HelpDialog(QDialog):
         self.send_button.setText("Sending…")
 
         payload = {"name": name, "email": email, "message": message}
-        self._worker = HelpSendWorker(self._endpoint, payload)
+        try:      # (without it the server asks for the website's captcha: every Windows message was refused, 403)
+            token = supabase_auth.get_access_token() if supabase_auth.is_authenticated else None
+        except Exception:
+            token = None
+        self._worker = HelpSendWorker(self._endpoint, payload, token=token)
         self._worker.finished_ok.connect(self._on_send_ok)
         self._worker.failed.connect(self._on_send_failed)
         self._worker.start()
@@ -707,16 +685,10 @@ class MainWindow(QMainWindow):
             import time as _time
             start = getattr(self, "_session_started_at", None)
             if start:
-                from app.core.supabase_client import track, supabase_auth
+                from app.core.supabase_client import track, supabase_auth, flush_tracking
                 if supabase_auth.is_authenticated:
-                    # sync_wait_seconds blocks briefly so the POST has time
-                    # to land before the process exits (daemon threads get
-                    # killed when the Qt loop exits in super().closeEvent).
-                    track(
-                        "session_ended",
-                        sync_wait_seconds=2.0,
-                        duration_seconds=int(_time.time() - start),
-                    )
+                    track("session_ended", duration_seconds=int(_time.time() - start))
+                    flush_tracking(1.0)       # quitting: send what's waiting (at most 1 s, only if anything is)
         except Exception:
             pass
         super().closeEvent(event)
@@ -869,9 +841,12 @@ class MainWindow(QMainWindow):
         self.setup_agents_page()      # Index 5 (Agents — shown above Settings in the sidebar)
         self.setup_live_page()        # Index 6 (Assistant — hands-free; shown between Voice and Agents)
 
-        # Set default page to Search
-        self.page_stack.setCurrentIndex(0)
-        self.nav_buttons[0].setChecked(True)
+        # The first tab: the Assistant once Claude Code or Codex is set up (as of the last check — asking them now
+        # takes up to 20 s); before that Search, so a new user's first screen isn't a setup step. If the Assistant
+        # page failed to load (a QLabel stand-in), Search. (Mac §5.2)
+        start = 6 if settings.agent_was_ready and not isinstance(self.live_page, QLabel) else 0
+        self.page_stack.setCurrentIndex(start)
+        self.nav_button_group.button(start).setChecked(True)
         
         # Status bar
         self.status_bar = QStatusBar()
@@ -919,15 +894,16 @@ class MainWindow(QMainWindow):
         # Line-icons (drawn, theme-agnostic) replace the old emoji glyphs.
         from app.ui.icons import line_icon as _line_icon
         from PySide6.QtCore import QSize as _QSize
-        # (screen order; idx = the page index). Agents is page 5 but sits above Settings; Assistant (hands-free,
-        # page 6) sits between Voice and Agents — as on the Mac.
+        # (screen order; idx = the page index, which never changes — other code goes to pages by number). "Control
+        # your entire computer by voice": the Assistant first, as on the Mac (§5.2). Windows keeps its own page
+        # numbers (Voice 3, Settings 4; the Mac has them the other way round).
         nav_items = [
-            ("search", "Search", 0),
-            ("folder", "Organize", 1),
-            ("layers", "Analyze Files", 2),
-            ("mic", "Voice", 3),
             ("waveform", "Assistant", 6),
             ("sparkle", "Agents", 5),
+            ("mic", "Voice", 3),
+            ("folder", "Organize", 1),
+            ("search", "Search", 0),
+            ("layers", "Analyze Files", 2),
             ("gear", "Settings", 4),
         ]
 
@@ -1011,9 +987,16 @@ class MainWindow(QMainWindow):
         # Hide tips IMMEDIATELY before page switch
         if hasattr(self, 'tips_manager'):
             self.tips_manager.hide_all_tips()
-        
+
+        if index != self.page_stack.currentIndex():          # which tabs people use (a queue put - no lag)
+            try:
+                from app.core.supabase_client import track
+                track("tab_opened", tab={0: "search", 1: "organize", 2: "analyze", 3: "voice", 4: "settings",
+                                         5: "agents", 6: "assistant"}.get(index, str(index)))
+            except Exception:
+                pass
         self.page_stack.setCurrentIndex(index)
-        
+
         # Show tips for new page after a tiny delay
         if hasattr(self, 'tips_manager'):
             QTimer.singleShot(150, self.tips_manager.show_tips_for_visible_widgets)
@@ -1540,7 +1523,15 @@ class MainWindow(QMainWindow):
         self.index_cancel_btn.setObjectName("secondaryButton")
         btn_row.addWidget(self.index_cancel_btn)
         progress_layout.addLayout(btn_row)
-        
+
+        # What waits for its turn (folders / files picked or dropped while analyzing) - on the page
+        self.queue_label = QLabel("")
+        self.queue_label.setObjectName("progressLabel")
+        self.queue_label.setAlignment(Qt.AlignCenter)
+        self.queue_label.setWordWrap(True)
+        self.queue_label.setVisible(False)
+        progress_layout.addWidget(self.queue_label)
+
         self.index_progress_container.setVisible(False)
         content_layout.addWidget(self.index_progress_container)
         
@@ -1634,13 +1625,8 @@ class MainWindow(QMainWindow):
         self.index_button.setVisible(False)
         self.index_button_action = QPushButton("")
         self.index_button_action.setVisible(False)
-        self.queue_row = QFrame()
-        self.queue_row.setVisible(False)
-        self.queue_label = QLabel("")
         self.queue_items_label = QLabel("")
         self.clear_queue_btn = QPushButton("")
-        self.queue_top_spacer = QWidget()
-        self.queue_spacer = QWidget()
         self.quick_index_header = QPushButton("")
         self.quick_index_content = QWidget()
         self.index_pc_button = QPushButton("")
@@ -2336,6 +2322,25 @@ class MainWindow(QMainWindow):
         except Exception as e:
             logger.error(f"Error offering reindex for watched files: {e}")
     
+    def _live_file_count(self):
+        """While anything is analyzed (a folder, files, Entire PC): 'View Analyzed Files (N)' and 'Showing N indexed
+        files' follow the files as they're saved - at most once a second, one COUNT on the index. (They waited for the
+        whole folder to end, so the page said (0) while files were being analyzed: live test 2026-11-13.) The list
+        window itself isn't rebuilt mid-run - that would clear your ticks; it has its own Refresh."""
+        now = time.monotonic()
+        if now - getattr(self, '_live_count_at', 0.0) < 1.0:
+            return
+        self._live_count_at = now
+        try:
+            from app.core.database import file_index
+            n = file_index.get_file_count()
+        except Exception:
+            return
+        if hasattr(self, 'view_files_btn'):
+            self.view_files_btn.setText(f"View Analyzed Files ({n})")
+        if hasattr(self, 'debug_info_label'):
+            self.debug_info_label.setText(f"Showing {n} indexed files")
+
     def _update_view_files_button_count(self):
         """Update the View Files button with the current file count.
 
@@ -2681,7 +2686,7 @@ class MainWindow(QMainWindow):
         # Inline hint so users know HOW to use the box (it doesn't accept
         # typed text — they have to click and press the actual key combo).
         qs_hint = QLabel(
-            "Click the box and press your shortcut (must include Ctrl, Alt, or Shift)."
+            "Click the box and press your shortcut (must include Ctrl, Alt or Win)."
         )
         qs_hint.setStyleSheet(
             "color: #8B8B96; font-size: 11px; padding-left: 70px;"
@@ -3696,43 +3701,40 @@ class MainWindow(QMainWindow):
             logger.debug(f"Could not update usage labels: {e}")
     
     def _open_billing_portal(self):
-        """Open Stripe billing portal for subscription management."""
+        """Open the Stripe billing portal. The server is told WHO it is with the sign-in, never with a user id in a link
+        (2026-11-12 security fix: anyone holding someone's id could open THEIR portal); it returns the portal link and
+        that opens in the browser. If that fails, the account page opens instead (sign in there → Billing). Mac 8bb560c."""
+        import threading
         import webbrowser
-        from urllib.parse import quote
         from app.core.supabase_client import supabase_auth, SUPABASE_URL
         from app.ui.organize_page import ModernInfoDialog
-        
+
         if not supabase_auth.is_authenticated:
             ModernInfoDialog.show_warning(self, "Not Logged In", "Please sign in to manage your subscription.")
             return
-        
-        # Get user info from the current_user dict
-        current_user = supabase_auth.current_user
-        if not current_user:
-            ModernInfoDialog.show_warning(self, "Error", "Could not retrieve account info. Please try signing out and back in.")
-            return
-        
-        user_id = current_user.get('id', '')
-        email = current_user.get('email', '')
-        
-        if not email or not user_id:
-            ModernInfoDialog.show_warning(self, "Error", "Could not retrieve account email. Please try signing out and back in.")
-            return
-        
-        # Open billing portal via Supabase Edge Function
-        portal_url = f"{SUPABASE_URL}/functions/v1/create-portal-session?user_id={user_id}&email={quote(email)}"
-        
-        try:
-            webbrowser.open(portal_url)
-            self.status_bar.showMessage("Opening subscription management...", 3000)
-        except Exception as e:
-            logger.error(f"Error opening billing portal: {e}")
-            ModernInfoDialog.show_warning(self, "Error", "Could not open billing portal. Please try again.")
+        token = supabase_auth.get_access_token()
+        self.status_bar.showMessage("Opening subscription management...", 3000)
+
+        def work():
+            url = "https://filect.io/account"
+            try:
+                import requests
+                r = requests.post(f"{SUPABASE_URL}/functions/v1/create-portal-session",
+                                  headers={"Authorization": f"Bearer {token}"}, timeout=20)
+                j = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
+                if j.get("url"):
+                    url = j["url"]
+                else:
+                    logger.warning(f"billing portal: HTTP {r.status_code} {j.get('error')} — opening the account page")
+            except Exception as e:
+                logger.error(f"Error opening billing portal: {e}")
+            webbrowser.open(url)
+
+        threading.Thread(target=work, daemon=True, name="filect-billing-portal").start()
 
     def _open_cancel_flow(self):
         """Open the web cancellation/retention flow (reason -> 50% off -> cancel)."""
         import webbrowser
-        from urllib.parse import quote
         from app.core.supabase_client import supabase_auth
         from app.ui.organize_page import ModernInfoDialog
 
@@ -3742,12 +3744,14 @@ class MainWindow(QMainWindow):
 
         current_user = supabase_auth.current_user or {}
         user_id = current_user.get('id', '')
-        email = current_user.get('email', '')
         if not user_id:
             ModernInfoDialog.show_warning(self, "Error", "Could not retrieve account info. Please try signing out and back in.")
             return
 
-        url = f"https://filect.io/cancel?uid={user_id}&email={quote(email)}&source=app"
+        # WHO it is goes as the sign-in in the link's #part (never sent to any server; the page wipes it from the
+        # address bar), not as an id the page would trust (2026-11-12 security fix, Mac 8bb560c).
+        token = supabase_auth.get_access_token()
+        url = "https://filect.io/cancel?source=app" + (f"#at={token}" if token else "")
         try:
             webbrowser.open(url)
             self.status_bar.showMessage("Opening cancellation in your browser...", 3000)
@@ -4052,6 +4056,11 @@ class MainWindow(QMainWindow):
         # Wrapper to show overlay and remember previously focused window
         def show_quick_overlay():
             try:
+                from app.core.supabase_client import track
+                track("quick_search_opened")
+            except Exception:
+                pass
+            try:
                 self._prev_foreground_hwnd = get_foreground_hwnd()
                 # Save mouse position relative to the dialog window
                 self._rel_click_point = None
@@ -4083,9 +4092,13 @@ class MainWindow(QMainWindow):
         # is silent.
         if _stored and _stored.lower() != ks.lower():
             logger.warning(
-                f"[QS] Stored shortcut {_stored!r} could not be parsed — "
-                f"using {ks!r} instead. Re-record in Settings → Quick Search."
+                f"[QS] Stored shortcut {_stored!r} can't be used — "
+                f"using {ks!r} instead (saved, and shown in Settings)."
             )
+            settings.set_quick_search_shortcut(ks.lower())      # (so Settings shows the one that works)
+            if hasattr(self, 'qs_shortcut_input'):
+                from PySide6.QtGui import QKeySequence as _QKS
+                self.qs_shortcut_input.setKeySequence(_QKS(ks))
 
         self._qhotkey = None
         self._win_hotkey = None
@@ -5248,15 +5261,15 @@ class MainWindow(QMainWindow):
         seq = self.qs_shortcut_input.keySequence()
         sc = seq.toString(QKeySequence.PortableText) if not seq.isEmpty() else ""
 
-        # Reject empty + bare-key combos (no modifier). A single-key global
-        # hotkey would fire on every keypress during normal typing.
-        if not sc or "+" not in sc:
+        # Reject empty, a bare key, and Shift + a letter: as a global shortcut each would fire on normal typing
+        # (Shift + A is a capital A - it would be swallowed in every app).
+        if not sc or not _is_valid_hotkey(sc):
             from app.ui.organize_page import ModernInfoDialog
             ModernInfoDialog.show_warning(
                 self,
                 "Shortcut",
-                "Click the box and press a key combination that includes "
-                "Ctrl, Alt, or Shift — for example Ctrl+Alt+H.",
+                "Use Ctrl, Alt or Win together with a key - for example Ctrl+Alt+H. "
+                "(Shift + a letter is just typing a capital letter.)",
             )
             # Restore whatever was previously saved so the box isn't left blank.
             self.qs_shortcut_input.setKeySequence(
@@ -5293,7 +5306,7 @@ class MainWindow(QMainWindow):
                 ok = file_index.update_file_field(file_id, 'label', text)
             elif col == 5:  # Tags
                 tags = [t.strip() for t in (text or '').split(',') if t.strip()]
-                ok = file_index.update_file_field(file_id, 'tags', tags)
+                ok = file_index.set_tags_by_user(file_id, tags)   # (typed tags survive a re-read)
             elif col == 6:  # Caption
                 ok = file_index.update_file_field(file_id, 'caption', text)
             elif col == 10:  # Purpose
@@ -5723,51 +5736,83 @@ Move Plan Summary:
         # Start indexing
         self._start_indexing_path(self.index_path)
     
-    def _add_to_index_queue(self, path: Path):
-        """Add a path to the indexing queue."""
+    def _keep_running_worker(self):
+        """Call before replacing self.index_worker. A QThread whose last reference goes while it still runs makes Qt
+        abort the whole app ("QThread: Destroyed while thread is still running"), so park it until it ends."""
+        old = getattr(self, 'index_worker', None)
+        kept = [w for w in getattr(self, '_retired_workers', []) if w.isRunning()]
+        if old is not None and old.isRunning():
+            kept.append(old)
+        self._retired_workers = kept
+
+    def _start_next_queued(self) -> bool:
+        """After an analysis ends: the next queued folder, else files dropped while it ran. True if one started.
+        (A folder queued while a file batch ran used to wait for good.)"""
+        if self.index_queue:
+            next_path = self.index_queue.pop(0)
+            how = (getattr(self, '_queue_instructions', {}) or {}).pop(str(next_path), None)
+            self._update_queue_ui()
+            self.status_bar.showMessage(f"Starting next: {next_path.name}")
+            QTimer.singleShot(300, lambda: self._start_indexing_path(next_path, user_instructions=how))
+            return True
+        files = list(getattr(self, '_pending_files', []) or [])
+        if files:
+            hows = getattr(self, '_pending_instructions', {}) or {}
+            how = hows.get(files[0])
+            batch = [f for f in files if hows.get(f) == how]          # (the files that share these instructions)
+            self._pending_files = [f for f in files if f not in batch]
+            for f in batch:
+                hows.pop(f, None)
+            self._update_queue_ui()
+            QTimer.singleShot(300, lambda: self._index_individual_files(batch, user_instructions=how))
+            return True
+        return False
+
+    def _index_files_or_queue(self, files: list, user_instructions: str = None):
+        """Files dropped while something is being analyzed wait their turn (starting them at once replaced the
+        running worker: Filect crashed)."""
+        if self.is_indexing:
+            pending = getattr(self, '_pending_files', [])
+            new = [f for f in files if f not in pending]
+            self._pending_files = pending + new
+            hows = getattr(self, '_pending_instructions', None)
+            if not isinstance(hows, dict):
+                hows = self._pending_instructions = {}
+            for f in new:
+                hows[f] = user_instructions                              # (kept for when they start)
+            self._update_queue_ui()
+            self.status_bar.showMessage(f"Added {len(files)} file{'s' if len(files) != 1 else ''} to the queue")
+            return
+        self._index_individual_files(files, user_instructions=user_instructions)
+
+    def _add_to_index_queue(self, path: Path, user_instructions: str = None):
+        """Add a path to the indexing queue (with the custom instructions typed for it, used when it starts)."""
         logger.info(f"_add_to_index_queue called with path: {path}")
         if path not in self.index_queue:
             self.index_queue.append(path)
+            if user_instructions:
+                self._queue_instructions = dict(getattr(self, '_queue_instructions', {}) or {})
+                self._queue_instructions[str(path)] = user_instructions
             logger.info(f"Queue now has {len(self.index_queue)} items: {[p.name for p in self.index_queue]}")
             self._update_queue_ui()
             self.status_bar.showMessage(f"Added to queue: {path.name} ({len(self.index_queue)} pending)")
     
     def _update_queue_ui(self):
-        """Update the compact queue indicator and expand section when queue is visible."""
-        logger.info(f"_update_queue_ui called. Queue has {len(self.index_queue)} items")
-        if self.index_queue:
-            logger.info("Queue not empty, showing queue_row")
-            # Add spacing above the queue row
-            self.queue_top_spacer.setVisible(True)
-            self.queue_top_spacer.setFixedHeight(25)  # Space above queue
-            
-            self.queue_row.setVisible(True)
-            self.queue_row.show()  # Force show
-            self.queue_spacer.setVisible(True)
-            self.queue_spacer.setFixedHeight(15)  # Space below queue
-            logger.info(f"queue_row.isVisible() = {self.queue_row.isVisible()}")
-            
-            count = len(self.index_queue)
-            self.queue_label.setText(f"📋 Queue: {count} pending")
-            # Show first 2 item names inline
-            names = [p.name for p in self.index_queue[:2]]
-            if count > 2:
-                names.append(f"+{count - 2} more")
-            self.queue_items_label.setText(" • ".join(names))
-            # Expand the index group to accommodate queue
-            self.index_group.setMinimumHeight(self.index_group.sizeHint().height() + 80)
-        else:
-            self.queue_top_spacer.setVisible(False)
-            self.queue_top_spacer.setFixedHeight(0)
-            self.queue_row.setVisible(False)
-            self.queue_spacer.setVisible(False)
-            self.queue_spacer.setFixedHeight(0)
-            # Reset minimum height
-            self.index_group.setMinimumHeight(0)
+        """Say on the page what waits for its turn: a line under Pause / Cancel, folders then files. (The old
+        queue_row and its two spacers were never placed on the page, so showing them opened blank white windows -
+        found in the live test, as on the Mac: d1cc875. And no `index_group` here: it was never created, so it threw
+        and a queued folder was lost. Pack §6.2.)"""
+        names = [p.name for p in self.index_queue] + [Path(f).name for f in (getattr(self, '_pending_files', []) or [])]
+        if names:
+            shown = " • ".join(names[:2]) + (f" +{len(names) - 2} more" if len(names) > 2 else "")
+            self.queue_label.setText(f"📋 Queued, starts when this one finishes: {shown}")
+        self.queue_label.setVisible(bool(names))
+        self.queue_items_label.setText(" • ".join(names[:2]))
     
     def _clear_index_queue(self):
         """Clear the indexing queue."""
         self.index_queue.clear()
+        self._queue_instructions = {}
         self._update_queue_ui()
         self.status_bar.showMessage("Queue cleared")
     
@@ -5807,6 +5852,7 @@ Move Plan Summary:
         self.status_bar.showMessage("Indexing directory...")
         
         # Create the worker
+        self._keep_running_worker()
         self.index_worker = IndexWorker(self.index_path)
         self.index_worker.index_completed.connect(self.on_index_completed)
         self.index_worker.index_error.connect(self.on_index_error)
@@ -5886,9 +5932,9 @@ Move Plan Summary:
             if hasattr(self, 'index_worker') and self.index_worker:
                 self.index_worker.cancel()
             
-            # Clear PC indexing queue if active
+            # Entire PC: None = cancelled (the folder still finishing says nothing, and nothing after it starts)
             if hasattr(self, '_pc_index_queue'):
-                self._pc_index_queue = []
+                self._pc_index_queue = None
             
             self._hide_index_controls()
             self.status_bar.showMessage("Indexing cancelled. Files already indexed have been saved.")
@@ -5925,6 +5971,7 @@ Move Plan Summary:
                 self.index_percent_label.setText("...")
                 self.index_progress_label.setText("Scanning files...")
             self.status_bar.showMessage(message)
+            self._live_file_count()
         except Exception:
             pass  # UI might be closed
     
@@ -5954,14 +6001,10 @@ Move Plan Summary:
     
     def on_index_completed(self, result: Dict[str, Any]):
         """Handle index completion."""
-        # Check if there are more items in the queue
-        if self.index_queue:
-            next_path = self.index_queue.pop(0)
-            self._update_queue_ui()
-            self.status_bar.showMessage(f"Starting next: {next_path.name}")
-            QTimer.singleShot(300, lambda: self._start_indexing_path(next_path))
+        # More queued (folders, or files dropped while this ran)?
+        if self._start_next_queued():
             return
-        
+
         # No more items - finish up
         self.is_indexing = False
         self.index_button_action.setText("Add Folder")
@@ -6009,14 +6052,18 @@ Move Plan Summary:
         
         # Show success message
         indexed_count = result.get('indexed_files', 0)
+        try:
+            from app.core.supabase_client import track
+            track("index_completed", files=int(indexed_count or 0), with_ocr=int(result.get('files_with_ocr', 0) or 0))
+        except Exception:
+            pass
         self.status_bar.showMessage(
             f"✓ Indexed {indexed_count} files ({result.get('files_with_ocr', 0)} with OCR)"
         )
         
-        # Update info label
-        if hasattr(self, 'debug_info_label'):
-            self.debug_info_label.setText(f"Showing {indexed_count} indexed files")
-        
+        # (No "Showing {this run's count}" here: refresh_debug_view() above already says the real total - this
+        #  overwrote it, so after analyzing 30 files with 3 already done the page said "Showing 30" next to "(33)".)
+
         # Update usage labels to reflect new count
         self._update_usage_labels()
     
@@ -6180,6 +6227,12 @@ Move Plan Summary:
         apply_titlebar_theme(dialog)
         
         if dialog.exec() == QDialog.Accepted:
+            if self.is_indexing:
+                # Something is being analyzed: its folders wait in the queue (starting now replaced the running worker)
+                for folder in user_folders:
+                    self._add_to_index_queue(folder)
+                return
+            self.is_indexing = True                     # (drops wait in the queue until Entire PC ends)
             # Start indexing with the existing progress UI
             self._pc_index_queue = list(user_folders)
             self._pc_total_indexed = 0  # Reset counter
@@ -6187,106 +6240,118 @@ Move Plan Summary:
     
     
     def _index_next_pc_folder(self):
-        """Index the next folder in the PC indexing queue."""
-        if not hasattr(self, '_pc_index_queue') or not self._pc_index_queue:
+        """Index the next folder in the PC indexing queue. (None = cancelled: Cancel already tidied up, so don't say
+        "complete"; [] = all done.)"""
+        if getattr(self, '_pc_index_queue', None) is None:
+            if not self._start_next_queued():           # (what was dropped meanwhile)
+                self.is_indexing = False
+            return
+        if not self._pc_index_queue:
+            self._pc_index_queue = None
             # All folders done - hide progress UI and show drop zone
             if hasattr(self, 'index_progress_container'):
                 self.index_progress_container.setVisible(False)
             self.progress_bar.setVisible(False)
             self.index_progress_label.setVisible(False)
             self.index_percent_label.setVisible(False)
-            
+
             # Restore drop zone and options
             self.drop_zone.setVisible(True)
             self.more_options_header.setVisible(True)
             self._update_drop_zone("Add folder to index", "Drag and drop or click to browse")
             self.status_bar.showMessage("PC indexing complete!", 5000)
-            
+
             # Refresh file count
             self.refresh_debug_view()
-            
+
             # Show completion dialog
             total_indexed = getattr(self, '_pc_total_indexed', 0)
             QMessageBox.information(
-                self, "Indexing Complete",
-                f"Successfully indexed {total_indexed} files from your PC."
+                self, "Analysis Complete",
+                f"Successfully analyzed {total_indexed} files from your PC."
             )
+            if not self._start_next_queued():           # (what was dropped meanwhile)
+                self.is_indexing = False
             return
-        
+
         folder = self._pc_index_queue.pop(0)
         remaining = len(self._pc_index_queue)
         self.index_path = folder
-        
-        # Hide drop zone and show progress container
-        self.drop_zone.setVisible(False)
+
+        # Keep the drop zone (as a normal analysis does: what's analyzed, and a place to drop more)
+        self.drop_zone.setVisible(True)
+        self._update_drop_zone(f"Analyzing: {folder.name}", f"Entire PC: {remaining} more folder(s) after this")
         self.more_options_header.setVisible(False)
         self.more_options_content.setVisible(False)
-        
-        self.status_bar.showMessage(f"Indexing: {folder}")
-        
+
+        self.status_bar.showMessage(f"Analyzing: {folder}")
+
         # Show progress container with pause/cancel buttons
         if hasattr(self, 'index_progress_container'):
             self.index_progress_container.setVisible(True)
-        
+
         self.progress_bar.setVisible(True)
         self.progress_bar.setRange(0, 0)
         self.index_progress_label.setVisible(True)
-        self.index_progress_label.setText(f"Indexing: {folder.name} ({remaining} folder(s) remaining)")
+        self.index_progress_label.setText(f"Analyzing: {folder.name} ({remaining} folder(s) remaining)")
         self.index_percent_label.setVisible(True)
-        self.index_percent_label.setText("0%")
+        self.index_percent_label.setText("...")          # (counting the files; the real % follows)
         self.index_pause_btn.setVisible(True)
         self.index_cancel_btn.setVisible(True)
-        
-        def progress_cb(done: int, total: int, message: str):
-            def update_ui():
-                try:
-                    if total > 0:
-                        self.progress_bar.setRange(0, total)
-                        self.progress_bar.setValue(done)
-                        percent = int((done / total) * 100)
-                        self.index_percent_label.setText(f"{percent}%")
-                    else:
-                        self.progress_bar.setRange(0, 0)
-                    self.index_progress_label.setText(message)
-                    # Force immediate UI refresh
-                    QApplication.processEvents()
-                except Exception:
-                    pass
-            QTimer.singleShot(0, update_ui)
-        
-        self.index_worker = IndexWorker(folder)
-        
+
+        def show_progress(done: int, total: int, message: str):
+            # (a signal from the worker thread, delivered here: the QTimer.singleShot it used never fired on that
+            #  thread, so the bar stayed in its busy look at 0% for the whole run)
+            if self.index_worker is not worker:
+                return
+            if total > 0:
+                self.progress_bar.setRange(0, total)
+                self.progress_bar.setValue(done)
+                self.index_percent_label.setText(f"{int(done / total * 100)}%")
+            else:
+                self.progress_bar.setRange(0, 0)
+            self.index_progress_label.setText(message)
+            self._live_file_count()
+
+        self._keep_running_worker()
+        worker = self.index_worker = IndexWorker(folder)
+        worker.progress_data.connect(show_progress)
+
         def on_complete(result):
+            if self.index_worker is not worker:
+                return                                  # (a cancelled run finishing after a new one started)
             # Track total indexed files
             if not hasattr(self, '_pc_total_indexed'):
                 self._pc_total_indexed = 0
             self._pc_total_indexed += result.get('indexed_files', 0)
-            
+
             stats = search_service.get_index_statistics()
             self.update_search_statistics(stats)
             self.refresh_debug_view()
-            
+
             # Continue with next folder
             QTimer.singleShot(100, self._index_next_pc_folder)
-        
+
         def on_error(error):
             logger.error(f"Error indexing {folder}: {error}")
+            if self.index_worker is not worker:
+                return
             # Continue with next folder despite error
             QTimer.singleShot(100, self._index_next_pc_folder)
-        
-        self.index_worker.index_completed.connect(on_complete)
-        self.index_worker.index_error.connect(on_error)
-        
+
+        worker.index_completed.connect(on_complete)
+        worker.index_error.connect(on_error)
+
         def run_with_progress():
             try:
-                result = search_service.index_directory(folder, progress_cb=progress_cb)
-                self.index_worker.index_completed.emit(result)
+                result = search_service.index_directory(folder, progress_cb=worker.progress_data.emit)
+                worker.index_completed.emit(result)     # (its own worker: self.index_worker may be a newer run's)
             except Exception as e:
-                self.index_worker.index_error.emit(str(e))
-        
-        self.index_worker.run = run_with_progress
-        self.index_worker.start()
-    
+                worker.index_error.emit(str(e))
+
+        worker.run = run_with_progress
+        worker.start()
+
     def on_toggle_auto_index_downloads(self, checked: bool):
         """Handle auto-add toggle with warning."""
         if checked:
@@ -7277,6 +7342,14 @@ Move Plan Summary:
             date_end=date_end,
             extensions=extensions
         )
+        # A weekday inside a sentence ("please sign by friday") is read as a date, and an empty page looked broken.
+        # If the date finds nothing but there are words, search all of what was typed at any time and say so.
+        date_dropped = None
+        if not results and search_query and parsed.get('date_filter') and (date_start or date_end):
+            results = search_service.search_files(query, limit=100, type_filter=type_filter,
+                                                  date_start=None, date_end=None, extensions=extensions)
+            date_dropped = specific_date or date_filter
+            self.filter_status_label.setText(f"Type: {type_filter}" if type_filter else "")
         self._last_search_results = results  # cache for editing
         
         # Show parsed query debug info if available
@@ -7299,9 +7372,20 @@ Move Plan Summary:
         if is_date_only_search:
             date_label = specific_date if specific_date else date_filter
             self.status_bar.showMessage(f"Found {len(results)} files from {date_label}")
+        elif date_dropped:
+            self.status_bar.showMessage(f"Nothing from {str(date_dropped).replace('specific_date:', '')}, so showing "
+                                        f"{len(results)} results for '{query}' from any time")
         else:
             self.status_bar.showMessage(f"Found {len(results)} results for '{query}'")
-    
+
+        # Privacy-safe search telemetry: NEVER the query text itself.
+        try:
+            from app.core.supabase_client import track
+            track("search_performed", query_len=len(query or ""), results_count=len(results),
+                  has_type_filter=bool(type_filter), has_date_filter=bool(parsed.get("date_filter")))
+        except Exception:
+            pass
+
     def _on_filter_changed(self):
         """Re-run search when filter dropdowns change."""
         if self.search_input.text().strip():
@@ -8342,35 +8426,31 @@ Move Plan Summary:
         logger.info("[INDEX] Confirmation modal ACCEPTED — starting indexing flow")
 
         user_instructions = instructions_input.toPlainText().strip() or None
+        self._index_confirmed(folders_to_index, files_to_index, user_instructions)
 
-        # Index folders
+    def _index_confirmed(self, folders_to_index: list, files_to_index: list, user_instructions: str = None):
+        """Everything you confirmed with "Index Now" is analyzed: the folders (the first starts, the rest wait), then
+        the loose files. Each keeps the custom instructions typed in that dialog. (A folder and some files dropped
+        together used to analyze only the folder: the files were dropped without a word.)"""
         if folders_to_index:
             if self.is_indexing:
-                logger.info(
-                    f"[INDEX] is_indexing=True — queueing {len(folders_to_index)} folder(s)"
-                )
-                # Add all to queue (instructions apply to current batch only)
+                logger.info(f"[INDEX] is_indexing=True — queueing {len(folders_to_index)} folder(s)")
                 for folder in folders_to_index:
-                    self._add_to_index_queue(folder)
+                    self._add_to_index_queue(folder, user_instructions=user_instructions)
             else:
-                # Start first, queue the rest
                 first = folders_to_index[0]
-                logger.info(
-                    f"[INDEX] is_indexing=False — starting with {first} "
-                    f"(queueing {len(folders_to_index) - 1} more)"
-                )
+                logger.info(f"[INDEX] is_indexing=False — starting with {first} "
+                            f"(queueing {len(folders_to_index) - 1} more)")
                 for folder in folders_to_index[1:]:
-                    self._add_to_index_queue(folder)
+                    self._add_to_index_queue(folder, user_instructions=user_instructions)
                 self.index_path = first
                 self.index_label.setText(f"Index folder: {first}")
                 self.index_button_action.setEnabled(True)
                 self._start_indexing_path(first, user_instructions=user_instructions)
+        if files_to_index:
+            logger.info(f"[INDEX] {len(files_to_index)} file(s) — now, or after what's running")
+            self._index_files_or_queue(files_to_index, user_instructions=user_instructions)
 
-        # Index individual files
-        if files_to_index and not folders_to_index:
-            logger.info(f"[INDEX] Only files (no folders) — calling _index_individual_files")
-            self._index_individual_files(files_to_index, user_instructions=user_instructions)
-    
     def _index_individual_files(self, files: list, user_instructions: str = None):
         """Index individual picked/dropped files OFF the UI thread. Per-file analysis
         (especially VIDEO: frame decode + audio export + transcription) is heavy, so run it on
@@ -8392,6 +8472,7 @@ Move Plan Summary:
         self.is_indexing = True
 
         worker = IndexWorker(Path(files[0]))   # directory_path unused; run() is replaced below
+        self._keep_running_worker()
         self.index_worker = worker
         worker.progress_data.connect(self._on_file_index_progress)
         worker.index_completed.connect(self._on_individual_files_done)
@@ -8423,9 +8504,17 @@ Move Plan Summary:
         if total:
             self.index_percent_label.setText(f"{int(done / total * 100)}%")
         self.index_progress_label.setText(message)
+        self._live_file_count()
 
     def _on_individual_files_done(self, result: dict):
-        """Finish individual-file indexing: hide progress, refresh the list/counts."""
+        """Finish individual-file indexing: hide progress, refresh the list/counts - then anything queued meanwhile
+        (a folder dropped while these ran used to wait in the queue for good)."""
+        if self._start_next_queued():
+            try:
+                self.refresh_debug_view()
+            except Exception:
+                pass
+            return
         self.is_indexing = False
         if hasattr(self, 'index_progress_container'):
             self.index_progress_container.setVisible(False)
@@ -8576,6 +8665,10 @@ Move Plan Summary:
     def _render_debug_table(self, rows):
         """Render exactly the given rows into the table; the full set lives in _all_debug_rows."""
         try:
+            # Ticks survive the reload (tick 2, Add Tags, then Re-index the same 2) - by PATH: Re-index re-inserts the
+            # row with a new id. The bar follows them below. (Every reload unticked all rows while the bar still said
+            # "2 files selected", so the buttons did nothing. Mac a9cad3d.)
+            ticked = {f['file_path'] for f in self._get_selected_files('debug')}
             # Store file data for Quick Actions
             self._last_debug_files = []
 
@@ -8619,7 +8712,7 @@ Move Plan Summary:
                 # Checkbox column (col 0)
                 checkbox_item = QTableWidgetItem()
                 checkbox_item.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled | Qt.ItemIsSelectable)
-                checkbox_item.setCheckState(Qt.Unchecked)
+                checkbox_item.setCheckState(Qt.Checked if row["file_path"] in ticked else Qt.Unchecked)
                 self.debug_table.setItem(row_idx, 0, checkbox_item)
                 
                 # File name (col 1)
@@ -8754,6 +8847,7 @@ Move Plan Summary:
             self.debug_table.blockSignals(False)
             self.debug_table.setUpdatesEnabled(True)   # re-enable repaints (one paint, not N)
             self._populating_debug_table = False
+            self._on_debug_selection_changed()         # (the "N files selected" bar matches the ticks again)
             self.status_bar.showMessage(f"Files view refreshed - {len(rows)} shown")
             self.debug_table.scrollToTop()
             self.debug_table.viewport().update()

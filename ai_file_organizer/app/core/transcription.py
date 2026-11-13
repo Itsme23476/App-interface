@@ -167,10 +167,24 @@ def transcribe_audio(audio_path: str, language: Optional[str] = None,
         return {"ok": False, "error": "no_subscription",
                 "message": "An active subscription is required for voice dictation."}
     if r.status_code == 429:
-        return {"ok": False, "error": "rate_limited",
-                "message": "Daily voice limit reached. Try again tomorrow."}
+        return {"ok": False, "error": "rate_limited", "message": LIMIT_MESSAGE}
     logger.error(f"Transcribe proxy error {r.status_code}: {r.text[:300]}")
     return {"ok": False, "error": "provider", "message": "Transcription failed — please try again."}
+
+
+LIMIT_MESSAGE = "Daily voice limit reached. Try again tomorrow."
+
+
+def over_daily_limit(token: str) -> bool:
+    """Is today's voice used up? An EMPTY upload to `transcribe`: it checks the limit before it reads any audio, so
+    it answers 429 (used up) or 400 (fine) - nothing is transcribed or counted. Asked only when the live stream was
+    refused (over the limit its 429 reaches us as a 502 from the gateway), so a normal press never waits for it.
+    (Mac 1df3842.)"""
+    try:
+        return requests.post(TRANSCRIBE_URL, data=b"", timeout=5, headers={
+            "Authorization": f"Bearer {token}", "Content-Type": "application/octet-stream"}).status_code == 429
+    except Exception:
+        return False
 
 
 def distill_search_query(text: str) -> Optional[str]:
@@ -375,6 +389,7 @@ class StreamingTranscriber(QObject):
         self._external = external      # True: no mic of its own — Filect Assistant's listener feed()s the audio
         self._cancelled = False        # cancel(): nobody wants the text — never fall back to a batch upload
         self._heard_nothing = False    # streaming finished properly and heard NO words (not a failure)
+        self._limit_hit = False        # today's voice is used up: said at once, not after you let go
         self._release_fg = None        # mic_helper.foreground_begin()'s release — hands-free waits meanwhile
         self.is_recording = False
         self._outbox: List[bytes] = [] # boosted int16 PCM frames for streaming
@@ -571,6 +586,9 @@ class StreamingTranscriber(QObject):
             self._restore_output()
             self._emit_stopped_once()
 
+        if self._limit_hit:                       # (no batch upload: it would only be refused too)
+            self.error.emit(LIMIT_MESSAGE)
+            return
         if stream_ok and stream_text is not None:
             logger.info(f"[STREAM] final via streaming: {len(stream_text)} chars")
             self.finished.emit(stream_text)
@@ -628,6 +646,10 @@ class StreamingTranscriber(QObject):
             except Exception as e:
                 logger.warning(f"[STREAM] connect failed ({e}); batch fallback")
                 ws = None
+                if await asyncio.to_thread(over_daily_limit, token):
+                    logger.info("[STREAM] daily voice limit reached — stopping now, not after the key is let go")
+                    self._limit_hit = True
+                    self.is_recording = False
         else:
             logger.info(f"[STREAM] prerequisites missing (token={bool(token)}, "
                         f"ws_lib={websockets is not None}); batch fallback")

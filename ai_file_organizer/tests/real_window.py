@@ -22,7 +22,7 @@ def pump(s=0.1):
 
 
 class RealWindow:
-    def __init__(self, size=(1250, 860)):
+    def __init__(self, size=(1250, 860), agent_was_ready=False):
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
         self.app = QApplication.instance() or QApplication([])
         from app.core.settings import settings
@@ -50,7 +50,8 @@ class RealWindow:
                      ("auto_organize_auto_start", False), ("auto_organize_paused", True),
                      ("has_completed_onboarding", True),             # (the guide would open by itself otherwise)
                      ("onboarding_remind_count", 0), ("page_tours_seen", []), ("live_tour_seen", False),
-                     ("agents_tour_seen", False), ("agent_was_ready", False), ("theme", settings.theme)):
+                     ("agents_tour_seen", False), ("agent_was_ready", bool(agent_was_ready)),
+                     ("theme", settings.theme)):
             mp.setattr(settings, k, v)
         mp.setattr(sc, "track", lambda e, **k: self.tracked.append((e, k)))
         mp.setattr(dct.DictationController, "start", lambda _self: None)

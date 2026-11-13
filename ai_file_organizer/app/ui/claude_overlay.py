@@ -2318,10 +2318,28 @@ class ClaudeOverlay(QWidget):
         self.show_working("Denied.")
 
     def _on_dismiss(self) -> None:
-        # ✕ closes the card back to the resting strip (hover → the input bar) — also mid-task: the chat keeps
-        # running in the drawer. The page lets go of the chat first (dismissed), so nothing re-opens it.
+        # ✕ / Esc. The page answers `dismissed` first: a chat that's working or waiting for your approval stays this
+        # card's chat (keep_on_close: working → the card tucks away; an approval → it stays up). Anything else (a
+        # finished chat, "Routing…"): the page lets go and the card rests as the strip (hover → the input bar).
+        self._type_field.clearFocus()           # (else "still typing" keeps a blank card open: Mac §5.3)
+        self._close_kept = None
         self.dismissed.emit()
+        if self._close_kept:
+            return
         self.rest_idle(force=True)
+
+    def keep_on_close(self, how: str) -> None:
+        """(the page, answering ✕ / Esc on a live chat — Mac §5.3) "tuck": it keeps working; the card tucks away and
+        stays its card (hover → its status, click → the card; an approval opens it by itself; Stop and the answer
+        still reach it). "stay": it's waiting for your approval — the card stays up and says so. (Letting go of the
+        chat hid the approval: no card, no notice, and the chat waited for good.)"""
+        self._close_kept = how
+        if how == "tuck":
+            self._pinned = False
+            self.minimize_panel()
+        elif how == "stay":
+            self._set_status("Approve or Deny first", AMBER)
+            QTimer.singleShot(2500, lambda: self._state == "needs_you" and self._set_status("Needs you", AMBER))
 
     def keyPressEvent(self, event) -> None:
         if event.key() == Qt.Key_Escape:

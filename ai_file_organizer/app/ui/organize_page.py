@@ -6631,6 +6631,12 @@ class OrganizePage(QWidget):
         # and was closed, we re-organize existing files on startup so anything
         # added while the app was offline gets picked up.
         organize_existing = bool(is_catch_up)
+        try:
+            from app.core.supabase_client import track
+            track("auto_organize_enabled", folder_count=len(settings.auto_organize_folders),
+                  organize_existing=bool(organize_existing), flatten_first=False)
+        except Exception:
+            pass
 
         # Start the watcher (periodic timer; per-folder organize already
         # happened via Save when the user picked their action). Defer the
@@ -6653,6 +6659,11 @@ class OrganizePage(QWidget):
         """Stop watching folders."""
         if self.auto_watcher:
             self.auto_watcher.stop()
+        try:
+            from app.core.supabase_client import track
+            track("auto_organize_disabled", folder_count=len(settings.auto_organize_folders))
+        except Exception:
+            pass
         for entry in settings.auto_organize_folders:
             if isinstance(entry, dict):
                 entry.pop('watching_since', None)
@@ -7907,6 +7918,11 @@ class OrganizePage(QWidget):
                 "category": m["destination_folder"],
             } for m in self.current_moves]
             logger.info(f"[VOICE ORGANIZE] applying {len(move_plan)} moves")
+            try:
+                from app.core.supabase_client import track
+                track("organize_started", source="voice", file_count=len(move_plan))
+            except Exception:
+                pass
             self.voice_status.emit("Organizing…")
             self._voice_apply_worker = _VoiceApplyWorker(move_plan)
             self._voice_apply_worker.done.connect(self._voice_on_apply_done)
@@ -7935,6 +7951,13 @@ class OrganizePage(QWidget):
             success, errors, log_file, renamed_count = result
             n = len(self.current_moves)
             self.last_voice_log = log_file or ""     # (what the voice assistant's Undo puts back)
+            try:
+                from app.core.supabase_client import track
+                track("organize_completed", source="voice", success=bool(success),
+                      files_moved=max(0, n - len(errors or [])), files_failed=len(errors or []),
+                      files_renamed=int(renamed_count or 0))
+            except Exception:
+                pass
 
             # Keep the index consistent with the moves: update each moved file's
             # DB path (exactly what the manual apply does). WITHOUT this, the DB
@@ -8762,6 +8785,13 @@ Caption: {file_info.get('caption', 'none')}
             "destination_path": m["destination_path"],
         } for m in self.current_moves]
 
+        import time as _time
+        self._apply_t0 = _time.time()
+        try:
+            from app.core.supabase_client import track
+            track("organize_started", source="manual_page", file_count=len(move_plan))
+        except Exception:
+            pass
         self._apply_worker = ApplyMovesWorker(
             move_plan, moves_snapshot, self.destination_path, self)
         self._apply_worker.progress.connect(self._on_apply_progress)
@@ -8799,6 +8829,16 @@ Caption: {file_info.get('caption', 'none')}
         paths_updated = result.get("paths_updated", 0)
         removed_count = result.get("removed_count", 0)
         move_count = getattr(self, "_apply_move_count", len(self.current_moves))
+        try:
+            import time as _time
+            from app.core.supabase_client import track
+            errs = errors or []
+            track("organize_completed", source="manual_page", success=bool(success),
+                  files_moved=max(0, move_count - len(errs)), files_failed=len(errs),
+                  files_renamed=int(renamed_count or 0),
+                  duration_ms=int((_time.time() - getattr(self, "_apply_t0", _time.time())) * 1000))
+        except Exception:
+            pass
 
         self.progress_bar.setVisible(False)
         self.generate_button.setEnabled(True)

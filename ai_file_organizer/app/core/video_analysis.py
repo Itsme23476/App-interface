@@ -108,7 +108,7 @@ def extract_audio(path, max_seconds: int = 600):
 
 # ---- shared with the Mac implementation (platform-independent) ----
 
-def _analyze_frames(frames: list, filename: str, transcript: str = "") -> dict:
+def _analyze_frames(frames: list, filename: str, transcript: str = "", user_instructions: str = None) -> dict:
     """Send the keyframes to the EXISTING vision proxy in ONE call (downscaled, same 1024px
     cap images use) and parse the same JSON shape gpt_vision_fallback returns."""
     import io
@@ -124,7 +124,7 @@ def _analyze_frames(frames: list, filename: str, transcript: str = "") -> dict:
             continue
     if not b64s:
         return {}
-    system = V.build_analysis_prompt(V.DETAILED_SYSTEM_PROMPT, None)
+    system = V.build_analysis_prompt(V.DETAILED_SYSTEM_PROMPT, user_instructions)   # (your custom instructions)
     content = [
         {"type": "text", "text": f"filename: {filename}"},
         {"type": "text", "text": f"These are {len(b64s)} frames sampled in order across a "
@@ -150,7 +150,7 @@ def _analyze_frames(frames: list, filename: str, transcript: str = "") -> dict:
     if not isinstance(data, dict):
         return {}
     tags = data.get("tags") or []
-    tags = [str(t).lower()[:64] for t in tags][:25] if isinstance(tags, list) else []
+    tags = V._keep_tags(tags, user_instructions, 25)
     desc = str(data.get("description", "")).strip()
     caption = (desc or str(data.get("caption", "")).strip())[:1200]
     return {
@@ -165,7 +165,7 @@ def _analyze_frames(frames: list, filename: str, transcript: str = "") -> dict:
 
 
 def analyze_video(path, n_frames: int = 4, max_audio_seconds: int = 600,
-                  transcribe: bool = True) -> "dict | None":
+                  transcribe: bool = True, user_instructions: str = None) -> "dict | None":
     """Analyze a video by its keyframes (vision) + audio (transcription), returning the SAME
     metadata shape an image/doc produces so the indexer/search/organize need no changes:
     label, tags, caption, type, ocr_text (= the transcript), has_ocr, duration, ai_source.
@@ -186,7 +186,7 @@ def analyze_video(path, n_frames: int = 4, max_audio_seconds: int = 600,
                     os.unlink(audio)
                 except Exception:
                     pass
-    meta = _analyze_frames(frames, Path(path).name, transcript) if frames else {}
+    meta = _analyze_frames(frames, Path(path).name, transcript, user_instructions) if frames else {}
     if not meta and not transcript:
         return None
     if transcript:
@@ -200,7 +200,7 @@ def analyze_video(path, n_frames: int = 4, max_audio_seconds: int = 600,
     return meta
 
 
-def analyze_audio(path, max_seconds: int = 600) -> "dict | None":
+def analyze_audio(path, max_seconds: int = 600, user_instructions: str = None) -> "dict | None":
     """Analyze a standalone AUDIO file: transcribe it, then tag it from what's said. Returns the
     same metadata shape as other files (ocr_text = transcript, label/tags from the transcript
     tagger, duration, ai_source). Long files are trimmed to `max_seconds`. None if nothing usable."""
@@ -227,7 +227,7 @@ def analyze_audio(path, max_seconds: int = 600) -> "dict | None":
         return None
     meta = {"label": "audio", "ocr_text": transcript[:5000], "has_ocr": True,
             "duration": round(video_duration_seconds(path), 1)}
-    tinfo = _tag_transcript(transcript)
+    tinfo = _tag_transcript(transcript, user_instructions)
     if tinfo:
         meta.update({k: v for k, v in tinfo.items() if v})
     if not meta.get("caption"):
@@ -236,7 +236,7 @@ def analyze_audio(path, max_seconds: int = 600) -> "dict | None":
     return meta
 
 
-def _tag_transcript(transcript: str) -> dict:
+def _tag_transcript(transcript: str, user_instructions: str = None) -> dict:
     """Tag an audio clip from its transcript with an AUDIO-appropriate prompt (not the
     document prompt analyze_text uses, which leaks tags like 'transcript'/'caption'/the
     filename). Returns {caption, label(=category), tags} or {}."""
@@ -252,6 +252,7 @@ def _tag_transcript(transcript: str) -> dict:
             "'audio'/'transcript'/'caption', or any filename. Return JSON only: "
             "{\"caption\": \"...\", \"category\": \"...\", \"tags\": [\"t1\", \"t2\"]}."
         )
+        system = V.build_analysis_prompt(system, user_instructions)   # (your custom instructions, as for every file)
         resp = V._call_openai_proxy(
             "chat",
             [{"role": "system", "content": system},
@@ -263,7 +264,7 @@ def _tag_transcript(transcript: str) -> dict:
         if not isinstance(data, dict):
             return {}
         tags = data.get("tags") or []
-        tags = [str(t).lower()[:64] for t in tags][:20] if isinstance(tags, list) else []
+        tags = V._keep_tags(tags, user_instructions, 20)
         return {
             "caption": str(data.get("caption", "")).strip()[:1200],
             "label": (str(data.get("category", "audio")).strip().lower() or "audio"),

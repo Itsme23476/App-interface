@@ -44,6 +44,9 @@ def _assistant():
         (("icon", "mic"), "Just talk",
          "• Click Start listening and say what you want, like you'd tell a person\n• When you pause, Claude Code "
          "or Codex gets it\n• Keep talking about the same thing to follow up", lp + "start_btn"),
+        (("keys", ["Shift", "→", "Ctrl", "+", "Win"]), "Mute it",
+         "• Recording a video or on a call? Press Shift, then Ctrl + Win\n• Or click Mute while it's listening\n"
+         "• The mic closes until you do it again", lp + "mute_btn"),
         (("keys", ["Shift", "+", "Ctrl"]), "Point at your screen",
          "• While it listens, press Shift + Ctrl\n• Draw in red: circle a button, underline a line\n• Press them "
          "again to snap it. It goes with what you say next", (lp + "_draw_lbl", lp + "draw_key")),
