@@ -6855,8 +6855,13 @@ class OrganizePage(QWidget):
         self._hide_plan_ui()
         self.apply_button.setVisible(False)
         self.clear_button.setVisible(False)
-        self.undo_button.setVisible(False)
+        self.undo_button.setVisible(self._undo_left())     # (an Apply comes back here, saying "Undo available")
         self.feedback_group.setVisible(False)
+
+    def _undo_left(self) -> bool:
+        """A finished Apply on this page that ↩ Undo Last can still reverse. (Voice organize offers its own Undo and
+        never enables this button.)"""
+        return bool(getattr(self, "last_organization", None)) and self.undo_button.isEnabled()
     
     def _show_plan_summary(self, folder_count: int, file_count: int, total_size_mb: float):
         """Show the plan summary line."""
@@ -8912,7 +8917,9 @@ Caption: {file_info.get('caption', 'none')}
         # Hide plan UI elements
         self.apply_button.setVisible(False)
         self.clear_button.setVisible(False)
-        self.undo_button.setVisible(False)
+        # ...but ↩ Undo Last stays while there's a run to undo: an Apply clears the plan right after it says "You can use
+        # Undo to reverse this" - and this hid that very button (only History → Revert was left). (Full test 2026-11-13.)
+        self.undo_button.setVisible(self._undo_left())
         self._hide_plan_ui()
         
         # Show input cards again
@@ -9053,6 +9060,7 @@ Caption: {file_info.get('caption', 'none')}
         
         self.last_organization = None
         self.undo_button.setEnabled(False)
+        self.undo_button.setVisible(bool(self.current_plan))   # (nothing left to undo; with a plan it shows, greyed)
         
         if errors:
             QMessageBox.warning(

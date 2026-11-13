@@ -184,7 +184,8 @@ class QuickSearchOverlay(QDialog):
         self._debounce.timeout.connect(self._run_search)
         self.input.textChanged.connect(self._debounce.start)
 
-        self.input.returnPressed.connect(self._primary_action)
+        # Enter in the box: taken in eventFilter (acted on once, not passed on to keyPressEvent - which ran it twice)
+        self.input.installEventFilter(self)
         self.results.itemDoubleClicked.connect(self._primary_action)
         self.results.itemSelectionChanged.connect(self._on_selection_changed)
         self.results.cellClicked.connect(self._on_cell_clicked)
@@ -563,6 +564,9 @@ class QuickSearchOverlay(QDialog):
     def _primary_action(self):
         """Enter / Fill button / double-click: fill a dialog (normal) or open
         the file (voice search)."""
+        # No row picked yet: the first one
+        if self.results.currentRow() < 0 and self.results.rowCount() > 0:
+            self.results.selectRow(0)
         if self._primary_mode == "open":
             self._open_selection()
         else:
@@ -683,12 +687,10 @@ class QuickSearchOverlay(QDialog):
         if e.modifiers() == Qt.ControlModifier and e.key() == Qt.Key_O:
             self._open_selection()
             return
-        # Don't let Enter close the dialog - we handle it via returnPressed signal
+        # Don't let Enter close the dialog
         if e.key() in (Qt.Key_Return, Qt.Key_Enter):
-            # If no selection, select first row first
-            if self.results.currentRow() < 0 and self.results.rowCount() > 0:
-                self.results.selectRow(0)
-            self._accept_selection()
+            # (Enter in the search box never gets here: eventFilter takes it. This is Enter on the list.)
+            self._primary_action()
             return
         super().keyPressEvent(e)
     
@@ -734,6 +736,14 @@ class QuickSearchOverlay(QDialog):
         """Filter events on the table viewport to prevent unwanted selection changes."""
         from PySide6.QtCore import QEvent
         
+        # Enter in the search box: act ONCE and keep the key. (Through returnPressed, the box also passed the same key
+        # on to keyPressEvent: the fill-in ran twice, and in voice search a fill-in ran on your program after the
+        # file was opened.)
+        if (obj is self.input and event.type() == QEvent.KeyPress
+                and event.key() in (Qt.Key_Return, Qt.Key_Enter)):
+            self._primary_action()
+            return True
+
         # Block mouse move events on the viewport that aren't button presses
         # This prevents hover-based selection changes
         if obj == self.results.viewport():

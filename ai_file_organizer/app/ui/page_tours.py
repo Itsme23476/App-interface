@@ -48,8 +48,10 @@ def _assistant():
          "• Recording a video or on a call? Press Shift, then Ctrl + Win\n• Or click Mute while it's listening\n"
          "• The mic closes until you do it again", lp + "mute_btn"),
         (("keys", ["Shift", "+", "Ctrl"]), "Point at your screen",
-         "• While it listens, press Shift + Ctrl\n• Draw in red: circle a button, underline a line\n• Press them "
-         "again to snap it. It goes with what you say next", (lp + "_draw_lbl", lp + "draw_key")),
+         # (three lines: a fourth doesn't fit the card in the light theme - the drawing examples made way for it)
+         "• While it listens, press Shift + Ctrl and draw in red\n• Press them again to snap it. It goes with what "
+         "you say next\n• Or just say “look at my screen”",
+         (lp + "_draw_lbl", lp + "draw_key")),
         (("keys", ["Ctrl", "Ctrl", "→", "Ctrl"]), "Several things at once",
          "• Double-tap Ctrl to start collecting\n• Talk, scroll and snap as much as you want\n• Tap Ctrl once "
          "to send it all as one message", (lp + "_many_lbl", lp + "_many_key")),

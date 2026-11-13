@@ -791,8 +791,8 @@ Files ({len(chunk)} total):
 RULES:
 - Put each file in the folder from the list that it belongs in, judged by what the file is (its name, type, label, tags and caption), following the instruction
 - Use the folder's exact name from the list
-- {"Use ONLY folders from the list" if only_existing else "Only if no folder in the list fits it, make a new folder for it"}
-- You MUST include EVERY file_id ({len(chunk)} total), each exactly once
+- {"Use ONLY folders from the list. A file that none of them fits is left OUT of your answer - it stays where it is (never force it into a folder it doesn't belong to)" if only_existing else "Only if no folder in the list fits it, make a new folder for it"}
+- {"Each file_id at most once" if only_existing else f"You MUST include EVERY file_id ({len(chunk)} total), each exactly once"}
 
 Return JSON only: {{"folders": {{"folder name": [file_id, ...]}}}}"""
         for _attempt in range(_PLAN_CHUNK_RETRIES):

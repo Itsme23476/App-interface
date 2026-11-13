@@ -660,22 +660,10 @@ class SearchService:
                 fetch_limit = limit * 3 if (type_filter or date_start or extensions) else limit
             results = self.index.search_files_advanced(fts_terms, filters, fetch_limit)
 
-            # Optional AI rerank (OpenAI via the shared proxy) — skip for
-            # date-only searches. The old local Ollama-embeddings rerank was
-            # removed (the app never used Ollama; it only added a per-search
-            # timeout). Without the OpenAI reranker, results use the FTS
-            # candidate order, which is plenty given the type/date filtering.
-            sem_results: List[Dict[str, Any]] = []
-            if not is_date_only:
-                try:
-                    if settings.use_openai_search_rerank and settings.openai_api_key:
-                        sem_results = self._gpt_rerank_results(query, results[: min(20, len(results))])
-                except Exception:
-                    pass
-
-            # Merge keyword and semantic (simple union with max rank)
+            # De-duplicate by id (keep the best rank), best first. (Smart Rerank was removed: it only ran with a
+            # local OpenAI key, which customers never have - for them results were always this keyword order.)
             by_id: Dict[int, Dict[str, Any]] = {}
-            for r in results + sem_results:
+            for r in results:
                 rid = r['id']
                 if rid not in by_id:
                     by_id[rid] = r
@@ -929,75 +917,6 @@ class SearchService:
         
         return enhanced
 
-    def _gpt_rerank_results(self, query: str, candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Rerank a small candidate set via the Supabase OpenAI proxy."""
-        from .vision import _call_openai_proxy
-        import json as _json
-        items = []
-        for c in candidates:
-            items.append({
-                "id": c.get('id'),
-                "name": c.get('file_name'),
-                "label": c.get('label'),
-                "tags": c.get('tags'),
-                "caption": (c.get('caption') or '')[:300],
-                "ocr": (c.get('ocr_text') or '')[:200]
-            })
-        # NOTE: the shared openai-proxy forces response_format=json_object on ALL
-        # chat calls, so ask for a JSON OBJECT (not a bare array), and the prompt
-        # must contain "json" or OpenAI 400s.
-        system = (
-            "You are a reranker. Given a user query and a list of items (id, name, label, tags, caption, ocr), "
-            'return a JSON object of the form {"ids": [item ids sorted best to worst match]}. JSON only.'
-        )
-        user = [{"type": "text", "text": f"Query: {query}\nItems: {_json.dumps(items)}\nReturn JSON: {{\"ids\": [best->worst]}}"}]
-        try:
-            resp_data = _call_openai_proxy(
-                "chat",
-                [
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user},
-                ],
-                max_tokens=500,
-                temperature=0.0,
-            )
-            if not resp_data:
-                return []
-            choices = resp_data.get("choices", [])
-            if not choices:
-                return []
-            content = choices[0].get("message", {}).get("content", "") or ""
-            # Parse the ordered id list from the JSON object (fallbacks: a bare
-            # array, or an array embedded in stray prose).
-            order = None
-            try:
-                obj = _json.loads(content)
-                if isinstance(obj, dict):
-                    order = obj.get("ids") or obj.get("order") or obj.get("ranking")
-                elif isinstance(obj, list):
-                    order = obj
-            except Exception:
-                order = None
-            if order is None:
-                s = content.find('['); e = content.rfind(']')
-                if s != -1 and e != -1 and e > s:
-                    try:
-                        order = _json.loads(content[s:e + 1])
-                    except Exception:
-                        order = None
-            if order:
-                id_to_item = {c['id']: c for c in candidates}
-                ranked = [id_to_item[i] for i in order if i in id_to_item]
-                # assign a simple rank boost for UI sorting
-                boost = len(ranked)
-                for r in ranked:
-                    boost -= 1
-                    r['rank'] = 10 + boost
-                return ranked
-        except Exception:
-            return []
-        return []
-    
     def _format_file_size(self, size_bytes: int) -> str:
         """
         Format file size in human-readable format.

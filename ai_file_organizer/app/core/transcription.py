@@ -298,32 +298,40 @@ def _assemble(utterances, cur) -> str:
 # System-output mute while recording (Windows: pycaw)
 # ---------------------------------------------------------------------------
 
+def _endpoint_volume():
+    """The speakers' IAudioEndpointVolume. Mute while recording never worked (full test 2026-11-13; "couldn't read
+    output state" in every log since 2026-10): pycaw's GetSpeakers() now returns an AudioDevice wrapper - no
+    .Activate, its .EndpointVolume is the interface - and the recorder's worker thread had never initialized COM
+    ("CoInitialize has not been called"). Both handled; the old pycaw way still works."""
+    import comtypes
+    try:
+        comtypes.CoInitialize()                 # (this thread; a no-op where it's already done)
+    except OSError:
+        pass                                    # (already initialized another way: COM is usable)
+    from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
+    dev = AudioUtilities.GetSpeakers()
+    ev = getattr(dev, "EndpointVolume", None)
+    if ev is not None:
+        return ev
+    from ctypes import cast, POINTER
+    iface = dev.Activate(IAudioEndpointVolume._iid_, comtypes.CLSCTX_ALL, None)
+    return cast(iface, POINTER(IAudioEndpointVolume))
+
+
 def _output_muted() -> Optional[bool]:
     """Current default-render-endpoint muted state (True/False), or None."""
     try:
-        from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
-        from ctypes import cast, POINTER
-        from comtypes import CLSCTX_ALL
-        dev = AudioUtilities.GetSpeakers()
-        iface = dev.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
-        vol = cast(iface, POINTER(IAudioEndpointVolume))
-        return bool(vol.GetMute())
+        return bool(_endpoint_volume().GetMute())
     except Exception as e:
-        logger.debug(f"_output_muted failed: {e}")
+        logger.warning(f"[MUTE] couldn't read the speakers' mute: {e}")
         return None
 
 
 def _set_output_muted(muted: bool):
     try:
-        from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
-        from ctypes import cast, POINTER
-        from comtypes import CLSCTX_ALL
-        dev = AudioUtilities.GetSpeakers()
-        iface = dev.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
-        vol = cast(iface, POINTER(IAudioEndpointVolume))
-        vol.SetMute(1 if muted else 0, None)
+        _endpoint_volume().SetMute(1 if muted else 0, None)
     except Exception as e:
-        logger.debug(f"_set_output_muted failed: {e}")
+        logger.warning(f"[MUTE] couldn't set the speakers' mute: {e}")
 
 
 _LIVE_STREAMS = []   # StreamingTranscribers kept alive until their worker thread has ended (see _keep_stream)
@@ -390,6 +398,7 @@ class StreamingTranscriber(QObject):
         self._cancelled = False        # cancel(): nobody wants the text — never fall back to a batch upload
         self._heard_nothing = False    # streaming finished properly and heard NO words (not a failure)
         self._limit_hit = False        # today's voice is used up: said at once, not after you let go
+        self._delivered = False        # the final text was already handed over (before the connection's close)
         self._release_fg = None        # mic_helper.foreground_begin()'s release — hands-free waits meanwhile
         self.is_recording = False
         self._outbox: List[bytes] = [] # boosted int16 PCM frames for streaming
@@ -586,6 +595,8 @@ class StreamingTranscriber(QObject):
             self._restore_output()
             self._emit_stopped_once()
 
+        if self._delivered:                       # (handed over before the connection's close: nothing more to do,
+            return                                #  never a batch upload or a second copy of the text)
         if self._limit_hit:                       # (no batch upload: it would only be refused too)
             self.error.emit(LIMIT_MESSAGE)
             return
@@ -758,10 +769,6 @@ class StreamingTranscriber(QObject):
             await asyncio.sleep(0.02)
         if rx:
             rx.cancel()
-        try:
-            await ws.close()
-        except Exception:
-            pass
 
         # Assemble: finalized utterances + any trailing in-progress one. Guard a
         # cumulative trailing interim that restates everything already committed.
@@ -770,6 +777,17 @@ class StreamingTranscriber(QObject):
                     f"done={done_flag['v']}, chars={len(final)}")
         if _DEV:
             logger.info(f"[STREAM] FINAL text: {final!r}")
+        if final:
+            # Hand the text over NOW, then close. Closing waits for the server's side of the close (about 1 s on
+            # every dictation, measured on the Mac 2026-11-12) and the text is already complete: that wait came
+            # between letting go and the paste. The mic and the sound were already handled at release. (Mac 08f6208.)
+            self._delivered = True
+            logger.info(f"[STREAM] final via streaming: {len(final)} chars (handed over before the close)")
+            self.finished.emit(final)
+        try:
+            await ws.close()
+        except Exception:
+            pass
         if final:
             return final, True
         if done_flag["v"]:

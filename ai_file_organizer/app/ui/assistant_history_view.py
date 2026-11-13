@@ -48,10 +48,12 @@ def _tooltip(text: str) -> str:
 
 
 class _Elided(QLabel):
-    """One line that ends in "…" when there's no room (and can shrink, so it never pushes its row wider)."""
-    def __init__(self, text=""):
+    """One line that ends in "…" when there's no room (and can shrink, so it never pushes its row wider). With `short`:
+    when the whole text doesn't fit, that complete shorter sentence is shown instead of a word cut in half."""
+    def __init__(self, text="", short=None):
         super().__init__()
         self._full = text
+        self._short = short
         self.setTextFormat(Qt.PlainText)           # (what you said, and a chat's name, are never markup)
         self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         self.setMinimumWidth(10)
@@ -70,7 +72,11 @@ class _Elided(QLabel):
 
     def _fit(self):
         fm = self.fontMetrics()
-        QLabel.setText(self, fm.elidedText(self._full, Qt.ElideRight, max(10, self.width() - 2)))
+        room = max(10, self.width() - 2)
+        text = self._full
+        if self._short and fm.horizontalAdvance(text) > room:
+            text = self._short
+        QLabel.setText(self, fm.elidedText(text, Qt.ElideRight, room))
 
 
 def _elided(text: str, css: str) -> _Elided:

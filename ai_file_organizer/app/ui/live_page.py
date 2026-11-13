@@ -1040,9 +1040,9 @@ class LivePage(QScrollArea):
         self._lock = QLabel()
         fo.addWidget(self._lock)
         # (shortens itself: a footer that won't shrink pushes Settings off the window - Mac issue 13; Segoe UI is wider)
-        self._hint = _Elided("Only your speech is sent — never the silence.")
-        self._hint.setToolTip("It steps aside while another app uses the mic, while you use a Filect shortcut, and "
-                              "while your PC is locked.")
+        self._hint = _Elided("Only your speech is sent — never the silence.", short="Only your speech is sent.")
+        self._hint.setToolTip("Only your speech is sent — never the silence. It steps aside while another app uses the "
+                              "mic, while you use a Filect shortcut, and while your PC is locked.")
         fo.addWidget(self._hint, 1)
         self.usage_label = QLabel("")
         fo.addWidget(self.usage_label)

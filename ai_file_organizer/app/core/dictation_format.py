@@ -16,6 +16,76 @@ anything it does not recognize.
 """
 import re
 
+# Email addresses. The domain: labels joined by a spoken "dot" (or an attached "."), ending in a known TLD.
+_TLD = r"(?:com|net|org|io|co|ai|app|dev|me|info|biz|edu|gov|xyz|tech|online|store|email|[a-z]{2})"
+_EMAIL_DOMAIN = re.compile(r"\bat\s+((?:[a-z0-9][a-z0-9-]*(?:\s+dot\s+|\.))+%s)\b" % _TLD, re.IGNORECASE)
+_SPOKEN_SEP = {"dot": ".", "underscore": "_", "dash": "-", "hyphen": "-", "plus": "+"}
+# Words that end the name part (never part of an address): lead-ins, pronouns, verbs used with "at".
+_NOT_NAME = set("""is was be are am it's its it to at me us you him her them my our your his their the a an this that
+email e-mail mail address contact reach send write cc bcc on via from and or for with by in of as like use try i i'm im
+we we're you're they're he's she's look looking looked find found available located based check stop meet meeting met
+see seen sign signed log logged here there work works working live lives stay staying visit hosted posted online
+out back up""".split())
+
+
+def format_emails(text: str) -> str:
+    """"john dot smith at gmail dot com" -> "john.smith@gmail.com". Lossless when unsure."""
+    for m in reversed(list(_EMAIL_DOMAIN.finditer(text))):
+        name, start, words = [], m.start(), 0
+        for t in reversed(list(re.finditer(r"\S+", text[:m.start()]))):
+            w = t.group().lower()
+            if w == "at" and words:
+                continue                       # a stray "at" INSIDE the name ("Software at gent at gmail…"): the
+                                               # speech service split it; skipped, the name goes on before it
+            if w[-1] in ",.;:!?\"')" or w in _NOT_NAME or words == 4:
+                break
+            if w in _SPOKEN_SEP:
+                name.insert(0, _SPOKEN_SEP[w])
+            else:
+                name.insert(0, re.sub(r"[^a-z0-9._+-]", "", w))
+                words += 1
+            start = t.start()
+        local = "".join(name).strip("._+-")
+        if not words or not local:
+            continue                           # nothing that looks like a name before "at": leave it
+        domain = re.sub(r"\s+dot\s+", ".", m.group(1), flags=re.IGNORECASE).lower()
+        text = text[:start] + f"{local}@{domain}" + text[m.end():]
+    return text
+
+
+def _compact(s: str) -> str:
+    """Letters and digits only, the spoken "at" / "dot" dropped: "Software at gent at gmail dot com" and
+    "softwaregent@gmail.com" both become "softwaregentgmailcom"."""
+    return re.sub(r"[^a-z0-9]", "", re.sub(r"\b(?:at|dot)\b", "", s.lower()))
+
+
+def fix_known_addresses(text: str, custom_terms) -> str:
+    """Your own addresses — Custom Words with an "@" — are written exactly, however the words came apart. The speech
+    service can split a name ("software gent" → "Software at gent"), so no rule can tell where it starts; matching
+    the whole spoken run, letter for letter, against an address YOU saved can. Lossless when nothing matches."""
+    for addr in {str(t).strip() for t in (custom_terms or []) if "@" in str(t)}:
+        want = _compact(addr.replace("@", " ").replace(".", " "))
+        if len(want) < 6:
+            continue
+        toks = list(re.finditer(r"\S+", text))
+        j = len(toks) - 1
+        while j >= 0:                                       # (from the end, so earlier positions stay valid)
+            for i in range(j, max(-1, j - 15), -1):
+                start = toks[i].start()
+                core = text[start:toks[j].end()].rstrip(".,;:!?\"')")
+                c = _compact(core)
+                if c == want:
+                    lead = len(core) - len(core.lstrip("\"'("))
+                    if core[lead:] != addr:
+                        text = text[:start + lead] + addr + text[start + len(core):]
+                    j = i                                   # carry on before this one
+                    break
+                if len(c) > len(want):
+                    break
+            j -= 1
+    return text
+
+
 _ONES = {"zero":0,"one":1,"two":2,"three":3,"four":4,"five":5,"six":6,"seven":7,"eight":8,
     "nine":9,"ten":10,"eleven":11,"twelve":12,"thirteen":13,"fourteen":14,"fifteen":15,
     "sixteen":16,"seventeen":17,"eighteen":18,"nineteen":19}
@@ -97,6 +167,8 @@ def format_spoken(text: str) -> str:
         #    half-done ("10,000 dollars" -> "$10,000", "50 percent" -> "50%").
         s = re.sub(r"\$?(\d[\d,]*(?:\.\d+)?)\s+dollars\b", r"$\1", s, flags=re.IGNORECASE)
         s = re.sub(r"(\d[\d,]*(?:\.\d+)?)\s+percent\b", r"\1%", s, flags=re.IGNORECASE)
+        # 6) Spoken email addresses: "<name> at <domain> dot <tld>" -> "name@domain.tld" (Mac 97677a2)
+        s = format_emails(s)
         return s
     except Exception:
         return text
@@ -118,7 +190,7 @@ def tidy_text(text):
         s = re.sub(r"[ \t]{2,}", " ", s)                      # collapse runs of spaces/tabs
         s = re.sub(r"[ \t]+([,.;:!?%)])", r"\1", s)           # no space before punctuation
         s = re.sub(r"\bi\b", "I", s)                          # pronoun i -> I
-        s = re.sub(r"([.!?]\s+)([a-z])",                      # capitalize after . ! ?
+        s = re.sub(r"([.!?]\s+)([a-z])(?!\S*@)",             # capitalize after . ! ? (not an email address)
                    lambda m: m.group(1) + m.group(2).upper(), s)
         return s
     except Exception:
@@ -168,7 +240,7 @@ def apply_sentence_case(text, before_caret, custom_terms=None):
         at_start = (ctx == "") or ctx.endswith((".", "!", "?")) or ctx.endswith("\n")
 
         # Internal boundaries: capitalize the first lowercase letter after .!? or a newline.
-        text = re.sub(r"([.!?]\s+|\n[ \t]*)([a-z])",
+        text = re.sub(r"([.!?]\s+|\n[ \t]*)([a-z])(?!\S*@)",   # (not an email address)
                       lambda m: m.group(1) + m.group(2).upper(), text)
 
         # Leading word: cased by caret context, unless protected.
@@ -176,6 +248,8 @@ def apply_sentence_case(text, before_caret, custom_terms=None):
         if not m:
             return text
         pre, first, rest = m.group(1), m.group(2), m.group(3)
+        if "@" in first:
+            return pre + first + rest           # (it starts with an email address: kept as written)
         term = _leading_term(text, custom_terms)
         if term is not None:
             # Starts with a Custom Word: keep its own spelling. Mid-sentence that also means its
@@ -195,6 +269,18 @@ def apply_sentence_case(text, before_caret, custom_terms=None):
         return pre + first + rest
     except Exception:
         return text
+
+
+def join_space(before_caret, text):
+    """A space between this dictation and the text right before the cursor, when they'd otherwise stick together:
+    "This is a test." + "My email is…" was pasted as "test.My email…". Only when that text could be read (None:
+    unchanged), it ends right against a word or a . , ; : ! ? ) ] } %, and the dictation starts with a letter or a
+    digit. A field start, a space or new line, an opening bracket, a quote, "@", "/" or "-": unchanged.
+    (Found in the Windows live test 2026-11-13.)"""
+    if not text or not before_caret or before_caret[-1].isspace() or not text[0].isalnum():
+        return text
+    last = before_caret[-1]
+    return " " + text if (last.isalnum() or last in ".,;:!?)]}%") else text
 
 
 if __name__ == "__main__":

@@ -36,6 +36,7 @@ from app.core.query_parser import (
     UI_DATE_MAPPING, UI_TYPE_MAPPING, FILTER_TO_UI_DATE, FILTER_TO_UI_TYPE
 )
 from app.ui.quick_search_overlay import QuickSearchOverlay
+from app.ui.clipboard_guard import put_back_if_changed
 from app.ui.win_hotkey import register_global_hotkey, unregister_global_hotkey, get_foreground_hwnd, set_foreground_hwnd, set_foreground_hwnd_robust, get_window_rect
 from app.ui.theme_manager import theme_manager
 from app.ui.organize_page import OrganizePage
@@ -60,6 +61,17 @@ logger = logging.getLogger(__name__)
 # the same validation so we can't write garbage going forward.
 
 QS_DEFAULT_SHORTCUT = "Ctrl+Alt+H"
+
+# The Analyzed Files list's columns. Edits find their column BY NAME: the handlers once used fixed numbers from before
+# the ✓ column was added - one off - and read the file's id from the ✓ cell, so no edit was ever saved (and fixing the id
+# alone would have saved a Label into Tags). Found in the full test, 2026-11-13.
+DEBUG_COLUMNS = [
+    "✓", "File Name", "Category", "Size", "Has OCR", "Label", "Tags", "Caption",
+    "OCR Text Preview", "AI Source", "Vision Score", "Purpose", "Suggested Filename",
+    "Detected Text", "File Path", "Actions",
+]
+DEBUG_EDITABLE = {"Label": "label", "Tags": "tags", "Caption": "caption", "Purpose": "purpose",
+                  "Suggested Filename": "suggested_filename"}
 
 
 def _is_valid_hotkey(seq: str) -> bool:
@@ -343,6 +355,19 @@ class HelpSendWorker(QThread):
             self.failed.emit(f"Could not send message: {e}")
 
 
+def _help_failure_text(error: str) -> str:
+    """What the Need help? form says when a message wasn't sent. It showed the raw error ("verification_failed",
+    "Server error (HTTP 500)", "Network error: [Errno 11001] getaddrinfo failed"): words for the developer, not the
+    person, and no way forward. The raw one goes to the log."""
+    err = str(error or "")
+    if err.startswith("Network error"):
+        return ("Couldn't reach the server. Check your internet connection, or email "
+                "softwaregentofficial@gmail.com directly.")
+    if "rate_limited" in err:
+        return "Too many messages in a minute. Wait a moment and try again, or email softwaregentofficial@gmail.com."
+    return "Couldn't send your message. Please email softwaregentofficial@gmail.com directly."
+
+
 class HelpDialog(QDialog):
     """Need help? form. Posts to {SUPABASE_URL}/functions/v1/send-contact."""
 
@@ -452,6 +477,7 @@ class HelpDialog(QDialog):
             "color: #E53935; font-size: 12px; font-weight: 500;"
         )
         self.error_label.setWordWrap(True)
+        self.error_label.setTextInteractionFlags(Qt.TextSelectableByMouse)   # (the address can be copied)
         self.error_label.setVisible(False)
         form_layout.addWidget(self.error_label)
 
@@ -507,7 +533,8 @@ class HelpDialog(QDialog):
             self._worker = None
 
     def _on_send_failed(self, error: str):
-        self._show_error(error)
+        logger.warning(f"[HELP] the message wasn't sent: {error}")
+        self._show_error(_help_failure_text(error))
         self.send_button.setEnabled(True)
         self.send_button.setText("Send message")
         self._worker = None
@@ -923,6 +950,16 @@ class MainWindow(QMainWindow):
         self.nav_buttons = [by_index[i] for i in sorted(by_index)]
         
         nav_layout.addStretch()
+        # Help & Feedback: an action, not a page (not checkable, not in nav_button_group / nav_buttons - the tours and
+        # the page numbers only see real pages): the same "Need help?" form as the Search page's 💬 button, which was
+        # the only way to it, and Search isn't the page Filect opens on any more. (Mac 0494a96.)
+        self.sidebar_help_button = QPushButton("  Help && Feedback")  # (&& = a real "&"; one & marks a shortcut)
+        self.sidebar_help_button.setObjectName("navButton")
+        self.sidebar_help_button.setCursor(Qt.PointingHandCursor)
+        self.sidebar_help_button.setIcon(_line_icon("chat", 18, on_color="#7C4DFF", off_color="#8C8AA0"))
+        self.sidebar_help_button.setIconSize(_QSize(18, 18))
+        self.sidebar_help_button.clicked.connect(self._show_help_dialog)
+        nav_layout.addWidget(self.sidebar_help_button)
         sidebar_layout.addWidget(nav_container, 1)  # Takes remaining space
 
         # Upgrade button — sits just above the profile card. Shown only for
@@ -1237,7 +1274,32 @@ class MainWindow(QMainWindow):
         results_layout.setContentsMargins(0, 0, 0, 0)
         results_layout.setSpacing(8)
         self.results_container.setVisible(False)  # Hide until search
-        
+
+        # Filters, with the results: Type and Date. They were made hidden and never placed on the page - the search
+        # read them and the page's tour pointed at them ("After a search: filter by type and date"), but there was
+        # nothing to click (the Mac has the same). Found in the full test, 2026-11-13.
+        filter_row = QHBoxLayout()
+        filter_row.setContentsMargins(2, 0, 2, 0)
+        filter_row.setSpacing(8)
+        self.type_filter = QComboBox()
+        self.type_filter.setObjectName("searchTypeFilter")
+        self.type_filter.addItems(["All Types", "Images", "Documents", "PDFs", "Videos", "Audio", "Code"])
+        self.type_filter.setCurrentIndex(0)
+        self.type_filter.setToolTip("Only this kind of file")
+        self.date_filter = QComboBox()
+        self.date_filter.setObjectName("searchDateFilter")
+        self.date_filter.addItems(["Any Time", "Today", "Yesterday", "This Week", "This Month", "This Year"])
+        self.date_filter.setToolTip("Only files from this time")
+        self.clear_filters_btn = QPushButton("Clear Filters")
+        self.clear_filters_btn.setObjectName("quickActionBtnSecondary")
+        self.clear_filters_btn.setCursor(Qt.PointingHandCursor)
+        self.clear_filters_btn.setVisible(False)              # (only while a filter is on)
+        filter_row.addWidget(self.type_filter)
+        filter_row.addWidget(self.date_filter)
+        filter_row.addWidget(self.clear_filters_btn)
+        filter_row.addStretch()
+        results_layout.addLayout(filter_row)
+
         # Quick Actions bar (hidden by default, shown when files selected)
         self.quick_actions_widget = QWidget()
         self.quick_actions_widget.setObjectName("quickActionsBar")
@@ -1321,19 +1383,6 @@ class MainWindow(QMainWindow):
         results_layout.addWidget(self.search_stats_label)
         
         page_layout.addWidget(self.results_container, 1)
-        
-        # Hidden filter controls (used internally)
-        self.type_filter = QComboBox()
-        self.type_filter.addItems(["All Types", "Images", "Documents", "PDFs", "Videos", "Audio", "Code"])
-        self.type_filter.setCurrentIndex(0)
-        self.type_filter.setVisible(False)
-        
-        self.date_filter = QComboBox()
-        self.date_filter.addItems(["Any Time", "Today", "Yesterday", "This Week", "This Month", "This Year"])
-        self.date_filter.setVisible(False)
-        
-        self.clear_filters_btn = QPushButton("Clear Filters")
-        self.clear_filters_btn.setVisible(False)
         
         self.filter_status_label = QLabel("")
         self.filter_status_label.setVisible(False)
@@ -1706,17 +1755,16 @@ class MainWindow(QMainWindow):
         # Simplified files table
         self.debug_table = QTableWidget()
         self.debug_table.setObjectName("filesTable")
+        # Edits go through the double-click popup only (Save / Cancel). The table's own in-cell editor ALSO opened on a
+        # double-click - two editors at once, the in-cell one left open behind the popup (full test, 2026-11-13).
+        self.debug_table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.debug_table.setShowGrid(False)
         self.debug_table.setAlternatingRowColors(True)
         self.debug_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.debug_table.setSelectionMode(QTableWidget.ExtendedSelection)
-        self.debug_table.setColumnCount(16)
+        self.debug_table.setColumnCount(len(DEBUG_COLUMNS))
         self.debug_table.verticalHeader().setDefaultSectionSize(48)
-        self.debug_table.setHorizontalHeaderLabels([
-            "✓", "File Name", "Category", "Size", "Has OCR", "Label", "Tags", "Caption", 
-            "OCR Text Preview", "AI Source", "Vision Score", "Purpose", "Suggested Filename", 
-            "Detected Text", "File Path", "Actions"
-        ])
+        self.debug_table.setHorizontalHeaderLabels(DEBUG_COLUMNS)
         
         debug_header = self.debug_table.horizontalHeader()
         debug_header.setSectionResizeMode(0, QHeaderView.Fixed)
@@ -2716,20 +2764,8 @@ class MainWindow(QMainWindow):
         search_title_row, search_title = _icon_heading("sparkle", "Search Enhancements", settings_title_style)
         search_layout.addWidget(search_title_row)
         
-        # Smart Rerank toggle
         gpt_row = QHBoxLayout()
-        self.gpt_rerank_button = QPushButton(
-            "Smart Rerank: ON" if settings.use_openai_search_rerank else "Smart Rerank: OFF"
-        )
-        self.gpt_rerank_button.setCheckable(True)
-        self.gpt_rerank_button.setChecked(settings.use_openai_search_rerank)
-        self.gpt_rerank_button.setMinimumHeight(36)
-        self.gpt_rerank_button.setMinimumWidth(160)
-        self.gpt_rerank_button.setCursor(Qt.PointingHandCursor)
-        self.gpt_rerank_button.setStyleSheet(toggle_btn_style)
-        self.gpt_rerank_button.setToolTip("Uses GPT to re-rank search results for better relevance")
-        gpt_row.addWidget(self.gpt_rerank_button)
-        
+
         # Spell Check toggle
         self.spell_check_btn = QPushButton(
             "Spell Check: ON" if settings.enable_spell_check else "Spell Check: OFF"
@@ -2746,7 +2782,7 @@ class MainWindow(QMainWindow):
         gpt_row.addStretch()
         search_layout.addLayout(gpt_row)
         
-        search_info = QLabel("💡 Smart Rerank uses AI. Spell Check fixes typos in queries.")
+        search_info = QLabel("💡 Spell Check fixes typos in your search queries.")
         search_info.setStyleSheet(settings_hint_style)
         search_layout.addWidget(search_info)
         
@@ -3518,8 +3554,7 @@ class MainWindow(QMainWindow):
                 border-color: #7C4DFF;
             }}
         """
-        for btn in [self.theme_toggle_btn, self.qs_autopaste_btn, self.qs_autoconfirm_btn,
-                    self.gpt_rerank_button, self.spell_check_btn]:
+        for btn in [self.theme_toggle_btn, self.qs_autopaste_btn, self.qs_autoconfirm_btn, self.spell_check_btn]:
             btn.setStyleSheet(toggle_btn_style)
 
         # ---- Input fields ----
@@ -4030,11 +4065,8 @@ class MainWindow(QMainWindow):
         self.clear_all_paths_btn.clicked.connect(self._clear_all_indexed_paths)
         
         # Settings tab connections
-        # AI Provider selection UI was removed in v12.2.0 (the Supabase Edge
-        # Function proxy provides all AI capabilities without a user key); the
-        # only remaining AI toggle here is the search rerank feature flag.
-        if hasattr(self, 'gpt_rerank_button'):
-            self.gpt_rerank_button.toggled.connect(self.on_toggle_gpt_rerank)
+        # (AI Provider selection was removed in v12.2.0 - the proxy needs no key of your own - and Smart Rerank
+        # later: it only ran with a local OpenAI key, which customers never have.)
         # Quick search settings connections
         if hasattr(self, 'qs_autopaste_btn'):
             self.qs_autopaste_btn.toggled.connect(self.on_qs_autopaste)
@@ -4222,6 +4254,11 @@ class MainWindow(QMainWindow):
         # Check if we have saved state from the quick search overlay
         overlay = getattr(self, 'quick_overlay', None)
         if overlay and overlay.has_valid_saved_state():
+            if (overlay._saved_window_class or "") != "#32770":
+                # Not a Windows Open/Save window (e.g. a text box in some program): put the path in at the cursor,
+                # as the Mac does. The Open-window ways clear that box first (select all + delete), or press Alt+N.
+                self._paste_path_at_cursor(path, overlay._saved_window_hwnd)
+                return
             logger.info("[QS] Using saved state from quick search overlay")
             success = self._autofill_with_saved_state(path, overlay)
             # IMPORTANT: Don't fall back - saved state method handles everything
@@ -4239,6 +4276,27 @@ class MainWindow(QMainWindow):
         if not ok:
             logger.info("[QS] UIA pipeline failed; trying win32 pipeline")
             self._autofill_win32_pipeline(path)
+
+    def _paste_path_at_cursor(self, path: str, hwnd) -> bool:
+        """Quick Search over a program that isn't an Open/Save window: paste the path where the cursor is - nothing
+        selected or cleared first, and no Enter (Auto-Confirm presses Open in an Open window, nothing else). Only if
+        that program is in front again; otherwise the path is just on the clipboard."""
+        from app.ui.win_hotkey import get_foreground_hwnd
+        try:
+            if get_foreground_hwnd() != hwnd:
+                logger.info("[QS] Not an Open/Save window, and it isn't in front: the path is on the clipboard")
+                self.status_bar.showMessage("QuickSearch: path copied to clipboard")
+                return False
+            import keyboard
+            put_back_if_changed(path)   # (another program may have written to the clipboard since)
+            keyboard.send('ctrl+v')
+            logger.info("[QS] Not an Open/Save window: pasted the path at the cursor")
+            self.status_bar.showMessage("QuickSearch: path pasted (and copied)")
+            return True
+        except Exception as e:
+            logger.warning(f"[QS] Pasting the path at the cursor failed: {e}")
+            self.status_bar.showMessage("QuickSearch: path copied to clipboard")
+            return False
 
     def _autofill_with_saved_state(self, path: str, overlay) -> bool:
         """
@@ -4283,6 +4341,10 @@ class MainWindow(QMainWindow):
                 ("targeted_win32", self._autofill_targeted_win32),
                 ("keyboard_altn", self._autofill_keyboard_altn),  # Uses Alt+N to focus filename field
             ]
+            if window_class == "#32770":
+                # The Windows Open/Save window: its File name box is a plain Edit the Win32 way finds at once
+                # (the UIA search for it took 1.2 s - Filect frozen meanwhile)
+                strategies = [strategies[1], strategies[0], strategies[2]]
             
             for i, (strategy_name, strategy_func) in enumerate(strategies):
                 logger.info(f"[QS] === STRATEGY {i+1}/{len(strategies)}: {strategy_name.upper()} ===")
@@ -4349,7 +4411,6 @@ class MainWindow(QMainWindow):
             # Strategy B: By label proximity
             if target is None:
                 try:
-                    from app.core.vision import FILENAME_LABELS
                     texts = win.descendants(control_type='Text')
                     edits = win.descendants(control_type='Edit')
                     
@@ -4537,6 +4598,7 @@ class MainWindow(QMainWindow):
                 time.sleep(0.1)
                 
                 # Paste the path
+                put_back_if_changed(path)   # (another program may have written to the clipboard since)
                 keyboard.send('ctrl+v')
                 time.sleep(0.2)
                 
@@ -4602,6 +4664,7 @@ class MainWindow(QMainWindow):
                 import keyboard
                 keyboard.send('ctrl+a')  # Select all
                 time.sleep(0.05)
+                put_back_if_changed(path)   # (another program may have written to the clipboard since)
                 keyboard.send('ctrl+v')  # Paste
                 time.sleep(0.1)
                 
@@ -4668,6 +4731,7 @@ class MainWindow(QMainWindow):
                 # Select ALL text reliably and paste (ctrl+a is more reliable than home+shift+end)
                 keyboard.send('ctrl+a')
                 time.sleep(0.05)
+                put_back_if_changed(path)   # (another program may have written to the clipboard since)
                 keyboard.send('ctrl+v')
                 time.sleep(0.15)
                 
@@ -4698,7 +4762,6 @@ class MainWindow(QMainWindow):
         """Insert path into UIA Edit control using multiple methods with verification."""
         try:
             import time
-            from app.core.vision import CONFIRM_NAMES
             
             def _get_text_safe(ctrl):
                 try:
@@ -4748,6 +4811,7 @@ class MainWindow(QMainWindow):
                     import keyboard
                     keyboard.send('ctrl+a')
                     time.sleep(0.05)
+                    put_back_if_changed(path)   # (another program may have written to the clipboard since)
                     keyboard.send('ctrl+v')
                     filled = True
                     logger.info("[QS] UIA: Set via clipboard paste")
@@ -4770,7 +4834,7 @@ class MainWindow(QMainWindow):
                         for name in CONFIRM_NAMES:
                             try:
                                 btn = win.child_window(title=name, control_type='Button')
-                                if btn.exists():
+                                if btn.exists(timeout=0):     # (the window is up: a missing name mustn't wait 0.5 s)
                                     btn.invoke()
                                     confirmed = True
                                     logger.info(f"[QS] UIA: Confirmed via {name} button")
@@ -4818,15 +4882,26 @@ class MainWindow(QMainWindow):
             
             filled = False
             
-            # Method 1: type_keys with clear
+            # Method 1: the whole path at once (it replaces what's in the box). Typing it key by key took 1.2 s+.
             try:
-                target.type_keys('^a{BACKSPACE}')
+                target.set_edit_text(path)
                 time.sleep(0.05)
-                target.type_keys(path, with_spaces=True)
-                filled = True
-                logger.info("[QS] Win32: Set via type_keys")
+                if (target.window_text() or "").strip() == path.strip():
+                    filled = True
+                    logger.info("[QS] Win32: Set via set_edit_text")
             except Exception:
                 pass
+            
+            # Method 1b: type_keys with clear (only if that didn't take)
+            if not filled:
+                try:
+                    target.type_keys('^a{BACKSPACE}')
+                    time.sleep(0.05)
+                    target.type_keys(path, with_spaces=True)
+                    filled = True
+                    logger.info("[QS] Win32: Set via type_keys")
+                except Exception:
+                    pass
             
             # Method 2: Clipboard paste fallback (only if method 1 failed)
             if not filled:
@@ -4837,6 +4912,7 @@ class MainWindow(QMainWindow):
                     import keyboard
                     keyboard.send('ctrl+a')
                     time.sleep(0.05)
+                    put_back_if_changed(path)   # (another program may have written to the clipboard since)
                     keyboard.send('ctrl+v')
                     filled = True
                     logger.info("[QS] Win32: Set via clipboard paste")
@@ -4857,11 +4933,12 @@ class MainWindow(QMainWindow):
                         
                         # Try to find and click Open/Save button
                         try:
-                            from app.core.vision import CONFIRM_NAMES
                             for name in CONFIRM_NAMES:
                                 try:
-                                    btn = win.child_window(title=name, class_name='Button')
-                                    if btn.exists():
+                                    # The Win32 title has the shortcut mark: "&Open". Missing names must not
+                                    # wait (0.5 s each - 2.8 s before Enter was tried)
+                                    btn = win.child_window(title_re=f"^&?{name}$", class_name='Button')
+                                    if btn.exists(timeout=0):
                                         btn.click()
                                         confirmed = True
                                         logger.info(f"[QS] Win32: Confirmed via {name} button")
@@ -4939,6 +5016,7 @@ class MainWindow(QMainWindow):
                 import keyboard  # type: ignore
                 keyboard.send('ctrl+a')
                 time.sleep(0.05)
+                put_back_if_changed(path)   # (another program may have written to the clipboard since)
                 keyboard.send('ctrl+v')
                 time.sleep(0.12)
                 if settings.quick_search_auto_confirm:
@@ -5077,6 +5155,7 @@ class MainWindow(QMainWindow):
                             try:
                                 cb = QApplication.clipboard(); cb.setText(path)
                                 import keyboard  # type: ignore
+                                put_back_if_changed(path)   # (another program may have written to the clipboard since)
                                 keyboard.send('ctrl+v'); filled = True; logger.info("[QS] Retry set via clipboard paste")
                             except Exception:
                                 pass
@@ -5084,6 +5163,7 @@ class MainWindow(QMainWindow):
                         try:
                             cb = QApplication.clipboard(); cb.setText(path)
                             import keyboard  # type: ignore
+                            put_back_if_changed(path)   # (another program may have written to the clipboard since)
                             keyboard.send('ctrl+v'); filled = True; logger.info("[QS] Set via clipboard paste (fallback)")
                         except Exception:
                             pass
@@ -5185,6 +5265,7 @@ class MainWindow(QMainWindow):
                         try:
                             cb = QApplication.clipboard(); cb.setText(path)
                             import keyboard  # type: ignore
+                            put_back_if_changed(path)   # (another program may have written to the clipboard since)
                             keyboard.send('ctrl+v'); done = True
                         except Exception:
                             pass
@@ -5232,11 +5313,6 @@ class MainWindow(QMainWindow):
     # (Removed in v12.2.0) on_save_local_ai / _check_ollama_status — the
     # Local-AI (Ollama) settings UI was removed alongside the OpenAI key UI
     # since all AI now flows through the Supabase Edge Function proxy.
-
-    def on_toggle_gpt_rerank(self, checked: bool):
-        settings.set_use_openai_search_rerank(bool(checked))
-        self.gpt_rerank_button.setText("Smart Rerank: ON" if checked else "Smart Rerank: OFF")
-        self.status_bar.showMessage("GPT rerank " + ("enabled" if checked else "disabled"))
 
     def on_spell_check_toggle(self, checked: bool):
         settings.set_enable_spell_check(bool(checked))
@@ -5286,53 +5362,36 @@ class MainWindow(QMainWindow):
         )
 
     def on_debug_cell_changed(self, item: QTableWidgetItem) -> None:
-        # DIAGNOSTIC: Log every call to this handler
-        logger.warning(f"[HANDLER] on_debug_cell_changed FIRED: row={item.row()}, col={item.column()}, text='{item.text()[:50] if item.text() else ''}'")
-        
         # Avoid handling during table population
         if getattr(self, '_populating_debug_table', False):
-            logger.warning("[HANDLER] on_debug_cell_changed BLOCKED by _populating_debug_table flag")
             return
         try:
             row = item.row()
-            col = item.column()
-            # file id is stored in column 0's user data
-            name_item = self.debug_table.item(row, 0)
+            header = self.debug_table.horizontalHeaderItem(item.column())
+            field = DEBUG_EDITABLE.get(header.text() if header else "")
+            if field is None:
+                return                                   # (a tick, or a column that can't be edited)
+            # the file's id lives on its File Name cell (it was read from the ✓ cell, where it never is)
+            name_item = self.debug_table.item(row, DEBUG_COLUMNS.index("File Name"))
             file_id = name_item.data(Qt.UserRole) if name_item else None
             if not file_id:
                 return
             text = item.text()
-            if col == 4:  # Label
-                ok = file_index.update_file_field(file_id, 'label', text)
-            elif col == 5:  # Tags
+            logger.debug(f"[list] saving an edit of {field} for file {file_id}")
+            if field == "tags":
                 tags = [t.strip() for t in (text or '').split(',') if t.strip()]
                 ok = file_index.set_tags_by_user(file_id, tags)   # (typed tags survive a re-read)
-            elif col == 6:  # Caption
-                ok = file_index.update_file_field(file_id, 'caption', text)
-            elif col == 10:  # Purpose
-                # update metadata JSON
-                # read existing metadata from current table row if possible
-                meta_text = self.debug_table.item(row, 12)  # detected text col; not metadata
-                # fallback: fetch from db if needed is overkill; we set only one key
-                meta = {}
+            elif field in ("label", "caption"):
+                ok = file_index.update_file_field(file_id, field, text)
+            else:                                        # purpose / suggested_filename: kept in the metadata
+                path_item = self.debug_table.item(row, DEBUG_COLUMNS.index("File Path"))
                 try:
-                    rec = file_index.get_file_by_path(self.debug_table.item(row, 8).text())  # unlikely path in col8; ignore if fails
+                    rec = file_index.get_file_by_path(path_item.text()) if path_item else None
                 except Exception:
                     rec = None
-                meta = (rec or {}).get('metadata', {}) if rec else {}
-                meta['purpose'] = text
+                meta = dict((rec or {}).get('metadata') or {})
+                meta[field] = text
                 ok = file_index.update_file_field(file_id, 'metadata', meta)
-            elif col == 11:  # Suggested filename
-                meta = {}
-                try:
-                    rec = file_index.get_file_by_path(self.debug_table.item(row, 8).text())
-                except Exception:
-                    rec = None
-                meta = (rec or {}).get('metadata', {}) if rec else {}
-                meta['suggested_filename'] = text
-                ok = file_index.update_file_field(file_id, 'metadata', meta)
-            else:
-                return
             if ok:
                 self.status_bar.showMessage("Saved edit")
                 # Clear selection to remove the persistent highlight
@@ -5357,9 +5416,8 @@ class MainWindow(QMainWindow):
         header = self.debug_table.horizontalHeaderItem(col)
         column_name = header.text() if header else f"Column {col}"
         
-        # Editable columns (others are read-only)
-        editable_columns = {4: 'label', 5: 'tags', 6: 'caption', 10: 'purpose', 11: 'suggested_filename'}
-        is_editable = col in editable_columns
+        # Editable columns (others are read-only) - by name, as on_debug_cell_changed saves them
+        is_editable = column_name in DEBUG_EDITABLE
         
         # Create a styled dialog
         from PySide6.QtWidgets import QDialog, QVBoxLayout, QTextEdit, QDialogButtonBox, QLabel
@@ -5915,36 +5973,54 @@ Move Plan Summary:
             self.progress_bar.style().polish(self.progress_bar)
     
     def _cancel_indexing(self):
-        """Cancel the current indexing operation - IMMEDIATE UI response."""
-        reply = QMessageBox.question(
-            self,
-            "Cancel Indexing",
-            "Are you sure you want to cancel indexing?\n\nFiles already indexed will be kept.",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No
-        )
-        
-        if reply == QMessageBox.Yes:
-            # Cancel via search_service for REAL cancellation
-            search_service.cancel_indexing()
-            
-            # Also cancel worker if it exists
-            if hasattr(self, 'index_worker') and self.index_worker:
-                self.index_worker.cancel()
-            
-            # Entire PC: None = cancelled (the folder still finishing says nothing, and nothing after it starts)
-            if hasattr(self, '_pc_index_queue'):
-                self._pc_index_queue = None
-            
-            self._hide_index_controls()
-            self.status_bar.showMessage("Indexing cancelled. Files already indexed have been saved.")
-            
-            # Refresh views with what was indexed
-            stats = search_service.get_index_statistics()
-            self.update_search_statistics(stats)
-            self.search_button.setEnabled(True)
-            self.refresh_debug_view()
-    
+        """Cancel the current indexing operation - IMMEDIATE UI response. The question closes by itself if the run
+        ends while it's open (it used to stay up, blocking the window), and "Yes" only cancels the run it was asked
+        about - never the next folder in the queue that started meanwhile. (Found in the full test, 2026-11-13.)"""
+        run, pc = getattr(self, 'index_worker', None), getattr(self, '_pc_index_queue', None)
+
+        def still_running():
+            if not self.is_indexing:
+                return False
+            if pc is not None:                        # Entire PC: the whole run, whichever folder it's on
+                return getattr(self, '_pc_index_queue', None) is pc
+            return getattr(self, 'index_worker', None) is run
+
+        box = QMessageBox(QMessageBox.Question, "Cancel Indexing",
+                          "Are you sure you want to cancel indexing?\n\nFiles already indexed will be kept.",
+                          QMessageBox.Yes | QMessageBox.No, self)
+        box.setDefaultButton(QMessageBox.No)
+        watch = QTimer(box)
+        watch.timeout.connect(lambda: None if still_running() else box.reject())
+        watch.start(300)
+        try:
+            box.exec()
+        finally:
+            watch.stop()
+        if box.clickedButton() is not box.button(QMessageBox.Yes):
+            return
+        if not still_running():
+            self.status_bar.showMessage("It had already finished - nothing to cancel.", 4000)
+            return
+        # Cancel via search_service for REAL cancellation
+        search_service.cancel_indexing()
+
+        # Also cancel worker if it exists
+        if hasattr(self, 'index_worker') and self.index_worker:
+            self.index_worker.cancel()
+
+        # Entire PC: None = cancelled (the folder still finishing says nothing, and nothing after it starts)
+        if hasattr(self, '_pc_index_queue'):
+            self._pc_index_queue = None
+
+        self._hide_index_controls()
+        self.status_bar.showMessage("Indexing cancelled. Files already indexed have been saved.")
+
+        # Refresh views with what was indexed
+        stats = search_service.get_index_statistics()
+        self.update_search_statistics(stats)
+        self.search_button.setEnabled(True)
+        self.refresh_debug_view()
+
     def _on_index_progress(self, done: int, total: int, message: str):
         """Slot to handle progress updates from the worker thread (runs on main thread)."""
         try:
@@ -7256,6 +7332,7 @@ Move Plan Summary:
                     self.type_filter.blockSignals(True)
                     self.type_filter.setCurrentIndex(idx)
                     self.type_filter.blockSignals(False)
+                    self._sync_clear_filters()      # (now visible: you see the type you said, and can clear it)
             extensions = TYPE_EXTENSIONS.get(type_filter, [])
         elif ui_type != "All Types":
             # No NLP type filter - use UI dropdown selection
@@ -7386,11 +7463,16 @@ Move Plan Summary:
         except Exception:
             pass
 
+    def _sync_clear_filters(self):
+        """Clear Filters shows only while a filter is on."""
+        self.clear_filters_btn.setVisible(self.type_filter.currentIndex() > 0 or self.date_filter.currentIndex() > 0)
+
     def _on_filter_changed(self):
         """Re-run search when filter dropdowns change."""
+        self._sync_clear_filters()
         if self.search_input.text().strip():
             self.search_files()
-    
+
     def _clear_filters(self):
         """Clear all search filters and reset dropdowns."""
         self.type_filter.blockSignals(True)
@@ -7400,6 +7482,7 @@ Move Plan Summary:
         self.type_filter.blockSignals(False)
         self.date_filter.blockSignals(False)
         self.filter_status_label.setText("")
+        self._sync_clear_filters()
         
         # Re-run search if there's a query
         if self.search_input.text().strip():

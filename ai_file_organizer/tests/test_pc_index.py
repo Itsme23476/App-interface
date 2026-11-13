@@ -55,7 +55,8 @@ def win(monkeypatch):
     w.page_stack.setCurrentIndex(2)
     boxes = []
     monkeypatch.setattr(mwm.QMessageBox, "information", lambda *a, **k: boxes.append(a[1:3]))
-    monkeypatch.setattr(mwm.QMessageBox, "question", lambda *a, **k: mwm.QMessageBox.Yes)
+    # (Cancel's question: answered "Yes" by clicking its own Yes button - no event loop is pumped here)
+    monkeypatch.setattr(mwm.QMessageBox, "exec", lambda self: self.button(mwm.QMessageBox.Yes).click() or 0)
     monkeypatch.setattr(mwm.search_service, "cancel_indexing", lambda: None)
     monkeypatch.setattr(mwm.QTimer, "singleShot", lambda ms, fn: fn())     # (no event loop pumped)
     w._test_boxes = boxes

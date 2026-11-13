@@ -113,6 +113,7 @@ class DictationController(QObject):
             logger.warning("[DICTATION] start ignored — a recording is already active")
             return
         self._mode = mode
+        self._caret = None                    # (the caret read of an earlier dictation never carries over)
         logger.info(f"[DICTATION] ▶ start mode={mode}")
 
         # A new organize request: clear any leftover organize popup NOW (before
@@ -149,6 +150,14 @@ class DictationController(QObject):
             return
         logger.info("[DICTATION] ■ stop (awaiting transcript)")
         self._overlay.show_transcribing()
+        # Read what's before the cursor NOW, while the words are being finished: it can't change meanwhile, and read
+        # when the text arrived it sometimes ran out of time (live 2026-11-13: 0.405 s → "unreadable", so no space
+        # and no casing for that dictation, and 0.4 s slower).
+        try:
+            from app.ui.win_hotkey import start_text_before_caret
+            self._caret = start_text_before_caret()
+        except Exception:
+            self._caret = None
         if self._recorder:
             self._recorder.stop_recording()
 
@@ -177,23 +186,35 @@ class DictationController(QObject):
         # numbers/currency/percent -> written form, whitespace/punctuation tidy,
         # and context-aware sentence casing. apply_sentence_case safely no-ops
         # when the caret context can't be read (text_before_caret() -> None).
+        before = None
         if text:
             try:
-                from app.core.dictation_format import format_spoken, tidy_text, apply_sentence_case
+                from app.core.dictation_format import (format_spoken, tidy_text, apply_sentence_case,
+                                                       fix_known_addresses)
                 before = None
+                import time as _time
+                job, self._caret = getattr(self, "_caret", None), None
                 try:
-                    from app.ui.win_hotkey import text_before_caret
-                    before = text_before_caret()
+                    if job is not None:               # (started at key release: 0.8 s from then in all)
+                        before = job(0.8 - (_time.perf_counter() - job.started))
+                        took = round((_time.perf_counter() - job.started) * 1000)
+                    else:
+                        from app.ui.win_hotkey import text_before_caret
+                        t0 = _time.perf_counter()
+                        before = text_before_caret()
+                        took = round((_time.perf_counter() - t0) * 1000)
                 except Exception:
-                    before = None
+                    before, took = None, -1
                 _ctx = before.rstrip(" \t") if before is not None else None
                 logger.info("[DICTATION] caret context: " + (
                     "unreadable" if _ctx is None else
-                    "sentence start" if (not _ctx or _ctx[-1] in ".!?\n") else "mid-sentence"))
+                    "sentence start" if (not _ctx or _ctx[-1] in ".!?\n") else "mid-sentence")
+                    + f" ({took} ms{' since the key release' if job is not None else ''})")
+                terms = settings.live_dictation_custom_terms()
                 text = apply_sentence_case(
-                    tidy_text(format_spoken(text)),
+                    fix_known_addresses(tidy_text(format_spoken(text)), terms),   # (your saved addresses, exactly)
                     before,
-                    settings.live_dictation_custom_terms(),
+                    terms,
                 )
             except Exception as e:
                 logger.warning(f"[DICTATION] deterministic formatting skipped: {e}")
@@ -219,7 +240,8 @@ class DictationController(QObject):
         elif self._mode == "organize":
             self._route_organize(text)
         else:
-            self._paste(text)
+            from app.core.dictation_format import join_space
+            self._paste(join_space(before, text))  # (a space when it would stick to the text before the cursor)
 
         self._save_history(text, self._mode)
 
@@ -234,28 +256,35 @@ class DictationController(QObject):
 
     # ----- routing -----
     def _paste(self, text: str):
-        """Put text on the clipboard and synth Ctrl+V into the focused app,
-        restoring the previous clipboard afterward."""
+        """Put text on the clipboard and synth Ctrl+V into the focused app, then put back what was on the clipboard -
+        all of it (text, a picture, files: it used to keep only the text, so a copied picture became empty text), and
+        never over something copied after the paste."""
         logger.info(f"[DICTATION] pasting {len(text)} chars into focused app")
         try:
+            from app.ui import clipboard_guard
             cb = QApplication.clipboard()
-            prev = cb.text()
+            prev = clipboard_guard.snapshot()
             cb.setText(text)
             # Small delay so the overlay is fully hidden + focus is stable.
-            QTimer.singleShot(90, lambda: self._do_paste_and_restore(cb, prev))
+            QTimer.singleShot(90, lambda: self._do_paste_and_restore(cb, prev, text))
         except Exception as e:
             logger.error(f"[DICTATION] clipboard paste failed: {e}")
 
-    def _do_paste_and_restore(self, cb, prev):
+    def _do_paste_and_restore(self, cb, prev, text):
+        from app.ui import clipboard_guard
+        # Something else may have written to the clipboard in those 90 ms (a clipboard manager, a phone's clipboard
+        # syncing over, a copy): then THAT was pasted - anything private. Put the words back first; what the other
+        # program wrote is the newest copy, so that's what goes back afterwards. (Mac c143812.)
+        newer = clipboard_guard.put_back_if_changed(text)
+        if newer is not None:
+            prev = newer
         _send_ctrl_v()
-        QTimer.singleShot(400, lambda: self._restore_clipboard(cb, prev))
+        QTimer.singleShot(400, lambda: self._restore_clipboard(cb, prev, text))
 
-    def _restore_clipboard(self, cb, prev):
-        try:
-            cb.setText(prev)
+    def _restore_clipboard(self, cb, prev, text):
+        from app.ui import clipboard_guard
+        if clipboard_guard.restore_if_still(text, prev):
             logger.debug("[DICTATION] clipboard restored")
-        except Exception:
-            pass
 
     def _route_search(self, text: str):
         """Voice search: distill the spoken sentence into keywords and run it in

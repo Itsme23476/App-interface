@@ -336,6 +336,31 @@ def search_files(query: str, limit: int = 20) -> list:
         return [{"error": f"search failed: {e}"}]
 
 
+def _folder_answer(p: Path, tool: str):
+    """A FOLDER passed where a file belongs: say so and list its files, so the AI client carries on file by file.
+    (It used to answer "Can't read this file (Permission denied) ... locked by another program" - an AI client
+    told to analyze a folder stopped there. Full feature test, 2026-11-13.)"""
+    try:
+        if not p.is_dir():
+            return None
+    except OSError:
+        return None
+    files, more = [], 0
+    for q in sorted(p.rglob("*")):
+        try:
+            if not q.is_file() or q.name in _METADATA_FILES or any(x.startswith(".") for x in q.relative_to(p).parts):
+                continue
+        except OSError:
+            continue
+        if len(files) < 200:
+            files.append(str(q))
+        else:
+            more += 1
+    return {"error": f"This is a folder, not a file: {tool} works on one file at a time. Call it on each of "
+                     f"the files below" + (" (or generate_organization_plan to organize the folder)." if files else "."),
+            "folder": str(p), "files": files, **({"more_files": more} if more else {})}
+
+
 @server.tool(description="Get the stored index details for one file by absolute path "
                          "(tags, caption, category, dates). Read-only.")
 def get_file_details(path: str) -> dict:
@@ -345,7 +370,9 @@ def get_file_details(path: str) -> dict:
             return gate
         from app.core.search import search_service
         d = search_service.get_file_details(path)
-        return _jsonsafe(d) if d else {"error": "not found in index"}
+        if not d:
+            return _folder_answer(Path(path), "get_file_details") or {"error": "not found in index"}
+        return _jsonsafe(d)
     except Exception as e:
         return {"error": f"lookup failed: {e}"}
 
@@ -364,6 +391,9 @@ def analyze_image(path: str, reanalyze: bool = False) -> dict:
         p = Path(path)
         if not p.exists():
             return {"error": "file not found"}
+        folder = _folder_answer(p, "analyze_image")
+        if folder:
+            return folder
         saved = None if reanalyze else _saved_analysis(p)
         if saved:
             return _saved_summary(p, saved)
@@ -395,6 +425,9 @@ def transcribe_file(path: str, reanalyze: bool = False) -> dict:
             return gate
         from app.core.transcription import transcribe_audio
         p = Path(path)
+        folder = _folder_answer(p, "transcribe_file")
+        if folder:
+            return folder
         saved = None if reanalyze or not p.exists() else _saved_analysis(p)
         if saved and saved.get("ocr_text"):
             return {"ok": True, "text": saved["ocr_text"], "mode": "already_analyzed",
@@ -459,6 +492,9 @@ def analyze_file(path: str, reanalyze: bool = False):
         p = Path(path)
         if not p.exists():
             return {"error": "file not found"}
+        folder = _folder_answer(p, "analyze_file")
+        if folder:
+            return folder
         saved = None if reanalyze else _saved_analysis(p)
         if saved:
             return _saved_summary(p, saved)

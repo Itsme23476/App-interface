@@ -37,6 +37,10 @@ def view():
     app.processEvents()
     yield v
     host.close()
+    # The tour's cleanup is deleteLater(): it runs when an event loop next runs. No loop runs here, so it ran in
+    # the NEXT file's modal box (test_cancel_question), after this host was gone - an access violation in the
+    # full suite. Run it now, while the host still exists. (The app's own loop runs it at once.)
+    QApplication.sendPostedEvents(None, QEvent.DeferredDelete)
 
 
 def _entries(tmp_path, with_file=True):

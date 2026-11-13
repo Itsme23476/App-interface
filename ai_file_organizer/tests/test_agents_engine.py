@@ -196,6 +196,9 @@ def test_typing_in_open_chat_continues_it_and_queues_while_running(fake):
     page._new_chat()
     page._on_send("something else")
     assert _wait(lambda: len(page._sessions) == 2)
+    # (wait for the new chat's worker to reach the agent: the session exists a moment before its thread calls run();
+    # on a busy run the check below read the previous call - "sid-1" - and failed, 2026-11-13)
+    assert _wait(lambda: fake.calls[-1]["prompt"] == "something else")
     assert fake.calls[-1]["resume"] is None
     page.shutdown()
 

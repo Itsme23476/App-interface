@@ -27,9 +27,6 @@ class Settings:
         self.ai_provider: str = 'openai'  # OpenAI is now the default - no local setup needed!
         self.openai_api_key: str | None = os.environ.get('OPENAI_API_KEY')
         self.openai_vision_model: str = 'gpt-6-luna'   # (a label only: the proxy picks the model — vision.FILECT_MODEL)
-        # Search rerank option (ChatGPT)
-        self.use_openai_search_rerank: bool = False
-        self.openai_search_model: str = 'gpt-6-luna'
         # Local AI model settings (Ollama)
         # Qwen 2.5-VL handles BOTH text AND vision in one model
         self.local_model: str = 'qwen2.5vl:3b'
@@ -307,7 +304,6 @@ class Settings:
             # Migrate old setting: if they had OpenAI fallback enabled, keep using OpenAI
             self.ai_provider = 'openai'
         # else keep default 'openai'
-        self.use_openai_search_rerank = bool(data.get('use_openai_search_rerank', self.use_openai_search_rerank))
         self.use_quick_search = bool(data.get('use_quick_search', self.use_quick_search))
         k = data.get('openai_api_key')
         if isinstance(k, str) and k.strip():
@@ -317,9 +313,6 @@ class Settings:
         if isinstance(m, str) and m.strip():
             self.openai_vision_model = m.strip()
             os.environ['OPENAI_VISION_MODEL'] = self.openai_vision_model
-        sm = data.get('openai_search_model')
-        if isinstance(sm, str) and sm.strip():
-            self.openai_search_model = sm.strip()
         # Local AI model (single model for both text and vision)
         lm = data.get('local_model')
         if isinstance(lm, str) and lm.strip():
@@ -453,8 +446,6 @@ class Settings:
             'ai_provider': self.ai_provider,
             'openai_api_key': self.openai_api_key or '',
             'openai_vision_model': self.openai_vision_model,
-            'use_openai_search_rerank': self.use_openai_search_rerank,
-            'openai_search_model': self.openai_search_model,
             'local_model': self.local_model,
             'use_quick_search': self.use_quick_search,
             'quick_search_shortcut': self.quick_search_shortcut,
@@ -622,11 +613,6 @@ class Settings:
                 self._loaded_cfg = copy.deepcopy(mem)
             except Exception:
                 pass
-
-    # Search rerank toggle
-    def set_use_openai_search_rerank(self, use: bool) -> None:
-        self.use_openai_search_rerank = bool(use)
-        self._save_config()
 
     # Quick search setters
     def set_quick_search_shortcut(self, shortcut: str) -> None:

@@ -77,7 +77,8 @@ def test_a_kept_tag_isnt_doubled_by_the_ai_in_another_case():
 
 
 def test_editing_the_tags_cell_saves_them_as_yours():
-    """The list's Tags cell (column 5) goes through set_tags_by_user, so what you type there survives a re-read."""
+    """The list's Tags cell goes through set_tags_by_user, so what you type there survives a re-read. (The real columns,
+    and the file's id on its File Name cell - as the list is built.)"""
     from PySide6.QtCore import Qt
     from PySide6.QtWidgets import QApplication, QTableWidget, QTableWidgetItem
     QApplication.instance() or QApplication([])
@@ -85,12 +86,13 @@ def test_editing_the_tags_cell_saves_them_as_yours():
     idx = FileIndex(TMP / "e.db")
     idx.add_file(meta(["date"]))
     fid = idx.get_file_by_path(str(F))["id"]
-    t = QTableWidget(1, 16)
-    c0 = QTableWidgetItem()
-    c0.setData(Qt.UserRole, fid)
-    t.setItem(0, 0, c0)
+    t = QTableWidget(1, len(mwm.DEBUG_COLUMNS))
+    t.setHorizontalHeaderLabels(mwm.DEBUG_COLUMNS)
+    name = QTableWidgetItem(F.name)
+    name.setData(Qt.UserRole, fid)
+    t.setItem(0, mwm.DEBUG_COLUMNS.index("File Name"), name)
     cell = QTableWidgetItem("date, my-trip")
-    t.setItem(0, 5, cell)
+    t.setItem(0, mwm.DEBUG_COLUMNS.index("Tags"), cell)
     w = SimpleNamespace(debug_table=t, status_bar=mock.MagicMock(), _populating_debug_table=False)
     with mock.patch.object(mwm, "file_index", idx):
         mwm.MainWindow.on_debug_cell_changed(w, cell)

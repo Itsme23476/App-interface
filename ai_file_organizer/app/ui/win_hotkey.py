@@ -74,16 +74,20 @@ def _uia_text_before_caret(max_chars: int) -> Optional[str]:
     return rng.GetText(-1)
 
 
-def text_before_caret(max_chars: int = 40, timeout: float = 0.4) -> Optional[str]:
-    """Return up to ``max_chars`` characters immediately before the system text
-    caret in the focused control, or ``None`` if it can't be read.
+def start_text_before_caret(max_chars: int = 40):
+    """Start reading the text before the caret NOW and return ``result(timeout) -> Optional[str]`` to collect it
+    (``result.started`` = when it began, perf_counter). The dictation starts it at key release - the text before the
+    cursor can't change while Filect transcribes - so the read runs while the words are finished instead of after.
+    Same rules as text_before_caret: UI Automation on a worker thread with its own COM apartment, never a password
+    field, None if it can't be read in time."""
+    import time as _time
+    started = _time.perf_counter()
 
-    Dictation's sentence-case pass uses this to tell a sentence start from
-    mid-sentence; with ``None`` it no-ops and nothing breaks. Read through UI
-    Automation (TextPattern selection / TextPattern2 caret) on a worker thread
-    with its own COM apartment, given at most ``timeout`` s — a hung target app
-    can never stall dictation. Password fields are never read.
-    """
+    def _done(value):
+        def result(timeout: float = 0.0):
+            return value
+        result.started = started
+        return result
     try:
         import os
         import threading
@@ -91,7 +95,7 @@ def text_before_caret(max_chars: int = 40, timeout: float = 0.4) -> Optional[str
         pid = wintypes.DWORD()
         user32.GetWindowThreadProcessId(user32.GetForegroundWindow(), ctypes.byref(pid))
         if pid.value == os.getpid():
-            return _own_text_before_caret(max_chars)
+            return _done(_own_text_before_caret(max_chars))
         import comtypes                               # (UI thread first — see warm_text_before_caret)
         box = {}
 
@@ -107,8 +111,28 @@ def text_before_caret(max_chars: int = 40, timeout: float = 0.4) -> Optional[str
 
         t = threading.Thread(target=_work, daemon=True, name="filect-caret")
         t.start()
-        t.join(timeout)
-        return None if t.is_alive() else box.get("text")
+
+        def result(timeout: float = 0.0):
+            t.join(max(0.0, timeout))
+            return None if t.is_alive() else box.get("text")
+        result.started = started
+        return result
+    except Exception:
+        return _done(None)
+
+
+def text_before_caret(max_chars: int = 40, timeout: float = 0.4) -> Optional[str]:
+    """Return up to ``max_chars`` characters immediately before the system text
+    caret in the focused control, or ``None`` if it can't be read.
+
+    Dictation's sentence-case pass uses this to tell a sentence start from
+    mid-sentence; with ``None`` it no-ops and nothing breaks. Read through UI
+    Automation (TextPattern selection / TextPattern2 caret) on a worker thread
+    with its own COM apartment, given at most ``timeout`` s — a hung target app
+    can never stall dictation. Password fields are never read.
+    """
+    try:
+        return start_text_before_caret(max_chars)(timeout)
     except Exception:
         return None
 
