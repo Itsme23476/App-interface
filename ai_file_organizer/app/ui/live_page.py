@@ -11,14 +11,15 @@ Your screen, two ways:
   · "Look at my screen…" — the display under the mouse is captured (in memory, off the UI thread) the moment it's
     clear you're speaking; it's written to disk and attached ONLY if the request is about your screen (the router's
     "screen" flag, or the word check); otherwise it's simply dropped.
-  · Draw: press Shift + Ctrl together (watched only while Filect Assistant is on — the listener's observe-only key
-    hook, so no key is ever blocked) → the red-ink layer the moment both are down; press them again → a screenshot
-    with your marks. (Ctrl+Shift+Tab and other Ctrl+Shift+key shortcuts: the drawing that started is quietly taken
-    back.) Up to 5 drawings ALL go with the next thing you say. Talking while you draw? That request waits for the
+  · Draw: press Win + Shift together (watched only while Filect Assistant is on — the listener's observe-only key
+    hook, so no key is ever blocked; letting go of Win doesn't open Start) → the red-ink layer the moment both are
+    down; press them again → a screenshot with your marks. (Win+Shift+S and other Win+Shift+key shortcuts: the
+    drawing that started is quietly taken back.) The Mac's key is Shift + Ctrl — on Windows, Ctrl + Shift is the
+    keyboard-language switch for many people (2026-11-14). Up to 5 drawings ALL go with the next thing you say. Talking while you draw? That request waits for the
     drawing and goes with it. Not used (ignored / cancelled / a yes-no answer) → they keep waiting; dropped after
     60 s or with Esc. Esc while drawing cancels that drawing and what you said during it.
 
-Collect, then send: double-tap Ctrl → "Collecting": everything you say (and draw with Shift + Ctrl) is kept, not
+Collect, then send: double-tap Ctrl → "Collecting": everything you say (and draw with Win + Shift) is kept, not
 sent — pause as long as you like; tap Ctrl once → it ALL goes as ONE request (routed once); Esc throws it away.
 
 Speak replies (a setting, OFF by default): a hands-free task's moments that matter — done (what the agent wrote to be
@@ -26,7 +27,7 @@ said: a sentence or two, more when you asked), needs your OK, failed — are sai
 waits while you're talking or using a Filect shortcut, and stops when you press Esc or click Stop. Windows has no echo
 cancellation for the mic, so the mic is ignored while Filect speaks (+300 ms) — as the Mac does with its filter off.
 
-Windows vs the Mac: the keys are Shift + Ctrl / Ctrl Ctrl … Ctrl / Esc; chimes are Windows' own short sounds; the
+Windows vs the Mac: the keys are Win + Shift / Ctrl Ctrl … Ctrl / Esc; chimes are Windows' own short sounds; the
 "Filter background noise" switch is hidden (no voice processing here); there's no menu-bar / tray item."""
 from __future__ import annotations
 
@@ -56,7 +57,7 @@ SAY_EXAMPLE = "“make a landing page for my coffee shop”"
 DRAWN_KEEP_MS = 60000           # drawings wait this long (after the last one) for what you say about them
 MAX_CAPTURES = 3                # screens kept in memory at once (one per request being heard / checked)
 MAX_DRAWINGS = 5                # drawings that can go with one request
-DRAW_KEY = "Shift + Ctrl"        # press Shift + Ctrl together (live_listener.ChordTap)
+DRAW_KEY = "Win + Shift"         # press Win + Shift together (live_listener.ChordTap; the Mac: Shift + Ctrl)
 COLLECT_TAP_SEC = 1.0           # two Ctrl taps this close together = start collecting
 COLLECT_WAIT_MS = 8000          # tapping Ctrl to send waits this long at most for what's still being transcribed
 
@@ -1235,7 +1236,7 @@ class LivePage(QScrollArea):
         self._draw_lbl = QLabel("Draw on your screen")
         drow.addWidget(self._draw_lbl, 1)
         self.draw_key = QLabel("")
-        self.draw_key.setToolTip("Press Shift and Ctrl together, draw, press them again to capture. Esc cancels.")
+        self.draw_key.setToolTip("Press Win and Shift together, draw, press them again to capture. Esc cancels.")
         drow.addWidget(self.draw_key, 0)
         sc.addLayout(drow)
         crow = QHBoxLayout()
@@ -1458,7 +1459,7 @@ class LivePage(QScrollArea):
             b._c = c
             b.play._c = c
             b.update()
-        self.draw_key.setText(self._keys(["Shift", "+", "Ctrl"]))
+        self.draw_key.setText(self._keys(["Win", "+", "Shift"]))
         self._many_key.setText(self._keys(["Ctrl", "Ctrl", "…", "Ctrl"]))
         for t in (self.noise_toggle, self.chime_toggle, self.speak_toggle, self.open_toggle, self.organize_toggle):
             self._style_toggle(t)
@@ -1639,7 +1640,7 @@ class LivePage(QScrollArea):
         self._state, self._detail = state, detail
         c = self._c
         amber_t = "#E0B060" if c.get("dark") else "#B9861F"
-        keys = (f"Point at something with {self._keys(['Shift', '+', 'Ctrl'])} · several things at once with "
+        keys = (f"Point at something with {self._keys(['Win', '+', 'Shift'])} · several things at once with "
                 f"{self._keys(['Ctrl', 'Ctrl'])}")
         text, sub, color = {
             "off": ("Talk to your agents — hands-free", "Turn it on and just say what you want. Claude Code or Codex "
@@ -2226,7 +2227,7 @@ class LivePage(QScrollArea):
             return path
         return get
 
-    # ---- drawing (press ⇧⌃, while Filect Assistant is on) ----------------------------------------------
+    # ---- drawing (press Win + Shift, while Filect Assistant is on) --------------------------------------
     def _hands_free(self, on: bool):
         """Tell the Agents page we're listening (it keeps Claude Code running ahead of time) / stopped."""
         ap = getattr(self._mw, "assistant_page", None)
@@ -2302,7 +2303,7 @@ class LivePage(QScrollArea):
             self._start_drawing()
 
     def _on_draw_spoiled(self):
-        """The ⇧⌃ that just started a drawing was part of a shortcut (⌃⇧Tab…): quietly take it back —
+        """The Win + Shift that just started a drawing was part of a shortcut (Win+Shift+S…): quietly take it back —
         unless you've already drawn something."""
         if self._drawing and not getattr(self._ink, "_strokes", None):
             self._end_drawing()
@@ -2418,7 +2419,7 @@ class LivePage(QScrollArea):
 
     # ---- collect, then send (⌃⌃ … ⌃) -------------------------------------------------------------------
     def _on_ctrl_tap(self):
-        """A lone ⌃ tap (the listener filters out ⌃C, ⌃-click, ⇧⌃, fn + ⌃…). Collecting → send it all;
+        """A lone ⌃ tap (the listener filters out Ctrl+C, Ctrl-click, Win+Shift, Ctrl+Win…). Collecting → send it all;
         else two within COLLECT_TAP_SEC → start collecting (one on its own does nothing)."""
         if not self.listener.on:
             return

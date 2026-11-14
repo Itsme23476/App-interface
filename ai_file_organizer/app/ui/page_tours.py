@@ -7,7 +7,8 @@ are showing; none showing (the Search filters before a search) = the whole app d
 Ported from the Mac (page_tours.py, 92e895f) for Windows:
   * Windows page numbers (Voice is 3 and Settings 4 here; the Mac has them the other way round);
   * Windows keys and words: Ctrl + Win to dictate (+ Shift search, + Alt organize), hold Ctrl + Alt to talk to the
-    agent (or what you set), Shift + Ctrl to draw, Ctrl Ctrl to collect; "your PC", "the card at the top";
+    agent (or what you set), Win + Shift to draw (the Mac's Shift + Ctrl is Windows' language switch), Ctrl Ctrl to
+    collect; "your PC", "the card at the top";
   * what Windows doesn't have isn't shown: no Mute on the Assistant page, no "collect" with the agent shortcut, no
     double-tap to keep dictation listening;
   * the button reuses live_page.style_tour_button (Windows' cheaper glow: the Mac's animated blur cost 20 % of a core).
@@ -47,9 +48,9 @@ def _assistant():
         (("keys", ["Shift", "→", "Ctrl", "+", "Win"]), "Mute it",
          "• Recording a video or on a call? Press Shift, then Ctrl + Win\n• Or click Mute while it's listening\n"
          "• The mic closes until you do it again", lp + "mute_btn"),
-        (("keys", ["Shift", "+", "Ctrl"]), "Point at your screen",
+        (("keys", ["Win", "+", "Shift"]), "Point at your screen",
          # (three lines: a fourth doesn't fit the card in the light theme - the drawing examples made way for it)
-         "• While it listens, press Shift + Ctrl and draw in red\n• Press them again to snap it. It goes with what "
+         "• While it listens, press Win + Shift and draw in red\n• Press them again to snap it. It goes with what "
          "you say next\n• Or just say “look at my screen”",
          (lp + "_draw_lbl", lp + "draw_key")),
         (("keys", ["Ctrl", "Ctrl", "→", "Ctrl"]), "Several things at once",

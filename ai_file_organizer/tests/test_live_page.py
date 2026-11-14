@@ -494,18 +494,19 @@ def test_tab_settings():
 
 def test_windows_specifics():
     """Windows: the noise filter row is hidden (it would do nothing); the keys are Windows' names everywhere on
-    screen; the chime sounds exist; the tour speaks of Shift + Ctrl and your PC."""
+    screen; the chime sounds exist; the tour speaks of Win + Shift (never the Mac's Shift + Ctrl: Ctrl + Shift is
+    Windows' keyboard-language switch) and your PC."""
     page, L, mw = _tab()
     page.resize(1200, 800)
     page.show()
     try:
         assert not page.noise_toggle._row.isVisibleTo(page), "no noise-filter switch on Windows"
         assert page.speak_toggle._row.isVisibleTo(page) and page.chime_toggle._row.isVisibleTo(page)
-        assert "Shift" in page.draw_key.text() and "Ctrl" in page.draw_key.text()
+        assert "Win" in page.draw_key.text() and "Shift" in page.draw_key.text() and "Ctrl" not in page.draw_key.text()
         assert page._many_key.text().count("Ctrl") == 3
         L.start()
         L.state_changed.emit("listening", "")
-        assert "Shift" in page._sub.text() and "Ctrl" in page._sub.text(), page._sub.text()
+        assert "Win" in page._sub.text() and "Shift" in page._sub.text(), page._sub.text()
         page._start_collecting()
         assert "Ctrl" in page._sub.text() and mw.assistant_page.ov.notes[-1].endswith("tap Ctrl to send")
         page._drop_collection("Thrown away — not sent")
@@ -516,15 +517,16 @@ def test_windows_specifics():
             shown = [w.text() for w in page.findChildren(QLabel) + page.findChildren(QPushButton)
                      if w.isVisibleTo(page) and w.text()]
             shown += [w.toolTip() for w in page.findChildren(QLabel) + page.findChildren(QPushButton) if w.toolTip()]
-            bad = [t for t in shown if any(m in t for m in mac)]
+            bad = [t for t in shown if any(m in t for m in mac + ("Shift + Ctrl", "Shift and Ctrl", "Ctrl + Shift"))]
             assert not bad, (st, bad)
         from app.ui import page_tours
         tour = page_tours.steps("assistant")
         for st in tour:
-            assert not any(m in st["title"] + st["description"] for m in mac), st
+            assert not any(m in st["title"] + st["description"] for m in mac + ("Shift + Ctrl", "Ctrl + Shift")), st
         assert tour[1]["art"] == ("keys", ["Shift", "→", "Ctrl", "+", "Win"]) and tour[1]["title"] == "Mute it"
-        assert tour[2]["art"] == ("keys", ["Shift", "+", "Ctrl"]) and "your PC is locked" in tour[-1]["description"]
-        assert lp.DRAW_KEY == "Shift + Ctrl"
+        assert tour[2]["art"] == ("keys", ["Win", "+", "Shift"]) and "your PC is locked" in tour[-1]["description"]
+        assert "press Win + Shift" in tour[2]["description"], tour[2]["description"]
+        assert lp.DRAW_KEY == "Win + Shift"
         for f in lp._CHIMES.values():
             assert (Path(os.environ.get("SystemRoot", r"C:\Windows")) / "Media" / f).exists(), f
         assert page._add_tray_item() is None and page._tray_action is None, "no tray item on Windows"

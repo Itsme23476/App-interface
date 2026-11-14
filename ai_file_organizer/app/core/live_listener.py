@@ -2,7 +2,8 @@
 UtteranceDetector, ChordTap, CtrlTap and LiveListener's logic — are the Mac's, unchanged. Windows pieces: the mic
 (mic_helper: QAudioSource in-process; no echo cancellation → `echo_cancelled` is False and the page mutes the mic
 while Filect speaks), who else uses the mic (Windows' privacy record — the taskbar mic icon's), the lock check
-(OpenInputDesktop), and Esc / Shift+Ctrl / Ctrl taps from an observe-only low-level hook on its own thread.
+(OpenInputDesktop), and Esc / Win+Shift (draw: the Mac's Shift+Ctrl) / Ctrl taps from an observe-only low-level hook
+on its own thread.
 
 Filect Assistant — hands-free listening (phase 1).
 
@@ -523,13 +524,20 @@ def screen_locked() -> bool:
 
 
 class _KeyHook:
-    """Esc, Shift+Ctrl and lone Ctrl taps, anywhere — OBSERVE ONLY (every key goes on to your apps): a low-level
-    keyboard + mouse hook on its own thread with its own message loop, so a busy Filect can never slow your typing
-    (Windows drops a hook that's slow to answer). `on_event(kind, a, b)` is called on THAT thread with
-    ("mods", shift, ctrl_and_other) / ("key", vk, 0) / ("click", 0, 0) — keep it instant (emit a signal)."""
+    """Esc, Win+Shift (the drawing key) and lone Ctrl taps, anywhere — OBSERVE ONLY (every key goes on to your apps):
+    a low-level keyboard + mouse hook on its own thread with its own message loop, so a busy Filect can never slow
+    your typing (Windows drops a hook that's slow to answer). `on_event(kind, a, b)` is called on THAT thread with
+    ("mods", shift=1 | ctrl=2 | win=4 | alt=8, 0) / ("key", vk, 0) / ("click", 0, 0) — keep it instant (emit a signal).
+    Win + Shift on their own also press the unassigned mask key once (dictation_hotkey's), so letting go of Win
+    doesn't open Start; that key is never reported (it's nothing you pressed).
+    Why Win + Shift and not the Mac's Shift + Ctrl: Ctrl + Shift is Windows' keyboard-language / layout switch for
+    many people (Greek, Russian…) — every switch started a drawing, every drawing switched their language
+    (2026-11-14). Win + Shift alone does nothing in Windows."""
     _SHIFT = {0x10, 0xA0, 0xA1}
     _CTRL = {0x11, 0xA2, 0xA3}
-    _OTHER = {0x12, 0xA4, 0xA5, 0x5B, 0x5C}            # Alt, Win: (the Mac's ⌘ / ⌥ / fn)
+    _WIN = {0x5B, 0x5C}
+    _ALT = {0x12, 0xA4, 0xA5}
+    _MASK = 0xE8                                         # (= dictation_hotkey._VK_MASK)
 
     def __init__(self, on_event):
         self._on = on_event
@@ -549,7 +557,31 @@ class _KeyHook:
 
     def _mods(self):
         d = self._down
-        return bool(d & self._SHIFT), bool(d & self._CTRL), bool(d & self._OTHER)
+        return bool(d & self._SHIFT), bool(d & self._CTRL), bool(d & self._WIN), bool(d & self._ALT)
+
+    def _handle(self, vk: int, down: bool) -> None:
+        """One key going down / up (the hook's thread)."""
+        if vk == self._MASK:
+            return                                        # (ours or the dictation shortcut's: not a key you pressed)
+        if vk in self._SHIFT or vk in self._CTRL or vk in self._WIN or vk in self._ALT:
+            before = self._mods()
+            (self._down.add if down else self._down.discard)(vk)
+            after = self._mods()
+            if after != before:                           # (auto-repeat while held changes nothing)
+                if after == (True, False, True, False):
+                    self._send_mask()                     # Win + Shift: letting go of Win mustn't open Start
+                self._on("mods", after[0] * 1 + after[1] * 2 + after[2] * 4 + after[3] * 8, 0)
+        elif down:
+            self._on("key", int(vk), 0)
+
+    @classmethod
+    def _send_mask(cls) -> None:
+        try:
+            u = ctypes.windll.user32
+            u.keybd_event(cls._MASK, 0, 0, 0)
+            u.keybd_event(cls._MASK, 0, 0x0002, 0)       # KEYEVENTF_KEYUP
+        except Exception:
+            pass
 
     def _loop(self, ready):
         from ctypes import wintypes
@@ -574,15 +606,7 @@ class _KeyHook:
             try:
                 if n == 0:
                     vk = ctypes.cast(l, ctypes.POINTER(KBD)).contents.vk
-                    down = w in (0x0100, 0x0104)              # WM_KEYDOWN / WM_SYSKEYDOWN
-                    if vk in self._SHIFT or vk in self._CTRL or vk in self._OTHER:
-                        before = self._mods()
-                        (self._down.add if down else self._down.discard)(vk)
-                        after = self._mods()
-                        if after != before:                   # (auto-repeat while held changes nothing)
-                            self._on("mods", after[0] * 1 + after[1] * 2 + after[2] * 4, 0)
-                    elif down:
-                        self._on("key", int(vk), 0)
+                    self._handle(vk, w in (0x0100, 0x0104))   # WM_KEYDOWN / WM_SYSKEYDOWN
             except Exception:
                 pass
             return u.CallNextHookEx(None, n, w, l)            # never swallowed
@@ -668,25 +692,27 @@ def save_usage_today(seconds: float) -> None:
 
 
 class ChordTap:
-    """⇧ Shift + ⌃ Control pressed together — the drawing key while Filect Assistant is on. Fires the
-    moment BOTH are down (either order; hold them or tap them), once per press: let go of both to arm it
-    again. Pure: feed it modifier states and key presses.
-      · not ours if ⌘ / ⌥ / fn is involved, or a key was pressed while one of them was already held
-        (⌃Tab, Tab… then ⇧ is still a shortcut)
-      · a key or ⌘/⌥/fn AFTER it fired, while they're still held (⌃⇧Tab, ⌃⇧⌘4…) → "spoil": it was a
-        shortcut after all, so the drawing that press started can be taken back
+    """The drawing key while Filect Assistant is on — the Mac's ⇧ Shift + ⌃ Control; on Windows Win + Shift
+    (see _KeyHook: Ctrl + Shift switches the keyboard language for many people). Fires the moment BOTH are
+    down (either order; hold them or tap them), once per press: let go of both to arm it again. Pure: feed it
+    modifier states and key presses.
+      · not ours if another modifier is involved (Windows: Ctrl / Alt), or a key was pressed while one of
+        them was already held (Win+S, Shift+A… then the other is still a shortcut)
+      · a key or another modifier AFTER it fired, while they're still held (Win+Shift+S, Win+Shift+→…) →
+        "spoil": it was a shortcut after all, so the drawing that press started can be taken back
     REGRESSION (his first try): it used to fire on RELEASE, within 0.8 s — pressing and holding, waiting
     for something to happen, never did anything."""
 
     def __init__(self):
-        self._held = False      # ⇧ and/or ⌃ down right now
-        self._dirty = False     # a key / ⌘ ⌥ fn during this hold → a shortcut, not ours
+        self._held = False      # Shift and/or Win down right now
+        self._dirty = False     # a key / another modifier during this hold → a shortcut, not ours
         self._fired = False     # fired during this hold
         self._told = False      # "not counted" already reported for this hold
 
-    def flags(self, shift: bool, ctrl: bool, other: bool):
-        """A modifier changed → "press" (draw key), "spoil", "blocked" (both down but a shortcut), or None."""
-        if not shift and not ctrl:
+    def flags(self, shift: bool, win: bool, other: bool):
+        """A modifier changed → "press" (draw key), "spoil", "blocked" (both down but a shortcut), or None.
+        `win` = the drawing key's second key (Windows: Win; the Mac: ⌃), `other` = any other modifier."""
+        if not shift and not win:
             self._held = self._dirty = self._fired = self._told = False
             return None
         self._held = True
@@ -695,7 +721,7 @@ class ChordTap:
             self._dirty = True
             if spoil:
                 return "spoil"
-        if shift and ctrl:
+        if shift and win:
             if self._dirty:
                 if not self._fired and not self._told:
                     self._told = True
@@ -718,7 +744,7 @@ class ChordTap:
 class CtrlTap:
     """⌃ Control pressed and let go ON ITS OWN — the collect key while Filect Assistant is on (the page
     counts them: ⌃⌃ starts collecting, ⌃ sends). A tap = ⌃ down then up within TAP_MAX_SEC with nothing
-    else in between: no key (⌃C), no click (⌃-click = right-click), no ⇧ / ⌘ / ⌥ / fn (⇧⌃ draws, fn + ⌃
+    else in between: no key (⌃C), no click (⌃-click = right-click), no ⇧ / ⌘ / ⌥ / fn / Win (⇧⌃ / Win+Shift draws, fn + ⌃
     is Claude). Pure: feed it modifier states and "something else happened"."""
     TAP_MAX_SEC = 0.6
 
@@ -774,8 +800,8 @@ class LiveListener(QObject):
     usage = Signal(float)                 # seconds of your voice sent today (≈ what counts toward the limit)
     esc_late = Signal()                   # Esc with nothing being heard/transcribed: the page may cancel a
                                           #   request still being checked by the router
-    draw_tap = Signal()                   # ⇧⌃ pressed (the drawing key) — not while a Filect shortcut runs
-    draw_spoiled = Signal()               # …that ⇧⌃ turned out to be a shortcut (⌃⇧Tab): take it back
+    draw_tap = Signal()                   # Win+Shift pressed (the drawing key) — not while a Filect shortcut runs
+    draw_spoiled = Signal()               # …that Win+Shift turned out to be a shortcut (Win+Shift+S): take it back
     ctrl_tap = Signal()                   # ⌃ tapped on its own (the page: ⌃⌃ = collect, ⌃ = send)
     _chunk_sig = Signal(int, object)
     _end_sig = Signal(int, int)
@@ -832,7 +858,7 @@ class LiveListener(QObject):
         self._keys = None
         self._chord = ChordTap()
         self._ctrl = CtrlTap()
-        self._draw_wait = QTimer(self)      # Shift + Ctrl draws once this runs out, unless a shortcut's key joined
+        self._draw_wait = QTimer(self)      # Win + Shift draws once this runs out, unless a shortcut's key joined
         self._draw_wait.setSingleShot(True)
         self._draw_wait.setInterval(int(self.DRAW_WAIT_SEC * 1000))
         self._draw_wait.timeout.connect(self._tap_sig.emit)
@@ -1034,9 +1060,10 @@ class LiveListener(QObject):
             pass
 
     YIELD_SEC = 2.0     # the hook's "step aside" counts this long; by then busy() has taken over
-    # Shift + Ctrl waits this long before it draws. Windows' mute keys are Shift, THEN Ctrl + Win: Shift + Ctrl is
-    # down for a moment before Win joins — drawing at once flashed the red edge and its note on every mute press
-    # (live test 2026-11-13). A key, Win or Alt within the wait = a shortcut (also Ctrl + Shift + Tab): never drawn.
+    # Win + Shift waits this long before it draws: Windows' own Win + Shift + key shortcuts (S: a screenshot, → / ←:
+    # move a window to the other screen…) and the mute keys pressed as Shift → Win → Ctrl have Win + Shift down for
+    # a moment before their last key — drawing at once flashed the red edge and its note (live test 2026-11-13, with
+    # the old Shift + Ctrl). A key, Ctrl or Alt within the wait = a shortcut: never drawn.
     DRAW_WAIT_SEC = 0.15
 
     def _yielding(self) -> bool:
@@ -1360,14 +1387,15 @@ class LiveListener(QObject):
         return StreamingTranscriber(terms=terms,
                                     language=(settings.dictation_language or None), external=True)
 
-    # ---- Esc + the ⇧⌃ drawing key (observe only — never swallowed, so both still work in your apps) ------
+    # ---- Esc + the Win+Shift drawing key (observe only — never swallowed, so both still work in your apps) -
     def _key_event(self, kind: str, a: int, b: int) -> None:
-        """Every key down / modifier change / click anywhere (from the key hook; main thread). Windows: Shift + Ctrl
-        = the drawing key (the Mac's ⇧⌃), a lone Ctrl tap = collect / send (⌃), Esc. Alt / Win = the Mac's ⌘ ⌥ fn."""
+        """Every key down / modifier change / click anywhere (from the key hook; main thread). Windows: Win + Shift
+        = the drawing key (the Mac's ⇧⌃ — Ctrl + Shift is Windows' language switch), a lone Ctrl tap = collect /
+        send (⌃), Esc."""
         if kind == "mods":
-            shift, ctrl, other = bool(a & 1), bool(a & 2), bool(a & 4)
-            r = self._chord.flags(shift, ctrl, other)
-            if self._ctrl.flags(ctrl, shift or other, time.monotonic()) == "tap":
+            shift, ctrl, win, alt = bool(a & 1), bool(a & 2), bool(a & 4), bool(a & 8)
+            r = self._chord.flags(shift, win, ctrl or alt)
+            if self._ctrl.flags(ctrl, shift or win or alt, time.monotonic()) == "tap":
                 self._ctrl_sig.emit()
         elif kind == "key":
             r = self._chord.key()
@@ -1380,11 +1408,11 @@ class LiveListener(QObject):
         elif r == "spoil":
             if self._draw_wait.isActive():
                 self._draw_wait.stop()                # a shortcut after all, before anything showed: nothing to undo
-                logger.info("[live] Shift+Ctrl was part of a shortcut — not drawn")
+                logger.info("[live] Win+Shift was part of a shortcut — not drawn")
             else:
                 self._spoil_sig.emit()
         elif r == "blocked":
-            logger.info("[live] Shift+Ctrl not counted — another key or Alt/Win was part of it (a shortcut)")
+            logger.info("[live] Win+Shift not counted — another key or Ctrl/Alt was part of it (a shortcut)")
         if kind == "key" and a == 0x1B:               # VK_ESCAPE
             self._esc_sig.emit()
 
@@ -1392,9 +1420,9 @@ class LiveListener(QObject):
         if not self.on:
             return
         if self._mic.busy():                          # fn + ⌃⌃ etc. use ⇧ / ⌃ themselves — theirs, not ours
-            logger.info("[live] Shift+Ctrl ignored (a Filect shortcut is running)")
+            logger.info("[live] Win+Shift ignored (a Filect shortcut is running)")
             return
-        logger.info("[live] Shift+Ctrl pressed (draw)")
+        logger.info("[live] Win+Shift pressed (draw)")
         self.draw_tap.emit()
 
     def _on_ctrl(self) -> None:
@@ -1422,7 +1450,7 @@ class LiveListener(QObject):
 
     def _on_spoil(self) -> None:
         if self.on:
-            logger.info("[live] Shift+Ctrl was part of a shortcut (another key followed) — taking it back")
+            logger.info("[live] Win+Shift was part of a shortcut (another key followed) — taking it back")
             self.draw_spoiled.emit()
 
     def _install_esc(self) -> None:

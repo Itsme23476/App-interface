@@ -2,11 +2,12 @@
 settings are never written; captures go to a temp dir):
   · "Look at my screen…": captured (in memory) the moment it's clearly speech; written to disk and attached ONLY if
     the request is about the screen (router flag or the word check), else never written
-  · Drawing with Shift + Ctrl (only while Filect Assistant is on): press → draw (the moment both are down — held or
+  · Drawing with Win + Shift (only while Filect Assistant is on; the Mac's Shift + Ctrl): press → draw (the moment both are down — held or
     tapped), press again → screenshot; several in a row ALL go with the next request; said while drawing → waits for
     the drawing and goes with it; kept if that request is ignored; dropped after 60 s / Esc; Esc while drawing cancels
     it + what you said; Ctrl+Shift+Tab takes back the drawing it started
-  · the Shift + Ctrl detector: either order; held = still fires once; Alt / Win or Ctrl+Tab-then-Shift → not ours
+  · the Win + Shift detector: either order; held = still fires once; Ctrl / Alt or Win+S-then-Shift → not ours;
+    Ctrl + Shift (Windows' language switch) never draws; Win + Shift keeps Start closed
   · real Windows bits (replacing the Mac's Quartz / Carbon checks): the key hook's events through the listener, a real
     off-thread capture of a bit of the screen (in memory only), two global shortcuts that don't steal each other's
     WM_HOTKEY, two ink layers with their own titles
@@ -35,6 +36,7 @@ from app.core import agent_sessions as asess  # noqa: E402
 from app.core import codex_runner as crun  # noqa: E402
 from app.core import intent_router as ir  # noqa: E402
 from app.core import live_listener as ll  # noqa: E402
+_REAL_KEYHOOK = ll._KeyHook          # (the fixture replaces it — never installed in tests)
 from app.core import mic_helper  # noqa: E402
 from app.core import speech_out as so  # noqa: E402
 from app.core import supabase_client as sc  # noqa: E402
@@ -508,48 +510,124 @@ def _listener():
     return L, mic, rec
 
 
-# The key hook's events (live_listener._KeyHook → LiveListener._key_event): ("mods", shift=1 | ctrl=2 | Alt/Win=4),
+# The key hook's events (live_listener._KeyHook → LiveListener._key_event): ("mods", shift=1 | ctrl=2 | win=4 | alt=8),
 # ("key", vk), ("click", 0). (Replaces the Mac's real NSEvents.)
-SHIFT, CTRL, OTHER = 1, 2, 4
-VK_TAB, VK_ESC = 0x09, 0x1B
+SHIFT, CTRL, WIN, ALT = 1, 2, 4, 8
+VK_TAB, VK_ESC, VK_S, VK_RIGHT = 0x09, 0x1B, 0x53, 0x27
 
 
 def test_key_events_through_the_listener():
-    """The listener's real handler fed the key hook's events (no keystrokes anywhere)."""
+    """The listener's real handler fed the key hook's events (no keystrokes anywhere). Windows' drawing key is
+    Win + Shift: the Mac's Shift + Ctrl is Windows' keyboard-language switch for many people (2026-11-14)."""
     L, _, _ = _listener()
-    got, late = [], []
+    got, late, taps = [], [], []
     L.draw_tap.connect(lambda: got.append("tap"))
     L.draw_spoiled.connect(lambda: got.append("spoil"))
     L.esc_late.connect(lambda: late.append(1))
+    L.ctrl_tap.connect(lambda: taps.append(1))
 
     def feed(*evs):
         for e in evs:
             L._key_event(e[0], e[1] if len(e) > 1 else 0, 0)
-        _pump(lambda: False, L.DRAW_WAIT_SEC + 0.1)          # (Shift + Ctrl draws after a moment)
+        _pump(lambda: False, L.DRAW_WAIT_SEC + 0.1)          # (Win + Shift draws after a moment)
     L.start()
     try:
-        feed(("mods", SHIFT), ("mods", SHIFT | CTRL))                    # press and hold…
+        feed(("mods", SHIFT), ("mods", SHIFT | WIN))                     # press and hold…
         assert got == ["tap"], got
-        feed(("mods", SHIFT | CTRL), ("mods", SHIFT | CTRL))             # …held: the same state again changes nothing
+        feed(("mods", SHIFT | WIN), ("mods", SHIFT | WIN))               # …held: the same state again changes nothing
         feed(("mods", SHIFT), ("mods", 0))
         assert got == ["tap"], got
-        feed(("mods", CTRL), ("mods", SHIFT | CTRL), ("key", VK_TAB), ("mods", CTRL), ("mods", 0))
-        assert got == ["tap"], "Ctrl+Shift+Tab pressed at once: never drawn, nothing to take back"
-        feed(("mods", CTRL), ("mods", SHIFT | CTRL))
-        feed(("key", VK_TAB), ("mods", CTRL), ("mods", 0))
-        assert got == ["tap", "tap", "spoil"], got                       # Tab only after it drew: taken back
-        feed(("mods", SHIFT), ("mods", SHIFT | CTRL), ("mods", SHIFT | CTRL | OTHER), ("mods", SHIFT), ("mods", 0))
-        assert got == ["tap", "tap", "spoil"], "Shift, then Ctrl + Win (mute): no drawing at all"
-        feed(("mods", OTHER), ("mods", OTHER | SHIFT), ("mods", OTHER | SHIFT | CTRL), ("mods", 0))
-        assert got == ["tap", "tap", "spoil"], "Win / Alt + Shift + Ctrl: not ours"
-        feed(("mods", SHIFT | CTRL), ("click",), ("mods", 0))           # a click doesn't spoil a drawing press
-        assert got == ["tap", "tap", "spoil", "tap"], got
+        feed(("mods", WIN), ("mods", WIN | SHIFT), ("mods", WIN), ("mods", 0))
+        assert got == ["tap", "tap"], "Win first, then Shift: draws too"
+        # Ctrl + Shift / Alt + Shift: Windows' keyboard-language switches - never a drawing (nor a Ctrl tap)
+        feed(("mods", CTRL), ("mods", CTRL | SHIFT), ("mods", CTRL), ("mods", 0))
+        feed(("mods", SHIFT), ("mods", SHIFT | CTRL), ("mods", SHIFT), ("mods", 0))
+        feed(("mods", ALT), ("mods", ALT | SHIFT), ("mods", ALT), ("mods", 0))
+        assert got == ["tap", "tap"] and taps == [], "switching the keyboard language: nothing drawn"
+        feed(("mods", WIN), ("mods", WIN | SHIFT), ("key", VK_S), ("mods", WIN), ("mods", 0))
+        assert got == ["tap", "tap"], "Win+Shift+S (a screenshot) pressed at once: never drawn, nothing to take back"
+        feed(("mods", WIN), ("mods", WIN | SHIFT))
+        feed(("key", VK_RIGHT), ("mods", WIN), ("mods", 0))
+        assert got == ["tap", "tap", "tap", "spoil"], got                # → only after it drew: taken back
+        feed(("mods", SHIFT), ("mods", SHIFT | CTRL), ("mods", SHIFT | CTRL | WIN), ("mods", SHIFT), ("mods", 0))
+        assert got == ["tap", "tap", "tap", "spoil"], "Shift, then Ctrl + Win (mute): no drawing at all"
+        feed(("mods", SHIFT), ("mods", SHIFT | WIN), ("mods", SHIFT | WIN | CTRL), ("mods", SHIFT), ("mods", 0))
+        assert got == ["tap", "tap", "tap", "spoil"], "Shift, then Win + Ctrl (mute, Win a moment first): no drawing"
+        feed(("mods", CTRL), ("mods", CTRL | WIN), ("mods", CTRL | WIN | SHIFT), ("mods", 0))
+        assert got == ["tap", "tap", "tap", "spoil"], "Ctrl + Win, then Shift (voice search): not ours"
+        feed(("mods", ALT), ("mods", ALT | SHIFT), ("mods", ALT | SHIFT | WIN), ("mods", 0))
+        assert got == ["tap", "tap", "tap", "spoil"], "Alt + Shift + Win: not ours"
+        feed(("mods", SHIFT | WIN), ("click",), ("mods", 0))            # a click doesn't spoil a drawing press
+        assert got == ["tap", "tap", "tap", "spoil", "tap"], got
+        assert taps == [], "none of these was a lone Ctrl tap"
         feed(("key", VK_ESC))                                            # Esc with nothing in flight → the page
         assert late == [1], "Esc reaches the listener (→ esc_late for the router stage)"
     finally:
         L.stop()
-    feed(("mods", SHIFT), ("mods", SHIFT | CTRL), ("mods", 0))
-    assert got == ["tap", "tap", "spoil", "tap"], "off: nothing"
+    feed(("mods", SHIFT), ("mods", SHIFT | WIN), ("mods", 0))
+    assert got == ["tap", "tap", "tap", "spoil", "tap"], "off: nothing"
+
+
+def test_key_hook_win_shift_keeps_start_closed(monkeypatch):
+    """The hook itself (its per-key step; no real hook, no keystrokes): Win + Shift on their own press the unassigned
+    mask key once, so letting go of Win doesn't open Start - in either order; the mask key is never reported (it would
+    spoil the drawing it started); Ctrl + Shift (the language switch) sends nothing; the bits are shift 1, ctrl 2,
+    win 4, alt 8."""
+    from app.core import live_listener as ll
+    events, masks = [], []
+    monkeypatch.setattr(_REAL_KEYHOOK, "_send_mask", staticmethod(lambda: masks.append(1)))
+    h = _REAL_KEYHOOK(lambda kind, a, b: events.append((kind, a)))
+    LSHIFT, LCTRL, LWIN, RWIN, LALT, MASK = 0xA0, 0xA2, 0x5B, 0x5C, 0xA4, 0xE8
+    h._handle(LSHIFT, True)
+    h._handle(LWIN, True)
+    assert masks == [1] and events == [("mods", SHIFT), ("mods", SHIFT | WIN)], (masks, events)
+    h._handle(MASK, True)
+    h._handle(MASK, False)                                       # (the mask key arriving back through the hook)
+    h._handle(LWIN, True)                                        # (auto-repeat while held)
+    assert masks == [1] and len(events) == 2, "the mask key and auto-repeat: nothing reported, nothing sent again"
+    h._handle(LWIN, False)
+    h._handle(LSHIFT, False)
+    h._handle(RWIN, True)
+    h._handle(LSHIFT, True)
+    assert masks == [1, 1], "Win first, then Shift (the right Win key too): masked again"
+    h._handle(RWIN, False)
+    h._handle(LSHIFT, False)
+    events.clear()
+    h._handle(LCTRL, True)
+    h._handle(LSHIFT, True)
+    h._handle(LSHIFT, False)
+    h._handle(LCTRL, False)
+    assert masks == [1, 1] and events == [("mods", CTRL), ("mods", CTRL | SHIFT), ("mods", CTRL), ("mods", 0)]
+    h._handle(LALT, True)
+    h._handle(VK_S, True)
+    h._handle(LALT, False)
+    assert events[-3:] == [("mods", ALT), ("key", VK_S), ("mods", 0)], events
+    h._handle(LCTRL, True)
+    h._handle(LSHIFT, True)
+    h._handle(LWIN, True)                                        # (mute: Shift, Ctrl + Win - Ctrl is in it)
+    assert masks == [1, 1], "Ctrl + Shift + Win isn't the drawing key: the dictation shortcut masks its own"
+
+
+def test_win_shift_tap_mask_is_a_real_unassigned_key():
+    """The real mask sender (no hook): it presses the same unassigned key the dictation shortcut uses, and nothing
+    stays down afterwards."""
+    from app.core import live_listener as ll
+    from app.ui import dictation_hotkey as dh
+    assert _REAL_KEYHOOK._MASK == dh._VK_MASK == 0xE8
+    sent = []
+    real = ctypes.windll.user32
+
+    class _U:
+        @staticmethod
+        def keybd_event(vk, scan, flags, extra):
+            sent.append((vk, flags))
+
+    try:
+        ctypes.windll.user32 = _U()
+        _REAL_KEYHOOK._send_mask()
+    finally:
+        ctypes.windll.user32 = real
+    assert sent == [(0xE8, 0), (0xE8, 2)], sent
 
 
 def test_tab_drawing_flow(monkeypatch):
@@ -558,18 +636,18 @@ def test_tab_drawing_flow(monkeypatch):
     L.draw_tap.emit()
     assert not page._drawing, "nothing while Filect Assistant is off"
     page.start()
-    assert "Shift" in page.draw_key.text() and "Ctrl" in page.draw_key.text()
+    assert "Win" in page.draw_key.text() and "Shift" in page.draw_key.text()
     # 1) tap → draw, tap → ready; again → 2 ready; then say it → ONE request with BOTH
     L.draw_tap.emit()
-    assert page._drawing and page._ink.log[:2] == ["begin", ("drawing", True, "press Shift + Ctrl to capture · Esc cancels")]
-    assert ov.notes[-1] == "✏️  Drawing — press Shift + Ctrl to capture"
+    assert page._drawing and page._ink.log[:2] == ["begin", ("drawing", True, "press Win + Shift to capture · Esc cancels")]
+    assert ov.notes[-1] == "✏️  Drawing — press Win + Shift to capture"
     L.speech_confirmed.emit(1)
     assert 1 not in page._captures, "while drawing: no separate screen capture"
     L.draw_tap.emit()
     assert not page._drawing and len(page._drawings) == 1 and ov.notes[-1] == "📸  Drawing ready — say what to do"
     assert page._drawn_timer.isActive()
     L.draw_tap.emit()
-    assert page._drawing and ov.notes[-1] == "✏️  Drawing 2 — press Shift + Ctrl to capture" and not page._drawn_timer.isActive()
+    assert page._drawing and ov.notes[-1] == "✏️  Drawing 2 — press Win + Shift to capture" and not page._drawn_timer.isActive()
     L.draw_tap.emit()
     assert len(page._drawings) == 2 and ov.notes[-1] == "📸  2 drawings ready — say what to do"
     both = list(page._drawings)
@@ -595,7 +673,7 @@ def test_tab_drawing_flow(monkeypatch):
     n = len(AP.calls)
     L.heard.emit(5, "what did I just circle")
     assert len(AP.calls) == n, "not sent while you're still drawing"
-    assert page._rows[5].outcome.text() == "Waiting for your drawing — press Shift + Ctrl to send it"
+    assert page._rows[5].outcome.text() == "Waiting for your drawing — press Win + Shift to send it"
     L.heard.emit(6, "and why is it red")                                # a 2nd sentence, same drawing → one request
     assert 6 not in page._rows and page._rows[5].text.text() == "“what did I just circle and why is it red”"
     L.draw_tap.emit()
@@ -701,7 +779,7 @@ def test_listener_speech_confirmed_and_esc_filter(monkeypatch):
         assert late == []
     finally:
         L2.stop()
-    # the Shift + Ctrl tap → draw_tap, only while on and not while a Filect shortcut holds the mic
+    # the Win + Shift tap → draw_tap, only while on and not while a Filect shortcut holds the mic
     L3, _, _ = _listener()
     taps = []
     L3.draw_tap.connect(lambda: taps.append(1))

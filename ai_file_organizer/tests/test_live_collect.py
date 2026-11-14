@@ -2,7 +2,7 @@
 tests/test_live_collect.py. No real agents, no keystrokes anywhere (the key hook's events are fed straight to the
 listener's handler — the Mac built real NSEvents in-process); your settings.json is never written.
   · the Ctrl tap detector (pure + the hook's events through the listener): a clean lone Ctrl tap only — not Ctrl+C,
-    Ctrl-click, Shift+Ctrl (which still draws), Alt / Win + Ctrl, nor a long hold; not while paused / a Filect
+    Ctrl-click, Shift+Ctrl (the language switch), Win+Shift (draws), Alt / Win + Ctrl, nor a long hold; not while paused / a Filect
     shortcut runs; left or right Ctrl
   · the listener's finish_now: Ctrl ends what you're saying at once (no "send after" wait) → heard as usual
   · the tab: Ctrl Ctrl starts collecting (one Ctrl alone does nothing); what you say + draw is kept, not sent, in ONE
@@ -296,9 +296,9 @@ def test_ctrl_tap_detector():
     assert T.flags(False, False, 6.0) is None, "a release with nothing down"
 
 
-# The key hook's events (live_listener._KeyHook → LiveListener._key_event): ("mods", shift=1 | ctrl=2 | Alt/Win=4),
+# The key hook's events (live_listener._KeyHook → LiveListener._key_event): ("mods", shift=1 | ctrl=2 | win=4 | alt=8),
 # ("key", vk), ("click", 0). (Replaces the Mac's real NSEvents.)
-SHIFT, CTRL, OTHER = 1, 2, 4
+SHIFT, CTRL, WIN, ALT = 1, 2, 4, 8
 VK_C = 0x43
 
 
@@ -312,7 +312,7 @@ def test_ctrl_tap_through_the_listener():
     def feed(*evs):
         for e in evs:
             L._key_event(e[0], e[1] if len(e) > 1 else 0, 0)
-        _pump(lambda: False, L.DRAW_WAIT_SEC + 0.1)          # (Shift + Ctrl draws after a moment)
+        _pump(lambda: False, L.DRAW_WAIT_SEC + 0.1)          # (Win + Shift draws after a moment)
     L.start()
     try:
         feed(("mods", CTRL), ("mods", 0))
@@ -322,11 +322,14 @@ def test_ctrl_tap_through_the_listener():
         feed(("mods", CTRL), ("click",), ("mods", 0))
         assert taps == [1], "Ctrl-click"
         feed(("mods", SHIFT), ("mods", SHIFT | CTRL), ("mods", SHIFT), ("mods", 0))
-        assert taps == [1] and draws == [1], "Shift+Ctrl draws — and isn't a Ctrl tap"
-        feed(("mods", OTHER), ("mods", OTHER | CTRL), ("mods", OTHER), ("mods", 0))
-        assert taps == [1], "Win / Alt + Ctrl (the Mac's fn + ⌃): someone else's"
-        feed(("mods", CTRL), ("mods", CTRL | OTHER), ("mods", CTRL), ("mods", 0))
-        assert taps == [1], "Ctrl then Alt / Win (the Mac's ⌃⌘)"
+        assert taps == [1] and draws == [], "Shift+Ctrl (Windows' language switch): neither a Ctrl tap nor a drawing"
+        feed(("mods", SHIFT), ("mods", SHIFT | WIN), ("mods", SHIFT), ("mods", 0))
+        assert taps == [1] and draws == [1], "Win+Shift draws — and isn't a Ctrl tap"
+        for other in (WIN, ALT):
+            feed(("mods", other), ("mods", other | CTRL), ("mods", other), ("mods", 0))
+            assert taps == [1], "Win / Alt + Ctrl (the Mac's fn + ⌃): someone else's"
+            feed(("mods", CTRL), ("mods", CTRL | other), ("mods", CTRL), ("mods", 0))
+            assert taps == [1], "Ctrl then Alt / Win (the Mac's ⌃⌘)"
         feed(("mods", CTRL))
         time.sleep(ll.CtrlTap.TAP_MAX_SEC + 0.1)                     # (a hold: real time must pass)
         feed(("mods", 0))
@@ -353,13 +356,15 @@ def test_left_and_right_ctrl_are_the_same_key():
     """The Mac's 'the right ⌃ taps too': the Windows hook folds left / right Ctrl (and Shift, Alt, Win) into one bit
     each, so a right-Ctrl tap reaches the listener exactly like a left one. (The hook is built, never installed.)"""
     h = _REAL_KEYHOOK(lambda *a: None)
-    for vk, want in ((0xA2, (False, True, False)), (0xA3, (False, True, False)), (0x11, (False, True, False)),
-                     (0xA0, (True, False, False)), (0xA1, (True, False, False)), (0xA4, (False, False, True)),
-                     (0xA5, (False, False, True)), (0x5B, (False, False, True)), (0x5C, (False, False, True))):
+    F, T = False, True                                                 # (shift, ctrl, win, alt)
+    for vk, want in ((0xA2, (F, T, F, F)), (0xA3, (F, T, F, F)), (0x11, (F, T, F, F)),
+                     (0xA0, (T, F, F, F)), (0xA1, (T, F, F, F)), (0x10, (T, F, F, F)),
+                     (0xA4, (F, F, F, T)), (0xA5, (F, F, F, T)), (0x12, (F, F, F, T)),
+                     (0x5B, (F, F, T, F)), (0x5C, (F, F, T, F))):
         h._down = {vk}
         assert h._mods() == want, (hex(vk), h._mods())
-    h._down = {0xA1, 0xA3}                                             # right Shift + right Ctrl: the drawing key
-    assert h._mods() == (True, True, False)
+    h._down = {0xA1, 0x5C}                                             # right Shift + right Win: the drawing key
+    assert h._mods() == (T, F, T, F)
     assert not h.installed and h._thread is None
 
 
